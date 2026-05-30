@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0c10" />
+  <meta name="description" content="RunClub — GPS 러닝 트래커. 거리, 페이스, 시간, 칼로리를 실시간으로 기록하세요." />
+  <title>RunClub · 러닝 트래커</title>
+
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%83%3C/text%3E%3C/svg%3E" />
+
+  <!-- Leaflet (지도) — 사용자 브라우저에서 로드 -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ===== 헤더 ===== -->
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">🏃</span>
+        <span class="brand-name">Run<b>Club</b></span>
+      </div>
+      <button id="unitToggle" class="ghost-btn" title="단위 변경">km</button>
+    </header>
+
+    <!-- ===== 메인 뷰: 러닝 (Run) ===== -->
+    <main id="view-run" class="view is-active">
+      <div id="map"></div>
+
+      <div class="gps-banner" id="gpsBanner" hidden>
+        <span id="gpsBannerText">GPS 신호를 찾는 중…</span>
+      </div>
+
+      <!-- 실시간 통계 패널 -->
+      <section class="metrics" aria-live="polite">
+        <div class="metric metric--primary">
+          <div class="metric-value" id="mDistance">0.00</div>
+          <div class="metric-label" id="mDistanceUnit">킬로미터</div>
+        </div>
+        <div class="metric-row">
+          <div class="metric">
+            <div class="metric-value" id="mTime">00:00</div>
+            <div class="metric-label">시간</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value" id="mPace">--'--"</div>
+            <div class="metric-label">평균 페이스</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value" id="mCal">0</div>
+            <div class="metric-label">칼로리</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 컨트롤 -->
+      <div class="controls">
+        <button id="btnStart" class="run-btn run-btn--start">시작</button>
+        <button id="btnPause" class="run-btn run-btn--pause" hidden>일시정지</button>
+        <button id="btnResume" class="run-btn run-btn--resume" hidden>재개</button>
+        <button id="btnStop" class="run-btn run-btn--stop" hidden>종료</button>
+        <button id="btnDemo" class="ghost-btn demo-btn" title="GPS 없이 데모 실행">데모</button>
+      </div>
+    </main>
+
+    <!-- ===== 기록 (History) ===== -->
+    <main id="view-history" class="view">
+      <h1 class="view-title">활동 기록</h1>
+      <div id="historyList" class="history-list"></div>
+      <p id="historyEmpty" class="empty-state">아직 기록된 러닝이 없어요.<br />첫 러닝을 시작해보세요! 🏃‍♀️</p>
+    </main>
+
+    <!-- ===== 통계 (Stats) ===== -->
+    <main id="view-stats" class="view">
+      <h1 class="view-title">통계</h1>
+      <div class="stat-cards">
+        <div class="stat-card">
+          <div class="stat-card-value" id="sTotalDistance">0.0</div>
+          <div class="stat-card-label">총 거리 (km)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="sTotalRuns">0</div>
+          <div class="stat-card-label">총 러닝</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="sTotalTime">0분</div>
+          <div class="stat-card-label">총 시간</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="sBestPace">--'--"</div>
+          <div class="stat-card-label">최고 페이스</div>
+        </div>
+      </div>
+
+      <h2 class="section-title">주간 거리</h2>
+      <div class="bar-chart" id="weeklyChart"></div>
+
+      <h2 class="section-title">목표</h2>
+      <div class="goal">
+        <div class="goal-head">
+          <span>주간 목표</span>
+          <span><b id="goalCurrent">0.0</b> / <span id="goalTarget">20</span> km</span>
+        </div>
+        <div class="goal-bar"><div class="goal-bar-fill" id="goalFill"></div></div>
+      </div>
+    </main>
+
+    <!-- ===== 하단 네비게이션 ===== -->
+    <nav class="tab-bar">
+      <button class="tab is-active" data-view="run">
+        <span class="tab-icon">🏃</span><span class="tab-text">러닝</span>
+      </button>
+      <button class="tab" data-view="history">
+        <span class="tab-icon">📜</span><span class="tab-text">기록</span>
+      </button>
+      <button class="tab" data-view="stats">
+        <span class="tab-icon">📊</span><span class="tab-text">통계</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- 러닝 완료 요약 모달 -->
+  <div id="summaryModal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>러닝 완료! 🎉</h2>
+      <div id="summaryMap" class="summary-map"></div>
+      <div class="summary-grid">
+        <div><div class="s-val" id="sumDistance">0.00</div><div class="s-lab">거리 (km)</div></div>
+        <div><div class="s-val" id="sumTime">00:00</div><div class="s-lab">시간</div></div>
+        <div><div class="s-val" id="sumPace">--'--"</div><div class="s-lab">페이스</div></div>
+        <div><div class="s-val" id="sumCal">0</div><div class="s-lab">칼로리</div></div>
+      </div>
+      <div class="modal-actions">
+        <button id="sumDiscard" class="ghost-btn">삭제</button>
+        <button id="sumSave" class="run-btn run-btn--start">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="js/storage.js"></script>
+  <script src="js/tracker.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/stats.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
