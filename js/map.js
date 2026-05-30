@@ -34,8 +34,13 @@
     } else {
       this.marker.setLatLng(latlng);
     }
-    this.map.panTo(latlng, { animate: true, duration: 0.5 });
-    if (!this._followed) { this.map.setView(latlng, 17); this._followed = true; }
+    // 첫 좌표는 즉시 setView로 위치/줌을 맞추고, 이후에는 부드럽게 따라간다
+    if (!this._followed) {
+      this.map.setView(latlng, 17);
+      this._followed = true;
+    } else {
+      this.map.panTo(latlng, { animate: true, duration: 0.5 });
+    }
   };
 
   MapView.prototype.invalidate = function () {
@@ -51,10 +56,11 @@
     L.circleMarker(path[0], { radius: 7, color: '#0b0c10', weight: 2, fillColor: '#00e5ff', fillOpacity: 1 }).addTo(this.map);
     L.circleMarker(path[path.length - 1], { radius: 7, color: '#0b0c10', weight: 2, fillColor: '#c6ff00', fillOpacity: 1 }).addTo(this.map);
     var self = this;
+    // 모달 slideUp 애니메이션(280ms)이 끝난 뒤 크기/경계를 확정한다
     setTimeout(function () {
       self.map.invalidateSize();
       self.map.fitBounds(self.line.getBounds(), { padding: [24, 24] });
-    }, 80);
+    }, 320);
   };
 
   global.MapView = MapView;

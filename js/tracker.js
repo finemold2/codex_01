@@ -41,6 +41,7 @@
     this._timer = null;
     this._demo = null;
     this._lastAcc = null;
+    this.isDemo = false;
   };
 
   Tracker.prototype.isActive = function () {
@@ -50,11 +51,12 @@
   Tracker.prototype.start = function (demo) {
     if (this.isActive()) return;
     this._reset();
+    this.isDemo = !!demo;
     this.startedAt = Date.now();
     this.state = 'running';
     this._segStart = Date.now();
     this._startClock();
-    if (demo) {
+    if (this.isDemo) {
       this._startDemo();
     } else {
       this._startGps();
@@ -65,6 +67,9 @@
     if (this.state !== 'running') return;
     this.state = 'paused';
     if (this._segStart) { this.elapsed += Date.now() - this._segStart; this._segStart = null; }
+    // 일시정지 중에는 GPS/데모 타이머를 완전히 중지해 배터리 소모를 막는다
+    this._stopGps();
+    this._stopDemo();
     this.onStatus(null);
     this._emit();
   };
@@ -73,6 +78,12 @@
     if (this.state !== 'paused') return;
     this.state = 'running';
     this._segStart = Date.now();
+    // 재개 시 추적을 다시 시작 (새 위치는 신호 유실 처리 로직이 거리 누적을 방지)
+    if (this.isDemo) {
+      this._startDemo();
+    } else {
+      this._startGps();
+    }
     this._emit();
   };
 
@@ -148,10 +159,12 @@
   Tracker.prototype._startDemo = function () {
     var self = this;
     this.onStatus('데모 모드 — 가상 러닝 중');
-    // 서울 시청 부근에서 시작
-    var lat = 37.5665, lng = 126.9780;
+    // 재개 시에는 마지막 좌표에서 이어가고, 처음이면 서울 시청 부근에서 시작
+    var last = this.points[this.points.length - 1];
+    var lat = last ? last.lat : 37.5665;
+    var lng = last ? last.lng : 126.9780;
     var heading = Math.random() * Math.PI * 2;
-    this._addPoint({ lat: lat, lng: lng, t: Date.now() });
+    if (!last) this._addPoint({ lat: lat, lng: lng, t: Date.now() });
     this._demo = setInterval(function () {
       if (self.state !== 'running') return;
       // ~3.3 m/s (약 5분/km) 기준 1초 이동 + 약간의 곡선
@@ -173,8 +186,21 @@
     var last = this.points[this.points.length - 1];
     if (last) {
       var d = haversine(last, p);
+      var dT = (p.t - last.t) / 1000;
       if (d < 1) return;          // 1m 미만 떨림 무시
-      if (d > 80) return;         // 비현실적 점프 무시
+
+      var speed = dT > 0 ? d / dT : 0;
+      // 비현실적 점프(80m 초과) 또는 비현실적 속도(45km/h = 12.5m/s 초과) 필터링
+      if (d > 80 || speed > 12.5) {
+        // 15초 이상 경과면 신호 유실 후 재연결로 보고, 거리는 누적하지 않되
+        // 위치는 갱신하여 추적이 영구히 멈추는 것을 방지한다
+        if (dT > 15) {
+          this.points.push(p);
+          this.onPoint([p.lat, p.lng]);
+          this._emit();
+        }
+        return;
+      }
       this.distance += d;
     }
     this.points.push(p);
@@ -200,7 +226,8 @@
     if (hours <= 0) return 0;
     var speedKmh = km / hours;
     var met;
-    if (speedKmh < 6) met = 6;
+    if (speedKmh < 1) met = 0;   // 정지/매우 느린 속도에서는 활동 칼로리 제외
+    else if (speedKmh < 6) met = 6;
     else if (speedKmh < 8) met = 8.3;
     else if (speedKmh < 9.7) met = 9.8;
     else if (speedKmh < 11.3) met = 11;
