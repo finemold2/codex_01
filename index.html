@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>날씨 웹앱</title>
+  <meta name="description" content="Open-Meteo 기반 실시간 날씨, 시간별·일별 예보 웹앱" />
+  <link rel="preconnect" href="https://api.open-meteo.com" />
+  <link rel="preconnect" href="https://geocoding-api.open-meteo.com" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1 class="brand">☁️ 날씨</h1>
+      <form id="search-form" class="search" role="search" autocomplete="off">
+        <input
+          id="search-input"
+          class="search__input"
+          type="text"
+          placeholder="도시 이름을 검색하세요 (예: 서울, 부산, Tokyo)"
+          aria-label="도시 검색"
+        />
+        <button type="submit" class="search__btn" aria-label="검색">검색</button>
+        <button type="button" id="geo-btn" class="search__geo" aria-label="현재 위치">📍</button>
+        <ul id="suggestions" class="suggestions" role="listbox" hidden></ul>
+      </form>
+    </header>
+
+    <main id="content" class="content" aria-live="polite">
+      <div id="status" class="status">도시를 검색하거나 📍 버튼으로 현재 위치의 날씨를 확인하세요.</div>
+
+      <section id="current" class="current card" hidden>
+        <div class="current__head">
+          <div>
+            <h2 id="place" class="current__place"></h2>
+            <p id="current-time" class="current__time"></p>
+          </div>
+          <div class="current__icon" id="current-icon" aria-hidden="true"></div>
+        </div>
+        <div class="current__main">
+          <span id="current-temp" class="current__temp"></span>
+          <div class="current__desc">
+            <span id="current-cond"></span>
+            <span id="current-feels" class="muted"></span>
+          </div>
+        </div>
+        <ul class="metrics">
+          <li class="metric"><span class="metric__label">습도</span><span id="m-humidity" class="metric__value"></span></li>
+          <li class="metric"><span class="metric__label">풍속</span><span id="m-wind" class="metric__value"></span></li>
+          <li class="metric"><span class="metric__label">강수확률</span><span id="m-precip" class="metric__value"></span></li>
+          <li class="metric"><span class="metric__label">체감</span><span id="m-feels" class="metric__value"></span></li>
+        </ul>
+      </section>
+
+      <section id="hourly" class="card" hidden>
+        <h3 class="card__title">시간별 예보 (24시간)</h3>
+        <div id="hourly-scroll" class="hourly"></div>
+      </section>
+
+      <section id="daily" class="card" hidden>
+        <h3 class="card__title">주간 예보 (7일)</h3>
+        <ul id="daily-list" class="daily"></ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      데이터 제공: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
