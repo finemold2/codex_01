@@ -70,6 +70,12 @@ const els = {
 };
 
 /* --------------------------- Helpers --------------------------- */
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 function setStatus(msg, isError = false) {
   els.status.textContent = msg;
   els.status.hidden = !msg;
@@ -95,15 +101,24 @@ function placeLabel(g) {
 
 const KOR_DAYS = ["일", "월", "화", "수", "목", "금", "토"];
 
+/* Open-Meteo가 반환하는 시간 문자열은 항상 "YYYY-MM-DDTHH:mm" 형식이고
+ * timezone=auto 옵션에 따라 대상 지역의 현지 시간 기준이므로 문자열에서 직접 추출 */
 function formatHour(iso) {
-  const d = new Date(iso);
-  return `${d.getHours()}시`;
+  return `${parseInt(iso.slice(11, 13), 10)}시`;
 }
 
 function formatDay(iso, idx) {
-  const d = new Date(iso);
   if (idx === 0) return "오늘";
+  // YYYY-MM-DD 만 들어오면 UTC로 해석되어 타임존에 따라 하루 밀릴 수 있음 → "T00:00"으로 로컬 처리
+  const d = new Date(`${iso}T00:00`);
   return `${d.getMonth() + 1}.${d.getDate()} (${KOR_DAYS[d.getDay()]})`;
+}
+
+function formatCurrentTime(iso) {
+  // "YYYY-MM-DDTHH:mm" 그대로 표시 — 대상 지역 현지 시간이므로 Date 변환 불필요
+  const [date, time] = iso.split("T");
+  const [y, m, d] = date.split("-");
+  return `${y}년 ${parseInt(m, 10)}월 ${parseInt(d, 10)}일 ${time}`;
 }
 
 /* ------------------------- Geocoding --------------------------- */
@@ -118,7 +133,7 @@ async function getForecast(lat, lon) {
   const params = new URLSearchParams({
     latitude: lat,
     longitude: lon,
-    current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation_probability",
+    current: "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
     hourly: "temperature_2m,weather_code,precipitation_probability",
     daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
     timezone: "auto",
@@ -133,11 +148,12 @@ function renderCurrent(label, data) {
   const c = data.current;
   const w = wmo(c.weather_code);
 
+  // current API는 강수확률을 제공하지 않으므로 hourly에서 현재 시각에 해당하는 값을 사용
+  const hourIdx = data.hourly.time.findIndex((t) => t >= c.time);
+  const precipProb = hourIdx >= 0 ? (data.hourly.precipitation_probability?.[hourIdx] ?? 0) : 0;
+
   els.place.textContent = label;
-  els.currentTime.textContent = new Date(c.time).toLocaleString("ko-KR", {
-    dateStyle: "long",
-    timeStyle: "short",
-  });
+  els.currentTime.textContent = formatCurrentTime(c.time);
   els.currentIcon.textContent = w.i;
   els.currentTemp.textContent = `${Math.round(c.temperature_2m)}°`;
   els.currentCond.textContent = w.t;
@@ -145,15 +161,14 @@ function renderCurrent(label, data) {
 
   els.mHumidity.textContent = `${c.relative_humidity_2m}%`;
   els.mWind.textContent = `${c.wind_speed_10m} m/s`;
-  els.mPrecip.textContent = `${c.precipitation_probability ?? 0}%`;
+  els.mPrecip.textContent = `${precipProb}%`;
   els.mFeels.textContent = `${Math.round(c.apparent_temperature)}°`;
 }
 
 function renderHourly(data) {
   const h = data.hourly;
-  const now = Date.now();
-  // 현재 시각 이후 24개 시간 슬롯
-  let start = h.time.findIndex((t) => new Date(t).getTime() >= now);
+  // 대상 지역 현지 시각(data.current.time) 기준 문자열 비교 — 타임존 영향 없음
+  let start = h.time.findIndex((t) => t >= data.current.time);
   if (start < 0) start = 0;
   const end = Math.min(start + 24, h.time.length);
 
@@ -227,6 +242,7 @@ async function searchAndLoad(query) {
 
 /* ----------------------- Autocomplete -------------------------- */
 let suggestTimer = null;
+let suggestController = null;
 let activeIdx = -1;
 let currentSuggestions = [];
 
@@ -245,13 +261,14 @@ function renderSuggestions(results) {
     return;
   }
   els.suggestions.innerHTML = results
-    .map(
-      (g, i) => `
+    .map((g, i) => {
+      const sub = [g.admin1, g.country].filter(Boolean).join(", ");
+      return `
       <li role="option" data-idx="${i}">
-        <span>${g.name}</span>
-        <span class="sug__sub">${[g.admin1, g.country].filter(Boolean).join(", ")}</span>
-      </li>`
-    )
+        <span>${esc(g.name)}</span>
+        <span class="sug__sub">${esc(sub)}</span>
+      </li>`;
+    })
     .join("");
   els.suggestions.hidden = false;
 }
@@ -268,14 +285,23 @@ els.input.addEventListener("input", () => {
   const q = els.input.value.trim();
   clearTimeout(suggestTimer);
   if (q.length < 2) {
+    if (suggestController) suggestController.abort();
     hideSuggestions();
     return;
   }
   suggestTimer = setTimeout(async () => {
+    if (suggestController) suggestController.abort();
+    suggestController = new AbortController();
+    const signal = suggestController.signal;
     try {
-      const results = await geocode(q);
-      renderSuggestions(results);
-    } catch {
+      const url = `${GEO_URL}?name=${encodeURIComponent(q)}&count=5&language=ko&format=json`;
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error(`요청 실패 (HTTP ${res.status})`);
+      const data = await res.json();
+      if (signal.aborted) return;
+      renderSuggestions(data.results || []);
+    } catch (err) {
+      if (err.name === "AbortError") return;
       hideSuggestions();
     }
   }, 300);
