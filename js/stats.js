@@ -13,6 +13,21 @@
       return h > 0 ? h + ':' + pad(m) + ':' + pad(sec) : pad(m) + ':' + pad(sec);
     },
 
+    /** 초/km → 음성 안내용 "5분 30초" */
+    paceSpoken: function (secPerKm) {
+      if (!secPerKm || !isFinite(secPerKm) || secPerKm <= 0) return '측정 중';
+      var m = Math.floor(secPerKm / 60);
+      var s = Math.round(secPerKm % 60);
+      if (s === 60) { m += 1; s = 0; }
+      return m + '분 ' + (s ? s + '초' : '');
+    },
+
+    /** 초 → "5:00" (세그먼트 카운트다운용) */
+    clock: function (sec) {
+      var m = Math.floor(sec / 60), s = sec % 60;
+      return m + ':' + (s < 10 ? '0' + s : s);
+    },
+
     /** 초/km → "M'SS\"" */
     pace: function (secPerKm) {
       if (!secPerKm || !isFinite(secPerKm) || secPerKm <= 0) return "--'--\"";
@@ -87,6 +102,15 @@
     /** 이번 주(최근 7일) 합계 km */
     weekKm: function (runs) {
       return this.last7Days(runs).reduce(function (a, b) { return a + b.km; }, 0);
+    },
+
+    /** 이번 달(1일~) 합계 km — 월간 챌린지용 */
+    monthKm: function (runs) {
+      var now = new Date();
+      var start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+      return runs.reduce(function (a, r) {
+        return a + (r.startedAt >= start ? (r.distanceM || 0) / 1000 : 0);
+      }, 0);
     }
   };
 

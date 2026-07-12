@@ -75,7 +75,7 @@ body {
 }
 .view.is-active { display: flex; flex-direction: column; }
 
-#view-history, #view-stats {
+#view-history, #view-stats, #view-coach, #view-profile {
   overflow-y: auto;
   padding: calc(64px + var(--safe-t)) 18px calc(var(--tab-h) + 24px);
 }
@@ -296,7 +296,254 @@ body {
 .modal-actions .ghost-btn { flex: 1; height: 52px; font-size: 16px; }
 .modal-actions .run-btn { flex: 2; height: 52px; }
 
+/* ===== 러닝 유형 선택 ===== */
+.type-bar {
+  position: absolute;
+  top: calc(62px + var(--safe-t));
+  left: 0; right: 0;
+  z-index: 560;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+}
+.type-bar[hidden] { display: none; }
+.type-chip {
+  background: rgba(13,14,20,0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 8px 18px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.type-chip.is-active { background: var(--accent); color: #0b0c10; border-color: var(--accent); }
+.type-chip--value { background: rgba(198,255,0,0.15); color: var(--accent); border-color: rgba(198,255,0,0.4); }
+
+/* ===== 목표 진행 (러닝 중) ===== */
+.goal-live { margin: 12px 24px 0; pointer-events: none; }
+.goal-live-bar { height: 8px; background: rgba(13,14,20,0.6); border-radius: 999px; overflow: hidden; }
+.goal-live-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; transition: width .5s ease; }
+.goal-live-text { text-align: center; font-size: 12px; color: var(--text-dim); font-weight: 700; margin-top: 5px; text-shadow: 0 1px 8px rgba(0,0,0,0.9); }
+
+/* ===== 가이드 세그먼트 배너 ===== */
+.seg-banner {
+  position: absolute;
+  top: calc(60px + var(--safe-t));
+  left: 14px; right: 14px;
+  z-index: 520;
+  background: rgba(13,14,20,0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius);
+  padding: 14px 16px 12px;
+}
+.seg-now { display: flex; align-items: baseline; justify-content: space-between; }
+.seg-type { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+.seg-type.is-run { color: var(--accent); }
+.seg-type.is-walk { color: var(--accent-2); }
+.seg-remain { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+.seg-progress { height: 6px; background: var(--bg-elev-2); border-radius: 999px; overflow: hidden; margin: 10px 0 8px; }
+.seg-progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 1s linear; }
+.seg-next { font-size: 12px; color: var(--text-dim); font-weight: 600; }
+
+/* ===== 카운트다운 오버레이 ===== */
+.countdown {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(4,5,8,0.88);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+}
+.countdown[hidden] { display: none; }
+.countdown-num {
+  font-size: 180px;
+  font-weight: 900;
+  color: var(--accent);
+  letter-spacing: -6px;
+  animation: countPop .9s ease infinite;
+  text-shadow: 0 0 80px rgba(198,255,0,0.45);
+}
+@keyframes countPop {
+  0% { transform: scale(0.6); opacity: 0; }
+  25% { transform: scale(1.05); opacity: 1; }
+  80% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.2; }
+}
+
+/* ===== 코치 (프로그램) ===== */
+.coach-hero {
+  background: linear-gradient(135deg, #182010, #10131c);
+  border: 1px solid rgba(198,255,0,0.25);
+  border-radius: var(--radius);
+  padding: 22px 18px;
+  text-align: center;
+}
+.coach-hero-emoji { font-size: 40px; }
+.coach-hero-title { font-size: 22px; font-weight: 800; margin-top: 8px; letter-spacing: -0.5px; }
+.coach-hero-desc { font-size: 13px; color: var(--text-dim); margin-top: 6px; line-height: 1.5; }
+.coach-hero-bar { height: 10px; background: var(--bg-elev-2); border-radius: 999px; overflow: hidden; margin-top: 14px; }
+.coach-hero-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; transition: width .5s ease; }
+.coach-hero-progress { font-size: 12px; color: var(--accent); font-weight: 700; margin-top: 8px; }
+
+.week-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.week-card {
+  background: var(--bg-elev);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.week-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+.week-title { font-size: 16px; font-weight: 800; }
+.week-note { font-size: 12px; color: var(--text-dim); }
+.week-sessions { display: flex; gap: 8px; margin-top: 10px; }
+.session-chip {
+  flex: 1;
+  background: var(--bg-elev-2);
+  border: 1px solid rgba(255,255,255,0.06);
+  color: var(--text-dim);
+  border-radius: 12px;
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: center;
+  transition: all .15s ease;
+}
+.session-chip.is-done { background: rgba(198,255,0,0.12); color: var(--accent); border-color: rgba(198,255,0,0.35); }
+.session-chip.is-next { background: var(--accent); color: #0b0c10; border-color: var(--accent); box-shadow: 0 4px 18px rgba(198,255,0,0.3); }
+.session-chip:active { transform: scale(0.95); }
+
+.session-desc { color: var(--text-dim); font-size: 13px; line-height: 1.5; margin-bottom: 14px; }
+.session-segs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; max-height: 30vh; overflow-y: auto; }
+.session-seg {
+  font-size: 12px; font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+}
+.session-seg.is-run { background: rgba(198,255,0,0.14); color: var(--accent); }
+
+/* ===== 스플릿 ===== */
+.splits { margin-bottom: 18px; max-height: 26vh; overflow-y: auto; }
+.splits-title { font-size: 13px; color: var(--text-dim); font-weight: 700; margin-bottom: 8px; }
+.split-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 13px; }
+.split-km { width: 34px; color: var(--text-dim); font-weight: 700; }
+.split-bar-wrap { flex: 1; height: 14px; background: var(--bg-elev-2); border-radius: 6px; overflow: hidden; }
+.split-bar { height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 6px; }
+.split-bar.is-best { background: var(--accent); }
+.split-pace { width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+
+/* ===== 새 업적 배너 (요약) ===== */
+.sum-badges { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.sum-badge {
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(198,255,0,0.1);
+  border: 1px solid rgba(198,255,0,0.3);
+  border-radius: 14px;
+  padding: 10px 14px;
+  animation: badgeIn .4s ease;
+}
+@keyframes badgeIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.sum-badge-icon { font-size: 24px; }
+.sum-badge-name { font-weight: 800; color: var(--accent); font-size: 14px; }
+.sum-badge-desc { font-size: 12px; color: var(--text-dim); }
+
+/* ===== 프로필: 레벨 ===== */
+.level-card {
+  display: flex; align-items: center; gap: 16px;
+  background: var(--bg-elev);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius);
+  padding: 18px 16px;
+}
+.level-ring {
+  width: 72px; height: 72px;
+  border-radius: 50%;
+  border: 4px solid var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 32px;
+  flex-shrink: 0;
+  box-shadow: 0 0 24px rgba(198,255,0,0.25);
+}
+.level-info { flex: 1; min-width: 0; }
+.level-name { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+.level-sub { font-size: 12px; color: var(--text-dim); margin: 4px 0 8px; }
+.level-bar { height: 8px; background: var(--bg-elev-2); border-radius: 999px; overflow: hidden; }
+.level-bar-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 999px; transition: width .5s ease; }
+
+.stat-cards--three { grid-template-columns: 1fr 1fr 1fr; }
+.stat-cards--three .stat-card-value { font-size: 20px; }
+
+/* ===== 업적 그리드 ===== */
+.badge-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.badge {
+  background: var(--bg-elev);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 14px;
+  padding: 12px 6px 10px;
+  text-align: center;
+}
+.badge-icon { font-size: 26px; filter: grayscale(1) opacity(0.35); }
+.badge-name { font-size: 10px; color: var(--text-dim); font-weight: 700; margin-top: 6px; line-height: 1.3; }
+.badge.is-earned { border-color: rgba(198,255,0,0.35); background: rgba(198,255,0,0.06); }
+.badge.is-earned .badge-icon { filter: none; }
+.badge.is-earned .badge-name { color: var(--accent); }
+
+/* ===== 설정 ===== */
+.settings { background: var(--bg-elev); border-radius: var(--radius); overflow: hidden; }
+.setting-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 14px; font-weight: 600;
+}
+.setting-row:last-child { border-bottom: none; }
+.setting-row input[type="number"] {
+  width: 72px;
+  background: var(--bg-elev-2);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+}
+.setting-row input[type="checkbox"] {
+  width: 46px; height: 26px;
+  appearance: none;
+  background: var(--bg-elev-2);
+  border-radius: 999px;
+  position: relative;
+  cursor: pointer;
+  transition: background .2s ease;
+}
+.setting-row input[type="checkbox"]:checked { background: var(--accent); }
+.setting-row input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 20px; height: 20px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform .2s ease;
+}
+.setting-row input[type="checkbox"]:checked::after { transform: translateX(20px); }
+
+/* ===== 상세 모달 ===== */
+.modal-card--tall { max-height: 88vh; overflow-y: auto; }
+.detail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.detail-head h2 { margin: 0; font-size: 18px; }
+
+.goal-bar-fill--alt { background: linear-gradient(90deg, var(--accent-2), #7b61ff); }
+
 @media (max-width: 360px) {
   .metric--primary .metric-value { font-size: 60px; }
   .summary-grid { grid-template-columns: 1fr 1fr; }
+  .badge-grid { grid-template-columns: repeat(3, 1fr); }
 }

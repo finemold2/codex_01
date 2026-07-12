@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#0b0c10" />
-  <meta name="description" content="RunClub — GPS 러닝 트래커. 거리, 페이스, 시간, 칼로리를 실시간으로 기록하세요." />
+  <meta name="description" content="RunClub — GPS 러닝 트래커. 음성 코치, 8주 프로그램, 업적과 레벨까지." />
   <title>RunClub · 러닝 트래커</title>
 
   <link rel="manifest" href="manifest.json" />
@@ -28,10 +28,10 @@
         <span class="brand-mark">🏃</span>
         <span class="brand-name">Run<b>Club</b></span>
       </div>
-      <button id="unitToggle" class="ghost-btn" title="단위 변경">km</button>
+      <button id="voiceToggle" class="ghost-btn" title="음성 코치">🎙️</button>
     </header>
 
-    <!-- ===== 메인 뷰: 러닝 (Run) ===== -->
+    <!-- ===== 러닝 (Run) ===== -->
     <main id="view-run" class="view is-active">
       <div id="map"></div>
 
@@ -39,11 +39,26 @@
         <span id="gpsBannerText">GPS 신호를 찾는 중…</span>
       </div>
 
-      <!-- 실시간 통계 패널 -->
+      <!-- 가이드 세션 세그먼트 배너 -->
+      <div class="seg-banner" id="segBanner" hidden>
+        <div class="seg-now">
+          <span class="seg-type" id="segType">달리기</span>
+          <span class="seg-remain" id="segRemain">1:00</span>
+        </div>
+        <div class="seg-progress"><div class="seg-progress-fill" id="segFill"></div></div>
+        <div class="seg-next" id="segNext">다음: 걷기 2:00</div>
+      </div>
+
+      <!-- 실시간 통계 -->
       <section class="metrics" aria-live="polite">
         <div class="metric metric--primary">
           <div class="metric-value" id="mDistance">0.00</div>
           <div class="metric-label" id="mDistanceUnit">킬로미터</div>
+        </div>
+        <!-- 목표 진행 바 -->
+        <div class="goal-live" id="goalLive" hidden>
+          <div class="goal-live-bar"><div class="goal-live-fill" id="goalLiveFill"></div></div>
+          <div class="goal-live-text" id="goalLiveText">목표 5.00 km</div>
         </div>
         <div class="metric-row">
           <div class="metric">
@@ -61,6 +76,14 @@
         </div>
       </section>
 
+      <!-- 러닝 유형 선택 (대기 상태에서만) -->
+      <div class="type-bar" id="typeBar">
+        <button class="type-chip is-active" data-type="free">자유</button>
+        <button class="type-chip" data-type="distance">거리</button>
+        <button class="type-chip" data-type="time">시간</button>
+        <button class="type-chip type-chip--value" id="goalValueChip" hidden>5K</button>
+      </div>
+
       <!-- 컨트롤 -->
       <div class="controls">
         <button id="btnStart" class="run-btn run-btn--start">시작</button>
@@ -69,6 +92,19 @@
         <button id="btnStop" class="run-btn run-btn--stop" hidden>종료</button>
         <button id="btnDemo" class="ghost-btn demo-btn" title="GPS 없이 데모 실행">데모</button>
       </div>
+    </main>
+
+    <!-- ===== 코치 (가이드 프로그램) ===== -->
+    <main id="view-coach" class="view">
+      <h1 class="view-title">코치</h1>
+      <div class="coach-hero">
+        <div class="coach-hero-emoji">🎧</div>
+        <div class="coach-hero-title" id="programTitle">30분 달리기 도전</div>
+        <div class="coach-hero-desc" id="programDesc">8주 × 주 3회, 24번의 트레이닝으로 쉬지 않고 30분 달리기</div>
+        <div class="coach-hero-bar"><div class="coach-hero-fill" id="programFill"></div></div>
+        <div class="coach-hero-progress" id="programProgress">0 / 24 세션 완료</div>
+      </div>
+      <div id="weekList" class="week-list"></div>
     </main>
 
     <!-- ===== 기록 (History) ===== -->
@@ -95,21 +131,85 @@
           <div class="stat-card-label">총 시간</div>
         </div>
         <div class="stat-card">
-          <div class="stat-card-value" id="sBestPace">--'--"</div>
-          <div class="stat-card-label">최고 페이스</div>
+          <div class="stat-card-value" id="sStreak">0일</div>
+          <div class="stat-card-label">연속 러닝 🔥</div>
         </div>
       </div>
 
       <h2 class="section-title">주간 거리</h2>
       <div class="bar-chart" id="weeklyChart"></div>
 
-      <h2 class="section-title">목표</h2>
+      <h2 class="section-title">목표 & 챌린지</h2>
       <div class="goal">
         <div class="goal-head">
           <span>주간 목표</span>
           <span><b id="goalCurrent">0.0</b> / <span id="goalTarget">20</span> km</span>
         </div>
         <div class="goal-bar"><div class="goal-bar-fill" id="goalFill"></div></div>
+      </div>
+      <div class="goal" style="margin-top:12px">
+        <div class="goal-head">
+          <span id="challengeName">이달의 챌린지</span>
+          <span><b id="challengeCurrent">0.0</b> / <span id="challengeTarget">80</span> km</span>
+        </div>
+        <div class="goal-bar"><div class="goal-bar-fill goal-bar-fill--alt" id="challengeFill"></div></div>
+      </div>
+    </main>
+
+    <!-- ===== 프로필 (레벨/업적/설정) ===== -->
+    <main id="view-profile" class="view">
+      <h1 class="view-title">프로필</h1>
+
+      <div class="level-card" id="levelCard">
+        <div class="level-ring" id="levelRing"><span id="levelEmblem">🏃</span></div>
+        <div class="level-info">
+          <div class="level-name" id="levelName">옐로 레벨</div>
+          <div class="level-sub" id="levelSub">총 0.0 km · 다음 레벨까지 50 km</div>
+          <div class="level-bar"><div class="level-bar-fill" id="levelFill"></div></div>
+        </div>
+      </div>
+
+      <h2 class="section-title">개인 기록 (PR)</h2>
+      <div class="stat-cards stat-cards--three">
+        <div class="stat-card">
+          <div class="stat-card-value" id="prLongest">-</div>
+          <div class="stat-card-label">최장 거리</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="prPace">-</div>
+          <div class="stat-card-label">최고 페이스</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card-value" id="prDuration">-</div>
+          <div class="stat-card-label">최장 시간</div>
+        </div>
+      </div>
+
+      <h2 class="section-title">업적</h2>
+      <div id="badgeGrid" class="badge-grid"></div>
+
+      <h2 class="section-title">설정</h2>
+      <div class="settings">
+        <label class="setting-row">
+          <span>🎙️ 음성 코치</span>
+          <input type="checkbox" id="setVoice" checked />
+        </label>
+        <label class="setting-row">
+          <span>⏸️ 자동 일시정지 (GPS)</span>
+          <input type="checkbox" id="setAutoPause" checked />
+        </label>
+        <label class="setting-row">
+          <span>⚖️ 체중 (kg)</span>
+          <input type="number" id="setWeight" min="30" max="200" value="65" />
+        </label>
+        <label class="setting-row">
+          <span>🎯 주간 목표 (km)</span>
+          <input type="number" id="setWeeklyGoal" min="1" max="200" value="20" />
+        </label>
+        <label class="setting-row">
+          <span>📏 단위</span>
+          <button id="unitToggle" class="ghost-btn">km</button>
+        </label>
       </div>
     </main>
 
@@ -118,19 +218,30 @@
       <button class="tab is-active" data-view="run">
         <span class="tab-icon">🏃</span><span class="tab-text">러닝</span>
       </button>
+      <button class="tab" data-view="coach">
+        <span class="tab-icon">🎧</span><span class="tab-text">코치</span>
+      </button>
       <button class="tab" data-view="history">
         <span class="tab-icon">📜</span><span class="tab-text">기록</span>
       </button>
       <button class="tab" data-view="stats">
         <span class="tab-icon">📊</span><span class="tab-text">통계</span>
       </button>
+      <button class="tab" data-view="profile">
+        <span class="tab-icon">🏅</span><span class="tab-text">프로필</span>
+      </button>
     </nav>
+  </div>
+
+  <!-- 3-2-1 카운트다운 오버레이 -->
+  <div id="countdownOverlay" class="countdown" hidden>
+    <div class="countdown-num" id="countdownNum">3</div>
   </div>
 
   <!-- 러닝 완료 요약 모달 -->
   <div id="summaryModal" class="modal" hidden>
     <div class="modal-card">
-      <h2>러닝 완료! 🎉</h2>
+      <h2 id="summaryTitle">러닝 완료! 🎉</h2>
       <div id="summaryMap" class="summary-map"></div>
       <div class="summary-grid">
         <div><div class="s-val" id="sumDistance">0.00</div><div class="s-lab">거리 (km)</div></div>
@@ -138,9 +249,43 @@
         <div><div class="s-val" id="sumPace">--'--"</div><div class="s-lab">페이스</div></div>
         <div><div class="s-val" id="sumCal">0</div><div class="s-lab">칼로리</div></div>
       </div>
+      <div id="sumBadges" class="sum-badges" hidden></div>
+      <div id="sumSplits" class="splits" hidden></div>
       <div class="modal-actions">
         <button id="sumDiscard" class="ghost-btn">삭제</button>
         <button id="sumSave" class="run-btn run-btn--start">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 러닝 상세 모달 -->
+  <div id="detailModal" class="modal" hidden>
+    <div class="modal-card modal-card--tall">
+      <div class="detail-head">
+        <h2 id="detailDate">러닝 상세</h2>
+        <button id="detailClose" class="ghost-btn">✕</button>
+      </div>
+      <div id="detailMap" class="summary-map"></div>
+      <div class="summary-grid">
+        <div><div class="s-val" id="detDistance">0.00</div><div class="s-lab">거리 (km)</div></div>
+        <div><div class="s-val" id="detTime">00:00</div><div class="s-lab">시간</div></div>
+        <div><div class="s-val" id="detPace">--'--"</div><div class="s-lab">페이스</div></div>
+        <div><div class="s-val" id="detCal">0</div><div class="s-lab">칼로리</div></div>
+      </div>
+      <div id="detSplits" class="splits" hidden></div>
+    </div>
+  </div>
+
+  <!-- 세션 시작 시트 -->
+  <div id="sessionModal" class="modal" hidden>
+    <div class="modal-card">
+      <h2 id="sessionTitle">1주차 · 1회</h2>
+      <p class="session-desc" id="sessionDesc"></p>
+      <div id="sessionSegs" class="session-segs"></div>
+      <div class="modal-actions">
+        <button id="sessionCancel" class="ghost-btn">닫기</button>
+        <button id="sessionDemo" class="ghost-btn">데모로 시작</button>
+        <button id="sessionStart" class="run-btn run-btn--start">시작</button>
       </div>
     </div>
   </div>
@@ -151,6 +296,9 @@
     crossorigin=""
   ></script>
   <script src="js/storage.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/programs.js"></script>
+  <script src="js/achievements.js"></script>
   <script src="js/tracker.js"></script>
   <script src="js/map.js"></script>
   <script src="js/stats.js"></script>

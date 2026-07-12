@@ -1,11 +1,14 @@
 /* sw.js — 앱 셸 오프라인 캐시 (지도 타일은 온라인 필요) */
-var CACHE = 'runclub-v2';
+var CACHE = 'runclub-v3';
 var ASSETS = [
   './',
   './index.html',
   './manifest.json',
   './css/styles.css',
   './js/storage.js',
+  './js/audio.js',
+  './js/programs.js',
+  './js/achievements.js',
   './js/tracker.js',
   './js/map.js',
   './js/stats.js',

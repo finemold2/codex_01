@@ -4,6 +4,8 @@
 
   var RUNS_KEY = 'runclub.runs.v1';
   var PREFS_KEY = 'runclub.prefs.v1';
+  var PROGRAM_KEY = 'runclub.program.v1';
+  var BADGES_KEY = 'runclub.badges.v1';
 
   function read(key, fallback) {
     try {
@@ -50,9 +52,12 @@
       write(RUNS_KEY, runs);
     },
 
-    /** 사용자 설정 (단위, 체중, 주간목표) */
+    /** 사용자 설정 (단위, 체중, 주간목표, 음성코치, 자동일시정지) */
     getPrefs: function () {
-      return read(PREFS_KEY, { unit: 'km', weightKg: 65, weeklyGoalKm: 20 });
+      var d = { unit: 'km', weightKg: 65, weeklyGoalKm: 20, voice: true, autoPause: true };
+      var p = read(PREFS_KEY, {});
+      for (var k in d) { if (d.hasOwnProperty(k) && p[k] === undefined) p[k] = d[k]; }
+      return p;
     },
 
     setPrefs: function (patch) {
@@ -60,6 +65,30 @@
       for (var k in patch) { if (patch.hasOwnProperty(k)) prefs[k] = patch[k]; }
       write(PREFS_KEY, prefs);
       return prefs;
+    },
+
+    /** 가이드 프로그램 진행: {"w1s1": ts, ...} */
+    getProgram: function () {
+      return read(PROGRAM_KEY, {});
+    },
+
+    completeSession: function (sessionId) {
+      var p = read(PROGRAM_KEY, {});
+      if (!p[sessionId]) p[sessionId] = Date.now();
+      write(PROGRAM_KEY, p);
+      return p;
+    },
+
+    /** 획득 업적: {"first-run": ts, ...} */
+    getBadges: function () {
+      return read(BADGES_KEY, {});
+    },
+
+    earnBadges: function (ids) {
+      var b = read(BADGES_KEY, {});
+      ids.forEach(function (id) { if (!b[id]) b[id] = Date.now(); });
+      write(BADGES_KEY, b);
+      return b;
     }
   };
 

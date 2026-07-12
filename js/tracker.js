@@ -24,9 +24,13 @@
   function Tracker(opts) {
     opts = opts || {};
     this.weightKg = opts.weightKg || 65;
+    this.autoPause = opts.autoPause !== false; // GPS 모드 자동 일시정지
     this.onTick = opts.onTick || function () {};
     this.onStatus = opts.onStatus || function () {};
     this.onPoint = opts.onPoint || function () {};
+    this.onSplit = opts.onSplit || function () {};
+    this.onAutoPause = opts.onAutoPause || function () {};
+    this.onAutoResume = opts.onAutoResume || function () {};
     this._reset();
   }
 
@@ -42,6 +46,11 @@
     this._demo = null;
     this._lastAcc = null;
     this.isDemo = false;
+    this.splits = [];            // {km, ms} 1km 구간 기록
+    this._lastSplitElapsed = 0;
+    this._lastSplitKm = 0;
+    this._lastMoveAt = null;     // 자동 일시정지용 마지막 이동 시각
+    this._autoPaused = false;
   };
 
   Tracker.prototype.isActive = function () {
@@ -66,6 +75,7 @@
   Tracker.prototype.pause = function () {
     if (this.state !== 'running') return;
     this.state = 'paused';
+    this._autoPaused = false;
     if (this._segStart) { this.elapsed += Date.now() - this._segStart; this._segStart = null; }
     // 일시정지 중에는 GPS/데모 타이머를 완전히 중지해 배터리 소모를 막는다
     this._stopGps();
@@ -76,15 +86,34 @@
 
   Tracker.prototype.resume = function () {
     if (this.state !== 'paused') return;
+    var wasAuto = this._autoPaused;
     this.state = 'running';
+    this._autoPaused = false;
     this._segStart = Date.now();
-    // 재개 시 추적을 다시 시작 (새 위치는 신호 유실 처리 로직이 거리 누적을 방지)
-    if (this.isDemo) {
-      this._startDemo();
-    } else {
-      this._startGps();
+    this._lastMoveAt = Date.now();
+    // 자동 일시정지는 GPS를 켜둔 채였으므로 재시작 불필요
+    if (!wasAuto) {
+      if (this.isDemo) {
+        this._startDemo();
+      } else {
+        this._startGps();
+      }
     }
     this._emit();
+  };
+
+  /* ---- 자동 일시정지 (GPS 모드에서 10초 이상 정지 시) ---- */
+  Tracker.prototype._maybeAutoPause = function () {
+    if (!this.autoPause || this.isDemo || this.state !== 'running') return;
+    if (!this._lastMoveAt || this.points.length < 2) return;
+    if (Date.now() - this._lastMoveAt > 10000) {
+      this.state = 'paused';
+      this._autoPaused = true;
+      if (this._segStart) { this.elapsed += Date.now() - this._segStart; this._segStart = null; }
+      // GPS는 켜둔다 — 다시 움직이면 자동 재개해야 하므로
+      this.onAutoPause();
+      this._emit();
+    }
   };
 
   /** 종료 → 완성된 run 객체 반환 (저장은 호출자가 결정) */
@@ -106,6 +135,7 @@
       distanceM: s.distance,
       paceSecPerKm: s.pace,
       calories: s.calories,
+      splits: this.splits.slice(),
       path: this.points.map(function (p) { return [p.lat, p.lng]; })
     };
   };
@@ -113,6 +143,7 @@
   Tracker.prototype._startClock = function () {
     var self = this;
     this._timer = setInterval(function () {
+      self._maybeAutoPause();
       if (self.state === 'running') self._emit();
     }, 1000);
   };
@@ -145,7 +176,18 @@
       return;
     }
     this.onStatus(null);
-    this._addPoint({ lat: pos.coords.latitude, lng: pos.coords.longitude, t: Date.now() });
+    var p = { lat: pos.coords.latitude, lng: pos.coords.longitude, t: Date.now() };
+    // 자동 일시정지 중 5m 이상 움직이면 자동 재개
+    if (this._autoPaused) {
+      var last = this.points[this.points.length - 1];
+      if (last && haversine(last, p) >= 5) {
+        this.resume();
+        this.onAutoResume();
+      } else {
+        return;
+      }
+    }
+    this._addPoint(p);
   };
 
   Tracker.prototype._stopGps = function () {
@@ -202,6 +244,19 @@
         return;
       }
       this.distance += d;
+      this._lastMoveAt = Date.now();
+      // 1km 구간(스플릿) 기록
+      var kmNow = Math.floor(this.distance / 1000);
+      if (kmNow > this._lastSplitKm) {
+        var elapsedNow = this.snapshot().elapsed;
+        var split = { km: kmNow, ms: elapsedNow - this._lastSplitElapsed };
+        this.splits.push(split);
+        this._lastSplitKm = kmNow;
+        this._lastSplitElapsed = elapsedNow;
+        this.onSplit(split);
+      }
+    } else {
+      this._lastMoveAt = Date.now();
     }
     this.points.push(p);
     this.onPoint([p.lat, p.lng]);
