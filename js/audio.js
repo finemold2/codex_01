@@ -15,15 +15,23 @@
           if (AC) this._ctx = new AC();
         }
         if (this._ctx && this._ctx.state === 'suspended') this._ctx.resume();
-      } catch (e) { /* 오디오 미지원 */ }
-      // 음성 목록은 비동기 로드되므로 미리 건드려 둔다
-      if (global.speechSynthesis) global.speechSynthesis.getVoices();
+        // 음성 목록은 비동기 로드되므로 미리 건드려 둔다
+        if (global.speechSynthesis && typeof global.speechSynthesis.getVoices === 'function') {
+          global.speechSynthesis.getVoices();
+        }
+      } catch (e) { /* 오디오/TTS 미지원 */ }
     },
 
     _voice: function () {
       if (this._koVoice !== undefined) return this._koVoice;
-      if (!global.speechSynthesis) { this._koVoice = null; return null; }
-      var voices = global.speechSynthesis.getVoices();
+      if (!global.speechSynthesis || typeof global.speechSynthesis.getVoices !== 'function') {
+        this._koVoice = null;
+        return null;
+      }
+      var voices;
+      try { voices = global.speechSynthesis.getVoices(); } catch (e) { this._koVoice = null; return null; }
+      // 목록이 아직 비동기 로드 전이면 캐싱하지 않고 다음 호출에 재시도
+      if (!voices || voices.length === 0) return null;
       var ko = voices.filter(function (v) { return v.lang && v.lang.indexOf('ko') === 0; });
       this._koVoice = ko[0] || null;
       return this._koVoice;

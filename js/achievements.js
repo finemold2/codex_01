@@ -33,7 +33,7 @@
     if (!runs.length) return 0;
     var days = {};
     runs.forEach(function (r) { days[dayKey(r.startedAt)] = true; });
-    var latest = Math.max.apply(null, runs.map(function (r) { return r.startedAt; }));
+    var latest = runs.reduce(function (max, r) { return Math.max(max, r.startedAt); }, 0);
     var count = 0;
     var cursor = new Date(latest);
     while (days[dayKey(cursor.getTime())]) {
