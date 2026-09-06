@@ -2088,7 +2088,6 @@ export class Character {
     this._steer = 0;
     this._rootPitchCur = 0;
     this._rootLiftCur = 0;
-    this._rootYawCur = 0;
     this._pendingDt = 0;
     this._submitToken = -2;
     this._rng = rng;
@@ -2533,19 +2532,13 @@ export class Character {
         pitch = -this._ragFall;
         lift = this._ragLift;
         ry = this._ragYaw;
-        // Track the toppled root so a revive continues from where the body actually lies and
-        // stands it back up, instead of snapping it upright and un-twisting it in one frame.
-        this._rootPitchCur = pitch;
-        this._rootLiftCur = lift;
-        this._rootYawCur = ry;
       } else {
         const clip = this._clip;
         this._rootPitchCur = damp(this._rootPitchCur, clip.rootPitch, 7, dt);
         this._rootLiftCur = damp(this._rootLiftCur, clip.rootLift * s, 7, dt);
-        this._rootYawCur = damp(this._rootYawCur, 0, 7, dt);
         pitch = this._rootPitchCur;
         lift = this._rootLiftCur;
-        ry = this._rootYawCur;
+        ry = 0;
       }
       vec3.set(_sp, this.position[0], this.position[1] + lift, this.position[2]);
       quat.fromEuler(_sq, this.yaw + ry, pitch, 0);
@@ -2664,8 +2657,13 @@ export class Character {
     this._blend = 0;
     this._blendDur = Math.max(0.04, BLEND_TIME[clip.name] || 0.18);
 
-    // `_computeMatrices` has been tracking the toppled root all along, so the body now damps
-    // back to upright from where it lies rather than teleporting onto its feet.
+    // The root goes upright immediately rather than animating a get-up: every caller revives
+    // a body it has just teleported (respawn point, entity pool), so a 0.3 s topple-unwind
+    // would only ever be seen as a whip. The *pose* still cross-fades, so the limbs settle
+    // into the new state instead of snapping.
+    this._rootPitchCur = 0;
+    this._rootLiftCur = 0;
+
     this._ragActive = false;
     this.dead = false;
     this._ragFall = 0;
