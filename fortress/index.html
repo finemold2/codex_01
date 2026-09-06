@@ -2,77 +2,127 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b0c10" />
-  <meta name="description" content="Fortress — AI와 대결하는 턴제 포격 게임. 개인전·팀전 지원." />
-  <title>Fortress · 포트리스 대전</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0b10" />
+  <meta name="description" content="Fortress — AI와 대결하는 턴제 포격 게임. 전차 24종, 개인전·팀전, 클래식 BGM." />
+  <title>Fortress 포격 대전</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%A3%3C/text%3E%3C/svg%3E" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <!-- ===== 메뉴 화면 ===== -->
-  <section id="menu" class="screen">
-    <div class="menu-card">
-      <h1><span class="logo">💣</span> FORTRESS</h1>
-      <p class="sub">AI와 대결하는 턴제 포격 게임 · 개인전 / 팀전</p>
+  <!-- ═══════════════ 1. 설정 화면 ═══════════════ -->
+  <section id="menu" class="screen is-active">
+    <div class="menu-shell">
+      <header class="title-block">
+        <h1><span class="t-glow">FORTRESS</span></h1>
+        <p class="tagline">전차 24종 · 무기 18종 · 개인전과 팀전 · 클래식 배경음악</p>
+      </header>
 
-      <div class="form-row">
-        <label>플레이어 수</label>
-        <div class="seg" id="segCount"></div>
-      </div>
-      <div class="form-row">
-        <label>게임 모드</label>
-        <div class="seg" id="segMode"></div>
-      </div>
-      <div class="form-row">
-        <label>AI 난이도</label>
-        <div class="seg" id="segDiff"></div>
-      </div>
-      <div class="form-row">
-        <label>지형</label>
-        <div class="seg" id="segTheme"></div>
+      <div class="menu-grid">
+        <div class="panel">
+          <h2 class="panel-title">전투 설정</h2>
+          <div class="form-row"><label>플레이어</label><div class="seg" id="segCount"></div></div>
+          <div class="form-row"><label>대전 방식</label><div class="seg" id="segMode"></div></div>
+          <div class="form-row"><label>AI 실력</label><div class="seg" id="segDiff"></div></div>
+          <div class="form-row"><label>전장</label><div class="seg seg--wrap" id="segTheme"></div></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title">참가자</h2>
+            <span id="slotsHint" class="hint"></span>
+          </div>
+          <div id="slots" class="slots"></div>
+          <p id="menuError" class="error" hidden></p>
+        </div>
       </div>
 
-      <div class="slots-head">
-        <span>참가자</span>
-        <span id="slotsHint" class="hint"></span>
+      <div class="menu-actions">
+        <button id="btnToGarage" class="btn btn--primary">전차 선택 →</button>
       </div>
-      <div id="slots" class="slots"></div>
-      <p id="menuError" class="error" hidden></p>
-
-      <button id="btnStart" class="primary">게임 시작</button>
 
       <details class="help">
-        <summary>조작법</summary>
-        <ul>
-          <li><b>← →</b> 이동 (턴마다 이동력 제한) · 방향 전환</li>
-          <li><b>↑ ↓</b> 포신 각도 조절</li>
-          <li><b>Space</b> 누르고 있으면 파워 충전, 놓으면 발사</li>
-          <li><b>PgUp / PgDn</b> 파워 미세 조절, <b>Enter</b> 현재 파워로 발사</li>
-          <li><b>1 ~ 4</b> 또는 <b>Tab</b> 무기 선택</li>
-          <li>바람(상단)이 탄도를 휘게 합니다. 이전 사격의 궤적이 점선으로 남습니다.</li>
-        </ul>
+        <summary>조작법 (PC)</summary>
+        <div class="keys">
+          <div><kbd>←</kbd><kbd>→</kbd><span>이동 · 방향 전환</span></div>
+          <div><kbd>↑</kbd><kbd>↓</kbd><span>포신 각도</span></div>
+          <div><kbd>Space</kbd><span>누르면 파워 충전, 떼면 발사</span></div>
+          <div><kbd>Enter</kbd><span>현재 파워로 즉시 발사</span></div>
+          <div><kbd>PgUp</kbd><kbd>PgDn</kbd><span>파워 미세 조절</span></div>
+          <div><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>Tab</kbd><span>무기 교체</span></div>
+          <div><kbd>M</kbd><span>음소거</span></div>
+          <div><kbd>N</kbd><span>다음 곡</span></div>
+        </div>
+        <p class="help-note">
+          바람이 탄도를 휘게 합니다. 화면 상단 화살표로 세기와 방향을 확인하세요.
+          지형은 포탄에 파괴되고, 발밑이 무너지면 전차가 떨어져 낙하 피해를 입습니다.
+        </p>
       </details>
     </div>
   </section>
 
-  <!-- ===== 게임 화면 ===== -->
-  <section id="game" class="screen" hidden>
+  <!-- ═══════════════ 2. 전차 선택 ═══════════════ -->
+  <section id="garage" class="screen">
+    <header class="garage-top">
+      <button id="btnBackMenu" class="btn btn--ghost">← 설정</button>
+      <div class="pilot-strip" id="pilotStrip"></div>
+      <div class="garage-tools">
+        <button id="btnRandomAll" class="btn btn--ghost">무작위 배정</button>
+        <button id="btnStart" class="btn btn--primary">전투 시작</button>
+      </div>
+    </header>
+
+    <div class="garage-body">
+      <div class="tank-grid-wrap">
+        <div class="filter-row" id="clsFilter"></div>
+        <div class="tank-grid" id="tankGrid"></div>
+      </div>
+
+      <aside class="tank-detail" id="tankDetail">
+        <div class="detail-stage">
+          <canvas id="detailCanvas" width="440" height="260"></canvas>
+          <span class="detail-cls" id="detailCls">표준</span>
+        </div>
+        <h2 id="detailName">새턴</h2>
+        <p id="detailDesc" class="detail-desc"></p>
+        <div class="stat-list" id="detailStats"></div>
+        <h3 class="sub-head">무장</h3>
+        <div class="wpn-list" id="detailWeapons"></div>
+        <button id="btnPick" class="btn btn--primary btn--block">이 전차로 출격</button>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 3. 게임 ═══════════════ -->
+  <section id="game" class="screen">
     <header class="hud-top">
-      <div class="hud-player">
+      <div class="hud-turn">
         <span class="dot" id="hudDot"></span>
         <span id="hudName">-</span>
+        <span id="hudTank" class="tank-tag">-</span>
         <span id="hudTeam" class="badge" hidden></span>
         <span id="hudYou" class="you" hidden>YOU</span>
       </div>
-      <div class="hud-wind" title="바람">
-        <span class="lbl">바람</span>
-        <canvas id="windCanvas" width="120" height="26"></canvas>
-        <span id="hudWind">0</span>
+
+      <div class="hud-center">
+        <div class="wind-box" title="바람">
+          <span class="lbl">바람</span>
+          <canvas id="windCanvas" width="130" height="24"></canvas>
+          <b id="hudWind">0.0</b>
+        </div>
+        <div class="timer-box">
+          <svg viewBox="0 0 36 36" class="timer-ring"><circle cx="18" cy="18" r="15.5" class="ring-bg"/><circle cx="18" cy="18" r="15.5" class="ring-fg" id="timerRing"/></svg>
+          <b id="hudTimer">32</b>
+        </div>
       </div>
-      <div class="hud-round">라운드 <b id="hudRound">1</b></div>
-      <div class="hud-actions">
-        <button id="btnMute" class="icon-btn" title="소리">🔊</button>
+
+      <div class="hud-right">
+        <div class="now-playing" id="nowPlaying" title="배경음악">
+          <span class="np-icon">♪</span><span id="npText">—</span>
+          <button id="btnNextTrack" class="mini-btn" title="다음 곡 (N)">⏭</button>
+        </div>
+        <span class="round-tag">R<b id="hudRound">1</b></span>
+        <button id="btnMute" class="icon-btn" title="음소거 (M)">🔊</button>
         <button id="btnQuit" class="icon-btn" title="메뉴로">✕</button>
       </div>
     </header>
@@ -105,36 +155,51 @@
       </div>
 
       <div class="pad" id="pad">
-        <button class="pad-btn" data-act="left" title="왼쪽 이동">◀</button>
-        <button class="pad-btn" data-act="right" title="오른쪽 이동">▶</button>
-        <button class="pad-btn" data-act="up" title="각도 올리기">▲</button>
-        <button class="pad-btn" data-act="down" title="각도 내리기">▼</button>
         <button class="pad-btn" data-act="pdown" title="파워 −">−</button>
+        <button class="pad-btn" data-act="up" title="각도 ▲">▲</button>
         <button class="pad-btn" data-act="pup" title="파워 +">+</button>
-        <button id="btnFire" class="fire" title="누르고 있으면 충전, 놓으면 발사">발사</button>
+        <button class="pad-btn" data-act="left" title="왼쪽">◀</button>
+        <button class="pad-btn" data-act="down" title="각도 ▼">▼</button>
+        <button class="pad-btn" data-act="right" title="오른쪽">▶</button>
+        <button id="btnFire" class="fire" title="누르면 충전, 떼면 발사">FIRE</button>
       </div>
     </footer>
   </section>
 
-  <!-- ===== 게임 종료 모달 ===== -->
+  <!-- ═══════════════ 결과 ═══════════════ -->
   <div id="gameover" class="modal" hidden>
     <div class="modal-card">
-      <h2 id="goTitle">🏆 승리!</h2>
+      <h2 id="goTitle">승리</h2>
       <p id="goSub" class="sub"></p>
-      <table class="result">
-        <thead><tr><th>#</th><th>이름</th><th>팀</th><th>HP</th><th>격파</th></tr></thead>
-        <tbody id="goBody"></tbody>
-      </table>
+      <div class="result-wrap">
+        <table class="result">
+          <thead><tr><th>#</th><th>이름</th><th>전차</th><th>팀</th><th>HP</th><th>격파</th><th>누적피해</th></tr></thead>
+          <tbody id="goBody"></tbody>
+        </table>
+      </div>
       <div class="modal-actions">
-        <button id="goMenu" class="ghost">메뉴로</button>
-        <button id="goAgain" class="primary">다시하기</button>
+        <button id="goMenu" class="btn btn--ghost">메뉴로</button>
+        <button id="goGarage" class="btn btn--ghost">전차 변경</button>
+        <button id="goAgain" class="btn btn--primary">다시하기</button>
       </div>
     </div>
   </div>
 
+  <script src="js/audiocore.js"></script>
   <script src="js/terrain.js"></script>
+  <script src="js/tanks.js"></script>
+  <script src="js/tankart.js"></script>
+  <script src="js/tankart_set1.js"></script>
+  <script src="js/tankart_set2.js"></script>
+  <script src="js/tankart_set3.js"></script>
   <script src="js/entities.js"></script>
   <script src="js/sfx.js"></script>
+  <script src="js/musiclib1.js"></script>
+  <script src="js/musiclib2.js"></script>
+  <script src="js/musiclib3.js"></script>
+  <script src="js/music.js"></script>
+  <script src="js/gfx.js"></script>
+  <script src="js/fx.js"></script>
   <script src="js/ai.js"></script>
   <script src="js/game.js"></script>
   <script src="js/main.js"></script>
