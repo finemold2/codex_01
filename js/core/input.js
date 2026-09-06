@@ -382,3 +382,469 @@ export class Input {
     this._onTouchEnd = this._handleTouchEnd.bind(this);
     this._onResize = this._handleResize.bind(this);
   }
+
+  // ==================================================================== lifecycle
+
+  /**
+   * Installs every DOM listener. Safe to call twice (the second call is a no-op).
+   * @returns {void}
+   */
+  attach() {
+    if (this.attached) return;
+    const win = this.target;
+    const doc = this.doc;
+    const canvas = this.canvas;
+    if (!win || !doc) return;
+    this.attached = true;
+
+    win.addEventListener('keydown', this._onKeyDown, false);
+    win.addEventListener('keyup', this._onKeyUp, false);
+    win.addEventListener('mouseup', this._onMouseUp, false);
+    win.addEventListener('mousemove', this._onMouseMove, false);
+    win.addEventListener('blur', this._onBlur, false);
+    win.addEventListener('resize', this._onResize, false);
+    doc.addEventListener('visibilitychange', this._onVisibility, false);
+    doc.addEventListener('pointerlockchange', this._onPointerLockChange, false);
+    doc.addEventListener('mozpointerlockchange', this._onPointerLockChange, false);
+    doc.addEventListener('webkitpointerlockchange', this._onPointerLockChange, false);
+    doc.addEventListener('pointerlockerror', this._onPointerLockError, false);
+    doc.addEventListener('mozpointerlockerror', this._onPointerLockError, false);
+    doc.addEventListener('webkitpointerlockerror', this._onPointerLockError, false);
+
+    if (canvas) {
+      canvas.addEventListener('mousedown', this._onMouseDown, false);
+      canvas.addEventListener('wheel', this._onWheel, { passive: false });
+      canvas.addEventListener('contextmenu', this._onContextMenu, false);
+      if (this.enableTouch) {
+        canvas.addEventListener('touchstart', this._onTouchStart, { passive: false });
+        canvas.addEventListener('touchmove', this._onTouchMove, { passive: false });
+        canvas.addEventListener('touchend', this._onTouchEnd, { passive: false });
+        canvas.addEventListener('touchcancel', this._onTouchEnd, { passive: false });
+      }
+      this._updateCanvasRect();
+    }
+  }
+
+  /**
+   * Removes every DOM listener and clears all held state.
+   * @returns {void}
+   */
+  detach() {
+    if (!this.attached) return;
+    const win = this.target;
+    const doc = this.doc;
+    const canvas = this.canvas;
+    this.attached = false;
+
+    if (win) {
+      win.removeEventListener('keydown', this._onKeyDown, false);
+      win.removeEventListener('keyup', this._onKeyUp, false);
+      win.removeEventListener('mouseup', this._onMouseUp, false);
+      win.removeEventListener('mousemove', this._onMouseMove, false);
+      win.removeEventListener('blur', this._onBlur, false);
+      win.removeEventListener('resize', this._onResize, false);
+    }
+    if (doc) {
+      doc.removeEventListener('visibilitychange', this._onVisibility, false);
+      doc.removeEventListener('pointerlockchange', this._onPointerLockChange, false);
+      doc.removeEventListener('mozpointerlockchange', this._onPointerLockChange, false);
+      doc.removeEventListener('webkitpointerlockchange', this._onPointerLockChange, false);
+      doc.removeEventListener('pointerlockerror', this._onPointerLockError, false);
+      doc.removeEventListener('mozpointerlockerror', this._onPointerLockError, false);
+      doc.removeEventListener('webkitpointerlockerror', this._onPointerLockError, false);
+    }
+    if (canvas) {
+      canvas.removeEventListener('mousedown', this._onMouseDown, false);
+      canvas.removeEventListener('wheel', this._onWheel, { passive: false });
+      canvas.removeEventListener('contextmenu', this._onContextMenu, false);
+      canvas.removeEventListener('touchstart', this._onTouchStart, { passive: false });
+      canvas.removeEventListener('touchmove', this._onTouchMove, { passive: false });
+      canvas.removeEventListener('touchend', this._onTouchEnd, { passive: false });
+      canvas.removeEventListener('touchcancel', this._onTouchEnd, { passive: false });
+    }
+    this._clearAll();
+  }
+
+  // ==================================================================== pointer lock
+
+  /**
+   * Asks the browser for pointer lock on the canvas. Must be called from a user gesture;
+   * failures are swallowed and retried on the next canvas click.
+   * @returns {void}
+   */
+  requestPointerLock() {
+    const canvas = this.canvas;
+    if (!canvas || this.pointerLocked) return;
+    if (typeof canvas.requestPointerLock !== 'function') return;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now < this._lockCooldown) return;
+    try {
+      // `unadjustedMovement` disables OS mouse acceleration where supported (Chromium).
+      const res = canvas.requestPointerLock({ unadjustedMovement: true });
+      if (res && typeof res.then === 'function') {
+        res.then(null, () => {
+          try {
+            canvas.requestPointerLock();
+          } catch (err) {
+            this._lockCooldown = now + 1200;
+          }
+        });
+      }
+    } catch (err) {
+      try {
+        canvas.requestPointerLock();
+      } catch (err2) {
+        this._lockCooldown = now + 1200;
+      }
+    }
+  }
+
+  /**
+   * Releases pointer lock if this canvas owns it.
+   * @returns {void}
+   */
+  exitPointerLock() {
+    const doc = this.doc;
+    if (!doc || typeof doc.exitPointerLock !== 'function') return;
+    if (doc.pointerLockElement !== this.canvas) return;
+    try {
+      doc.exitPointerLock();
+    } catch (err) {
+      /* the browser already dropped the lock */
+    }
+    this.pointerLocked = false;
+  }
+
+  // ==================================================================== per-frame
+
+  /**
+   * Polls the gamepad, decays touch state and recomputes the derived axes.
+   * Call once at the start of every game frame, before reading any action.
+   * @param {number} dt frame time in seconds
+   * @returns {void}
+   */
+  update(dt) {
+    const step = dt > 0 && dt < 1 ? dt : 1 / 60;
+    this._pollGamepad(step);
+    this._decayTouch(step);
+    this._computeAxes();
+  }
+
+  /**
+   * Clears the `justPressed` / `justReleased` edges. Call once at the END of every game frame.
+   * @returns {void}
+   */
+  endFrame() {
+    if (this._pressed.size) this._pressed.clear();
+    if (this._released.size) this._released.clear();
+    if (this._touchPressed.size) this._touchPressed.clear();
+    if (this._touchReleased.size) this._touchReleased.clear();
+  }
+
+  // ==================================================================== queries
+
+  /**
+   * Is the action currently held on any bound device?
+   * Returns false for gameplay actions while `blocked` is true.
+   * @param {string} action action name, e.g. 'forward'
+   * @returns {boolean}
+   */
+  isDown(action) {
+    if (this.blocked && !this._uiActions.has(action)) return false;
+    return this._rawDown(action);
+  }
+
+  /**
+   * Did the action go down since the last `endFrame()`? Auto-repeat never triggers this.
+   * @param {string} action action name
+   * @returns {boolean}
+   */
+  justPressed(action) {
+    if (this.blocked && !this._uiActions.has(action)) return false;
+    if (this._touchPressed.has(action)) return true;
+    return this._anyEdge(action, this._pressed);
+  }
+
+  /**
+   * Did the action go up since the last `endFrame()`?
+   * @param {string} action action name
+   * @returns {boolean}
+   */
+  justReleased(action) {
+    if (this.blocked && !this._uiActions.has(action)) return false;
+    if (this._touchReleased.has(action)) return true;
+    return this._anyEdge(action, this._released);
+  }
+
+  /**
+   * Derived analog axis in -1..1. Returns 0 while `blocked`.
+   * `moveY` and `throttle` are positive forward, `moveX` / `steer` positive right,
+   * `lookX` positive right and `lookY` positive up (before `invertY`).
+   * @param {'moveX'|'moveY'|'lookX'|'lookY'|'throttle'|'steer'} name
+   * @returns {number}
+   */
+  axis(name) {
+    if (this.blocked) return 0;
+    return this.rawAxis(name);
+  }
+
+  /**
+   * Same as `axis()` but ignores `blocked` — used by menus that navigate with a stick.
+   * @param {'moveX'|'moveY'|'lookX'|'lookY'|'throttle'|'steer'} name
+   * @returns {number}
+   */
+  rawAxis(name) {
+    const a = this._axes;
+    switch (name) {
+      case 'moveX': return a.moveX;
+      case 'moveY': return a.moveY;
+      case 'lookX': return a.lookX;
+      case 'lookY': return a.lookY;
+      case 'throttle': return a.throttle;
+      case 'steer': return a.steer;
+      default: return 0;
+    }
+  }
+
+  /**
+   * Returns the accumulated look delta in radians and zeroes the accumulator.
+   * Sensitivity and `invertY` are applied here, so callers just do `yaw -= out.x`.
+   * @param {{x:number,y:number}} [out] optional destination, reused to avoid allocation
+   * @returns {{x:number,y:number}} out
+   */
+  consumeMouseDelta(out) {
+    const dst = out || this._deltaOut;
+    const scale = this.mouseScale * this.sensitivity;
+    dst.x = this.mouseDX * scale;
+    dst.y = this.mouseDY * scale * (this.invertY ? -1 : 1);
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    return dst;
+  }
+
+  /**
+   * Returns the accumulated wheel movement in notches and zeroes the accumulator.
+   * Positive means "wheel down / towards the user".
+   * @returns {number}
+   */
+  consumeWheel() {
+    const w = this.wheelDelta;
+    this.wheelDelta = 0;
+    return w;
+  }
+
+  // ==================================================================== bindings
+
+  /**
+   * Rebinds an action. Codes may be keyboard (`KeyboardEvent.code`), 'Mouse0'..'Mouse4' or
+   * 'padA'/'pad0' style gamepad codes; casing is irrelevant.
+   * @param {string} action action name
+   * @param {string|string[]} codes new code list (replaces the old one)
+   * @returns {void}
+   */
+  setBinding(action, codes) {
+    const list = Array.isArray(codes) ? codes : [codes];
+    /** @type {string[]} */
+    const keyCodes = [];
+    /** @type {string[]} */
+    const padCodes = [];
+    for (let i = 0; i < list.length; i++) {
+      const code = Input.normalizeCode(list[i]);
+      if (!code) continue;
+      if (PAD_CODE_INDEX[code] !== undefined) padCodes.push(code);
+      else keyCodes.push(code);
+    }
+    this._bindings[action] = keyCodes;
+    if (padCodes.length) this._gamepadBindings[action] = padCodes;
+    this._rebuildReverseMap();
+  }
+
+  /**
+   * The live keyboard/mouse binding table (`action -> lower-cased code[]`).
+   * Treat it as read-only; change bindings through `setBinding()`.
+   * @returns {Record<string, string[]>}
+   */
+  getBindings() {
+    return this._bindings;
+  }
+
+  /**
+   * The live gamepad binding table (`action -> lower-cased pad code[]`).
+   * @returns {Record<string, string[]>}
+   */
+  getGamepadBindings() {
+    return this._gamepadBindings;
+  }
+
+  /**
+   * Restores the shipped default bindings for every action.
+   * @returns {void}
+   */
+  resetBindings() {
+    const b = this._bindings;
+    for (const key in b) delete b[key];
+    for (const action in DEFAULT_BINDINGS) {
+      const src = DEFAULT_BINDINGS[action];
+      const dst = new Array(src.length);
+      for (let i = 0; i < src.length; i++) dst[i] = Input.normalizeCode(src[i]);
+      b[action] = dst;
+    }
+    const g = this._gamepadBindings;
+    for (const key in g) delete g[key];
+    for (const action in DEFAULT_GAMEPAD_BINDINGS) {
+      const src = DEFAULT_GAMEPAD_BINDINGS[action];
+      const dst = new Array(src.length);
+      for (let i = 0; i < src.length; i++) dst[i] = Input.normalizeCode(src[i]);
+      g[action] = dst;
+    }
+    this._rebuildReverseMap();
+  }
+
+  /**
+   * Registers an event-style hook fired the moment an action goes down.
+   * @param {string} action action name
+   * @param {(action: string, input: Input) => void} callback
+   * @returns {() => void} unsubscribe function
+   */
+  onAction(action, callback) {
+    if (typeof callback !== 'function') return () => {};
+    let list = this._listeners.get(action);
+    if (!list) {
+      list = [];
+      this._listeners.set(action, list);
+    }
+    list.push(callback);
+    let live = true;
+    return () => {
+      if (!live) return;
+      live = false;
+      const i = list.indexOf(callback);
+      if (i >= 0) list.splice(i, 1);
+    };
+  }
+
+  // ==================================================================== touch controls
+
+  /**
+   * Registers (or replaces) an on-screen button hit area. Rect coordinates are CSS pixels relative
+   * to the canvas; set `rect.rel = true` to give them as 0..1 fractions of the canvas size, which
+   * keeps the layout correct on every screen size.
+   * @param {string} id unique id, used to replace or remove the button later
+   * @param {{x:number,y:number,w:number,h:number,rel?:boolean}} rect hit area
+   * @param {string} action action the button drives
+   * @returns {void}
+   */
+  registerTouchButton(id, rect, action) {
+    if (!rect) return;
+    const entry = {
+      id: String(id),
+      action,
+      x: rect.x || 0,
+      y: rect.y || 0,
+      w: rect.w || 0,
+      h: rect.h || 0,
+      rel: !!rect.rel,
+      touchId: -1,
+    };
+    for (let i = 0; i < this._touchButtons.length; i++) {
+      if (this._touchButtons[i].id === entry.id) {
+        this._touchButtons[i] = entry;
+        this.touch.buttons[action] = false;
+        return;
+      }
+    }
+    this._touchButtons.push(entry);
+    this.touch.buttons[action] = false;
+  }
+
+  /**
+   * Removes a previously registered on-screen button.
+   * @param {string} id id passed to `registerTouchButton`
+   * @returns {void}
+   */
+  unregisterTouchButton(id) {
+    const key = String(id);
+    for (let i = 0; i < this._touchButtons.length; i++) {
+      if (this._touchButtons[i].id !== key) continue;
+      const entry = this._touchButtons[i];
+      this.touch.buttons[entry.action] = false;
+      this._touchActions.delete(entry.action);
+      this._touchButtons.splice(i, 1);
+      return;
+    }
+  }
+
+  /**
+   * Drops every registered on-screen button.
+   * @returns {void}
+   */
+  clearTouchButtons() {
+    for (let i = 0; i < this._touchButtons.length; i++) {
+      const entry = this._touchButtons[i];
+      this.touch.buttons[entry.action] = false;
+      this._touchActions.delete(entry.action);
+    }
+    this._touchButtons.length = 0;
+  }
+
+  // ==================================================================== test / debug hooks
+
+  /**
+   * Injects a synthetic key event. Used by the headless smoke test and by replay tooling.
+   * @param {string} code `KeyboardEvent.code` (any casing)
+   * @param {boolean} down true for keydown, false for keyup
+   * @returns {void}
+   */
+  injectKey(code, down) {
+    const norm = Input.normalizeCode(code);
+    if (!norm) return;
+    if (down) this._pressCode(norm, this.keys);
+    else this._releaseCode(norm, this.keys);
+  }
+
+  /**
+   * Injects raw pointer movement in pixels (pointer lock is unavailable in headless runs).
+   * @param {number} dx horizontal pixels
+   * @param {number} dy vertical pixels
+   * @returns {void}
+   */
+  injectMouseDelta(dx, dy) {
+    this.mouseDX += dx;
+    this.mouseDY += dy;
+  }
+
+  /**
+   * Injects a mouse button change, bypassing the DOM.
+   * @param {number} button 0 left, 1 middle, 2 right
+   * @param {boolean} down
+   * @returns {void}
+   */
+  injectMouseButton(button, down) {
+    this._setMouseButton(button | 0, !!down);
+  }
+
+  /**
+   * Human-readable label for a device code, for the controls screen.
+   * @param {string} code device code (any casing)
+   * @returns {string}
+   */
+  static describeCode(code) {
+    const c = Input.normalizeCode(code);
+    if (!c) return '';
+    const label = CODE_LABELS[c];
+    if (label) return label;
+    if (c.length === 4 && c.indexOf('key') === 0) return c.charAt(3).toUpperCase();
+    if (c.indexOf('digit') === 0) return c.slice(5);
+    if (c.indexOf('numpad') === 0) return 'Num ' + c.slice(6);
+    return c.charAt(0).toUpperCase() + c.slice(1);
+  }
+
+  /**
+   * Normalizes any code spelling to the internal lower-case form.
+   * @param {string} code raw code
+   * @returns {string} normalized code, '' when the input was not a string
+   */
+  static normalizeCode(code) {
+    if (typeof code !== 'string' || code.length === 0) return '';
+    return code.toLowerCase();
+  }

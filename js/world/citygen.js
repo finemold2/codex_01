@@ -656,3 +656,396 @@ function insertBox(grid, box) {
   const ez = box.hx * s + box.hz * c;
   grid.insert(box.x - ex, box.z - ez, box.x + ex, box.z + ez, box);
 }
+
+/* ------------------------------------------------------------------ *
+ * Phase 1 — street layout
+ * ------------------------------------------------------------------ */
+
+/**
+ * Computes road widths and centre-line positions, then centres the block grid
+ * on the world origin.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildLayout(ctx) {
+  const { blocksX, blocksZ, blockSize, roadWidth } = ctx;
+  ctx.avenueX = new Set();
+  ctx.avenueZ = new Set();
+  // Two north-south avenues and one east-west avenue, evenly spread and never
+  // on the perimeter so they always cross the whole city.
+  ctx.avenueX.add(Math.max(1, Math.round(blocksX * 0.29)));
+  ctx.avenueX.add(Math.max(2, Math.round(blocksX * 0.79)));
+  ctx.avenueZ.add(Math.max(1, Math.round(blocksZ * 0.5)));
+
+  const roadWX = new Array(blocksX + 1);
+  const roadWZ = new Array(blocksZ + 1);
+  for (let i = 0; i <= blocksX; i++) roadWX[i] = ctx.avenueX.has(i) ? AVENUE_WIDTH : roadWidth;
+  for (let j = 0; j <= blocksZ; j++) roadWZ[j] = ctx.avenueZ.has(j) ? AVENUE_WIDTH : roadWidth;
+
+  const xRoad = new Array(blocksX + 1);
+  const zRoad = new Array(blocksZ + 1);
+  xRoad[0] = roadWX[0] * 0.5;
+  for (let i = 1; i <= blocksX; i++) {
+    xRoad[i] = xRoad[i - 1] + roadWX[i - 1] * 0.5 + blockSize + roadWX[i] * 0.5;
+  }
+  zRoad[0] = roadWZ[0] * 0.5;
+  for (let j = 1; j <= blocksZ; j++) {
+    zRoad[j] = zRoad[j - 1] + roadWZ[j - 1] * 0.5 + blockSize + roadWZ[j] * 0.5;
+  }
+  const spanX = xRoad[blocksX] + roadWX[blocksX] * 0.5;
+  const spanZ = zRoad[blocksZ] + roadWZ[blocksZ] * 0.5;
+  for (let i = 0; i <= blocksX; i++) xRoad[i] -= spanX * 0.5;
+  for (let j = 0; j <= blocksZ; j++) zRoad[j] -= spanZ * 0.5;
+
+  ctx.roadWX = roadWX;
+  ctx.roadWZ = roadWZ;
+  ctx.xRoad = xRoad;
+  ctx.zRoad = zRoad;
+  ctx.gridMinX = xRoad[0] - roadWX[0] * 0.5;
+  ctx.gridMaxX = xRoad[blocksX] + roadWX[blocksX] * 0.5;
+  ctx.gridMinZ = zRoad[0] - roadWZ[0] * 0.5;
+  ctx.gridMaxZ = zRoad[blocksZ] + roadWZ[blocksZ] * 0.5;
+
+  // The sea occupies the south and east margins; the north and west get a thin
+  // service fringe so the perimeter roads are never flush with the bounds.
+  const outer = ctx.seaSide ? WATERFRONT_SETOUT + 74 : 40;
+  ctx.bounds = {
+    min: [ctx.gridMinX - 40, ctx.gridMinZ - 40],
+    max: [ctx.gridMaxX + outer, ctx.gridMaxZ + outer]
+  };
+  ctx.shoreZ = ctx.gridMaxZ + (WATERFRONT_SETOUT - ctx.roadWZ[blocksZ] * 0.5) + 26;
+  ctx.shoreX = ctx.gridMaxX + (WATERFRONT_SETOUT - ctx.roadWX[blocksX] * 0.5) + 26;
+}
+
+/**
+ * Chooses the diagonal boulevard path and the merged superblocks (park,
+ * stadium, rail yard, plaza). Superblocks never swallow a boulevard node.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildSuperblocks(ctx) {
+  const { blocksX, blocksZ } = ctx;
+
+  // Diagonal boulevard: a 1:1 staircase of grid intersections, so every corner
+  // it touches is a real node and the lane graph stitches together naturally.
+  const startI = clamp(Math.round(blocksX * 0.14), 1, blocksX - 3);
+  const steps = Math.min(blocksX - startI, blocksZ);
+  /** @type {number[][]} */
+  ctx.diagNodes = [];
+  for (let k = 0; k <= steps; k++) ctx.diagNodes.push([startI + k, k]);
+  ctx.diagBlocks = new Set();
+  for (let k = 0; k < steps; k++) ctx.diagBlocks.add((startI + k) * 1000 + k);
+
+  ctx.blockOwner = [];
+  for (let i = 0; i < blocksX; i++) {
+    ctx.blockOwner.push(new Array(blocksZ).fill(-1));
+  }
+  ctx.superblocks = [];
+
+  /**
+   * Attempts to merge a rectangle of blocks into a superblock.
+   * @param {number} i0 First block column.
+   * @param {number} j0 First block row.
+   * @param {number} w Width in blocks.
+   * @param {number} h Height in blocks.
+   * @param {string} kind Superblock kind.
+   * @param {string} name Korean display name.
+   * @returns {number} Superblock index, or -1 when rejected.
+   */
+  const tryAdd = (i0, j0, w, h, kind, name) => {
+    const i1 = i0 + w - 1;
+    const j1 = j0 + h - 1;
+    if (i0 < 0 || j0 < 0 || i1 >= blocksX || j1 >= blocksZ) return -1;
+    for (let i = i0; i <= i1; i++) {
+      for (let j = j0; j <= j1; j++) {
+        if (ctx.blockOwner[i][j] !== -1) return -1;
+        if (ctx.diagBlocks.has(i * 1000 + j)) return -1;
+      }
+    }
+    const idx = ctx.superblocks.length;
+    ctx.superblocks.push({ index: idx, i0, j0, i1, j1, kind, name });
+    for (let i = i0; i <= i1; i++) {
+      for (let j = j0; j <= j1; j++) ctx.blockOwner[i][j] = idx;
+    }
+    return idx;
+  };
+
+  ctx.sbPark = tryAdd(Math.round(blocksX * 0.14), Math.round(blocksZ * 0.57), 2, 2, 'park', '네온 공원');
+  ctx.sbStadium = tryAdd(Math.round(blocksX * 0.64), Math.max(1, Math.round(blocksZ * 0.07)), 2, 2, 'stadium', '스타디움');
+  ctx.sbRail = tryAdd(Math.round(blocksX * 0.71), blocksZ - 2, 2, 2, 'railyard', '차량기지');
+  ctx.sbPlaza = tryAdd(Math.round(blocksX * 0.5), Math.round(blocksZ * 0.43), 1, 1, 'plaza', '중앙 광장');
+  ctx.sbMarket = tryAdd(Math.round(blocksX * 0.21), Math.round(blocksZ * 0.21), 1, 1, 'plaza', '북부 시장');
+  ctx.sbParking = tryAdd(Math.round(blocksX * 0.79), Math.round(blocksZ * 0.5), 1, 1, 'parking', '중앙 주차장');
+}
+
+/**
+ * Builds the intersection nodes and the undirected road-edge graph: grid
+ * streets and avenues, the diagonal boulevard, the curved waterfront road and
+ * its connectors.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildNodesAndEdges(ctx) {
+  const { blocksX, blocksZ, xRoad, zRoad, roadWX, roadWZ } = ctx;
+
+  // --- segment existence -------------------------------------------------
+  const segH = [];
+  for (let j = 0; j <= blocksZ; j++) segH.push(new Array(blocksX).fill(true));
+  const segV = [];
+  for (let i = 0; i <= blocksX; i++) segV.push(new Array(blocksZ).fill(true));
+  for (const sb of ctx.superblocks) {
+    for (let i = sb.i0 + 1; i <= sb.i1; i++) {
+      for (let j = sb.j0; j <= sb.j1; j++) segV[i][j] = false;
+    }
+    for (let j = sb.j0 + 1; j <= sb.j1; j++) {
+      for (let i = sb.i0; i <= sb.i1; i++) segH[j][i] = false;
+    }
+  }
+  ctx.segH = segH;
+  ctx.segV = segV;
+
+  ctx.nodes = [];
+  ctx.edges = [];
+
+  /**
+   * Adds an intersection node.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @returns {number} Node id.
+   */
+  const addNode = (x, z) => {
+    const id = ctx.nodes.length;
+    ctx.nodes.push({ id, x, z, roads: [], hasTrafficLight: false, edges: [] });
+    return id;
+  };
+  ctx.addNode = addNode;
+
+  /**
+   * Adds a road edge between two nodes.
+   * @param {number} a Node id A.
+   * @param {number} b Node id B.
+   * @param {number[][]} pts Polyline from A to B (endpoints included).
+   * @param {string} kind 'street'|'avenue'|'boulevard'|'waterfront'|'link'.
+   * @param {number} width Carriageway width.
+   * @param {number} lanesPerDir Lanes per travel direction.
+   * @param {number} speed Speed limit in m/s.
+   * @returns {object} The edge.
+   */
+  const addEdge = (a, b, pts, kind, width, lanesPerDir, speed) => {
+    const e = {
+      id: ctx.edges.length, a, b, pts, kind, width, lanesPerDir, speed,
+      fwdLanes: [], bwdLanes: [], roadIds: []
+    };
+    ctx.edges.push(e);
+    ctx.nodes[a].edges.push(e.id);
+    ctx.nodes[b].edges.push(e.id);
+    return e;
+  };
+  ctx.addEdge = addEdge;
+
+  // --- grid nodes --------------------------------------------------------
+  const gridNode = [];
+  for (let i = 0; i <= blocksX; i++) gridNode.push(new Array(blocksZ + 1).fill(-1));
+  for (let i = 0; i <= blocksX; i++) {
+    for (let j = 0; j <= blocksZ; j++) {
+      const west = i > 0 && segH[j][i - 1];
+      const east = i < blocksX && segH[j][i];
+      const north = j > 0 && segV[i][j - 1];
+      const south = j < blocksZ && segV[i][j];
+      if (west || east || north || south) gridNode[i][j] = addNode(xRoad[i], zRoad[j]);
+    }
+  }
+  ctx.gridNode = gridNode;
+
+  // --- grid edges --------------------------------------------------------
+  for (let j = 0; j <= blocksZ; j++) {
+    const avenue = ctx.avenueZ.has(j);
+    for (let i = 0; i < blocksX; i++) {
+      if (!segH[j][i]) continue;
+      const a = gridNode[i][j];
+      const b = gridNode[i + 1][j];
+      if (a < 0 || b < 0) continue;
+      addEdge(a, b, [[xRoad[i], zRoad[j]], [xRoad[i + 1], zRoad[j]]],
+        avenue ? 'avenue' : 'street', roadWZ[j], avenue ? 3 : 1,
+        avenue ? SPEED_AVENUE : SPEED_STREET);
+    }
+  }
+  for (let i = 0; i <= blocksX; i++) {
+    const avenue = ctx.avenueX.has(i);
+    for (let j = 0; j < blocksZ; j++) {
+      if (!segV[i][j]) continue;
+      const a = gridNode[i][j];
+      const b = gridNode[i][j + 1];
+      if (a < 0 || b < 0) continue;
+      addEdge(a, b, [[xRoad[i], zRoad[j]], [xRoad[i], zRoad[j + 1]]],
+        avenue ? 'avenue' : 'street', roadWX[i], avenue ? 3 : 1,
+        avenue ? SPEED_AVENUE : SPEED_STREET);
+    }
+  }
+
+  // --- diagonal boulevard ------------------------------------------------
+  ctx.boulevardEdges = [];
+  for (let k = 0; k + 1 < ctx.diagNodes.length; k++) {
+    const [i0, j0] = ctx.diagNodes[k];
+    const [i1, j1] = ctx.diagNodes[k + 1];
+    if (i1 > blocksX || j1 > blocksZ) break;
+    const a = gridNode[i0][j0];
+    const b = gridNode[i1][j1];
+    if (a < 0 || b < 0) continue;
+    const e = addEdge(a, b, [[xRoad[i0], zRoad[j0]], [xRoad[i1], zRoad[j1]]],
+      'boulevard', BOULEVARD_WIDTH, 3, SPEED_BOULEVARD);
+    ctx.boulevardEdges.push(e.id);
+  }
+
+  // --- curved waterfront road + connectors -------------------------------
+  ctx.waterfrontEdges = [];
+  ctx.waterfrontNodes = [];
+  if (!ctx.seaSide) return;
+
+  const outZ = ctx.gridMaxZ + WATERFRONT_SETOUT - roadWZ[blocksZ] * 0.5;
+  const outX = ctx.gridMaxX + WATERFRONT_SETOUT - roadWX[blocksX] * 0.5;
+  /** @type {Array<{x:number,z:number,grid:number}>} */
+  const wf = [];
+  for (let i = 0; i <= blocksX; i += 2) {
+    if (gridNode[i][blocksZ] < 0) continue;
+    wf.push({
+      x: xRoad[i],
+      z: outZ + 9 * Math.sin(i * 0.72 + 1.3),
+      grid: gridNode[i][blocksZ]
+    });
+  }
+  if (gridNode[blocksX][blocksZ] >= 0) {
+    wf.push({ x: outX, z: outZ, grid: gridNode[blocksX][blocksZ] });
+  }
+  for (let j = blocksZ - 2; j >= 0; j -= 2) {
+    if (gridNode[blocksX][j] < 0) continue;
+    wf.push({
+      x: outX + 9 * Math.sin(j * 0.72 + 2.1),
+      z: zRoad[j],
+      grid: gridNode[blocksX][j]
+    });
+  }
+
+  const wfIds = [];
+  for (const w of wf) {
+    const id = addNode(w.x, w.z);
+    wfIds.push(id);
+    ctx.waterfrontNodes.push(id);
+  }
+  // Smooth the chain with Catmull-Rom so the promenade genuinely curves.
+  const tmp = [0, 0];
+  for (let k = 0; k + 1 < wf.length; k++) {
+    const p0 = wf[Math.max(0, k - 1)];
+    const p1 = wf[k];
+    const p2 = wf[k + 1];
+    const p3 = wf[Math.min(wf.length - 1, k + 2)];
+    const a0 = [p0.x, p0.z];
+    const a1 = [p1.x, p1.z];
+    const a2 = [p2.x, p2.z];
+    const a3 = [p3.x, p3.z];
+    const pts = [[p1.x, p1.z]];
+    for (let s = 1; s <= 3; s++) {
+      catmullRom(a0, a1, a2, a3, s / 4, tmp);
+      pts.push([tmp[0], tmp[1]]);
+    }
+    pts.push([p2.x, p2.z]);
+    const e = addEdge(wfIds[k], wfIds[k + 1], pts, 'waterfront',
+      WATERFRONT_WIDTH, 2, SPEED_WATERFRONT);
+    ctx.waterfrontEdges.push(e.id);
+  }
+  for (let k = 0; k < wf.length; k++) {
+    const g = ctx.nodes[wf[k].grid];
+    const e = addEdge(wf[k].grid, wfIds[k], [[g.x, g.z], [wf[k].x, wf[k].z]],
+      'link', ctx.roadWidth, 1, SPEED_STREET);
+    ctx.waterfrontEdges.push(e.id);
+  }
+}
+
+/**
+ * Classifies every block, then merges the classification into a
+ * non-overlapping list of rectangular districts with Korean names.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildDistricts(ctx) {
+  const { blocksX, blocksZ } = ctx;
+  const indI0 = Math.round(blocksX * 0.71);
+  const indJ0 = Math.round(blocksZ * 0.64);
+  const downR = blocksX * 0.185;
+  const midR = blocksX * 0.325;
+  const cx = (blocksX - 1) / 2;
+  const cz = (blocksZ - 1) / 2;
+
+  const kinds = [];
+  for (let i = 0; i < blocksX; i++) {
+    kinds.push(new Array(blocksZ).fill('residential'));
+    for (let j = 0; j < blocksZ; j++) {
+      const owner = ctx.blockOwner[i][j];
+      const sb = owner >= 0 ? ctx.superblocks[owner] : null;
+      let kind;
+      if (sb && sb.kind === 'park') {
+        kind = 'park';
+      } else if (sb && sb.kind === 'railyard') {
+        kind = 'industrial';
+      } else if (i >= indI0 && j >= indJ0) {
+        kind = 'industrial';
+      } else if (ctx.seaSide && ((j === blocksZ - 1 && i < indI0) || (i === blocksX - 1 && j < indJ0))) {
+        kind = 'beach';
+      } else {
+        const r = Math.max(Math.abs(i - cx), Math.abs(j - cz));
+        kind = r <= downR ? 'downtown' : r <= midR ? 'midtown' : 'residential';
+      }
+      kinds[i][j] = kind;
+    }
+  }
+  ctx.blockKinds = kinds;
+
+  // Greedy maximal-rectangle merge -> a clean partition of the block grid.
+  const used = [];
+  for (let i = 0; i < blocksX; i++) used.push(new Array(blocksZ).fill(false));
+  ctx.districts = [];
+  ctx.blockDistrict = [];
+  for (let i = 0; i < blocksX; i++) ctx.blockDistrict.push(new Array(blocksZ).fill(0));
+  const counters = {};
+  for (let j = 0; j < blocksZ; j++) {
+    for (let i = 0; i < blocksX; i++) {
+      if (used[i][j]) continue;
+      const kind = kinds[i][j];
+      let i1 = i;
+      while (i1 + 1 < blocksX && !used[i1 + 1][j] && kinds[i1 + 1][j] === kind) i1++;
+      let j1 = j;
+      for (let jj = j + 1; jj < blocksZ; jj++) {
+        let ok = true;
+        for (let ii = i; ii <= i1; ii++) {
+          if (used[ii][jj] || kinds[ii][jj] !== kind) { ok = false; break; }
+        }
+        if (!ok) break;
+        j1 = jj;
+      }
+      for (let ii = i; ii <= i1; ii++) {
+        for (let jj = j; jj <= j1; jj++) used[ii][jj] = true;
+      }
+      const id = ctx.districts.length;
+      counters[kind] = (counters[kind] || 0) + 1;
+      const n = counters[kind];
+      const x0 = i === 0 ? ctx.bounds.min[0] : ctx.xRoad[i];
+      const x1 = i1 === blocksX - 1 ? ctx.bounds.max[0] : ctx.xRoad[i1 + 1];
+      const z0 = j === 0 ? ctx.bounds.min[1] : ctx.zRoad[j];
+      const z1 = j1 === blocksZ - 1 ? ctx.bounds.max[1] : ctx.zRoad[j1 + 1];
+      ctx.districts.push({
+        id,
+        name: n === 1 ? DISTRICT_NAMES[kind] : DISTRICT_NAMES[kind] + ' ' + n,
+        kind,
+        rect: {
+          x: x0, z: z0, w: x1 - x0, d: z1 - z0,
+          x0, z0, x1, z1, cx: (x0 + x1) * 0.5, cz: (z0 + z1) * 0.5
+        },
+        palette: PALETTES[kind].wall.map((c) => [c[0], c[1], c[2]]),
+        blocks: { i0: i, j0: j, i1, j1 }
+      });
+      for (let ii = i; ii <= i1; ii++) {
+        for (let jj = j; jj <= j1; jj++) ctx.blockDistrict[ii][jj] = id;
+      }
+    }
+  }
+}

@@ -446,3 +446,375 @@ export function plane(w, d, segX = 1, segZ = 1, uvScale = [1, 1]) {
   computeBounds(geo);
   return geo;
 }
+
+/**
+ * Builds a UV sphere centered on the origin. The seam column is duplicated so the
+ * 0..1 spherical UVs never wrap, and pole rows keep per-column u to avoid pinching.
+ * @param {number} radius Radius (meters).
+ * @param {number} [widthSeg=16] Segments around the equator (>= 3).
+ * @param {number} [heightSeg=12] Segments from pole to pole (>= 2).
+ * @returns {object} Geometry object.
+ */
+export function sphere(radius, widthSeg = 16, heightSeg = 12) {
+  const ws = Math.max(3, Math.floor(widthSeg));
+  const hs = Math.max(2, Math.floor(heightSeg));
+  const vertCount = (ws + 1) * (hs + 1);
+  const positions = new Float32Array(vertCount * 3);
+  const normals = new Float32Array(vertCount * 3);
+  const uvs = new Float32Array(vertCount * 2);
+  const indices = new Uint32Array(ws * (hs - 1) * 6 + ws * 6);
+
+  let vp = 0;
+  let up = 0;
+  for (let j = 0; j <= hs; j++) {
+    const theta = (j / hs) * Math.PI;
+    const st = Math.sin(theta);
+    const ct = Math.cos(theta);
+    for (let i = 0; i <= ws; i++) {
+      const phi = (i / ws) * TWO_PI;
+      const nx = st * Math.sin(phi);
+      const ny = ct;
+      const nz = st * Math.cos(phi);
+      positions[vp] = nx * radius;
+      positions[vp + 1] = ny * radius;
+      positions[vp + 2] = nz * radius;
+      normals[vp] = nx;
+      normals[vp + 1] = ny;
+      normals[vp + 2] = nz;
+      vp += 3;
+      uvs[up] = i / ws;
+      uvs[up + 1] = 1 - j / hs;
+      up += 2;
+    }
+  }
+  let ip = 0;
+  for (let j = 0; j < hs; j++) {
+    for (let i = 0; i < ws; i++) {
+      const a = j * (ws + 1) + i;
+      const b = a + 1;
+      const c = b + ws + 1;
+      const dIdx = a + ws + 1;
+      if (j !== 0) {
+        indices[ip] = a;
+        indices[ip + 1] = dIdx;
+        indices[ip + 2] = b;
+        ip += 3;
+      }
+      if (j !== hs - 1) {
+        indices[ip] = b;
+        indices[ip + 1] = dIdx;
+        indices[ip + 2] = c;
+        ip += 3;
+      }
+    }
+  }
+
+  const geo = {
+    positions,
+    normals,
+    uvs,
+    indices: ip === indices.length ? indices : indices.slice(0, ip)
+  };
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Builds a cylinder / truncated cone around the Y axis, centered on the origin.
+ * Side UVs are 0..1 around the circumference and 0..1 along the height; caps use a
+ * 0..1 disc projection. A zero radius end produces a proper apex with no cap.
+ * @param {number} rTop Top radius (meters, may be 0).
+ * @param {number} rBottom Bottom radius (meters, may be 0).
+ * @param {number} height Height along Y (meters).
+ * @param {number} [radialSeg=16] Segments around the axis (>= 3).
+ * @param {boolean} [capped=true] Whether to add the end discs.
+ * @returns {object} Geometry object.
+ */
+export function cylinder(rTop, rBottom, height, radialSeg = 16, capped = true) {
+  const seg = Math.max(3, Math.floor(radialSeg));
+  const hh = height * 0.5;
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  const slope = rBottom - rTop;
+  const nScale = 1 / Math.max(TINY, Math.sqrt(slope * slope + height * height));
+  const topApex = Math.abs(rTop) < TINY;
+  const bottomApex = Math.abs(rBottom) < TINY;
+
+  // Side wall: ring 0 at the bottom, ring 1 at the top.
+  for (let j = 0; j < 2; j++) {
+    const r = j === 0 ? rBottom : rTop;
+    const y = j === 0 ? -hh : hh;
+    for (let i = 0; i <= seg; i++) {
+      const phi = (i / seg) * TWO_PI;
+      const sp = Math.sin(phi);
+      const cp = Math.cos(phi);
+      pushVertex(positions, normals, uvs,
+        sp * r, y, cp * r,
+        sp * height * nScale, slope * nScale, cp * height * nScale,
+        i / seg, j);
+    }
+  }
+  const rowB = seg + 1;
+  for (let i = 0; i < seg; i++) {
+    const a = i;
+    const b = i + 1;
+    const d = rowB + i;
+    const c = rowB + i + 1;
+    if (!bottomApex) indices.push(a, b, d);
+    if (!topApex) indices.push(b, c, d);
+  }
+
+  if (capped && !topApex) {
+    const base = positions.length / 3;
+    pushVertex(positions, normals, uvs, 0, hh, 0, 0, 1, 0, 0.5, 0.5);
+    for (let i = 0; i <= seg; i++) {
+      const phi = (i / seg) * TWO_PI;
+      const sp = Math.sin(phi);
+      const cp = Math.cos(phi);
+      pushVertex(positions, normals, uvs,
+        sp * rTop, hh, cp * rTop, 0, 1, 0,
+        0.5 + sp * 0.5, 0.5 + cp * 0.5);
+    }
+    for (let i = 0; i < seg; i++) indices.push(base, base + 1 + i, base + 2 + i);
+  }
+  if (capped && !bottomApex) {
+    const base = positions.length / 3;
+    pushVertex(positions, normals, uvs, 0, -hh, 0, 0, -1, 0, 0.5, 0.5);
+    for (let i = 0; i <= seg; i++) {
+      const phi = (i / seg) * TWO_PI;
+      const sp = Math.sin(phi);
+      const cp = Math.cos(phi);
+      pushVertex(positions, normals, uvs,
+        sp * rBottom, -hh, cp * rBottom, 0, -1, 0,
+        0.5 + sp * 0.5, 0.5 - cp * 0.5);
+    }
+    for (let i = 0; i < seg; i++) indices.push(base, base + 2 + i, base + 1 + i);
+  }
+
+  return fromArrays(positions, normals, uvs, indices, null);
+}
+
+/**
+ * Builds a cone with the apex at +height/2 and the base disc at -height/2.
+ * @param {number} radius Base radius (meters).
+ * @param {number} height Height along Y (meters).
+ * @param {number} [radialSeg=16] Segments around the axis (>= 3).
+ * @returns {object} Geometry object.
+ */
+export function cone(radius, height, radialSeg = 16) {
+  return cylinder(0, radius, height, radialSeg, true);
+}
+
+/**
+ * Builds a capsule aligned to the Y axis and centered on the origin.
+ * `height` is the length of the straight middle section, so the total height is
+ * `height + 2 * radius`. V runs 0..1 along the profile by arc length, so the caps
+ * are not stretched relative to the barrel.
+ * @param {number} radius Cap radius (meters).
+ * @param {number} height Length of the cylindrical middle (meters, >= 0).
+ * @param {number} [radialSeg=12] Segments around the axis (>= 3).
+ * @param {number} [capSeg=6] Rings per hemispherical cap (>= 1).
+ * @returns {object} Geometry object.
+ */
+export function capsule(radius, height, radialSeg = 12, capSeg = 6) {
+  const seg = Math.max(3, Math.floor(radialSeg));
+  const caps = Math.max(1, Math.floor(capSeg));
+  const h = Math.max(0, height);
+  const hh = h * 0.5;
+  const rows = [];
+  // Top hemisphere: theta 0 (north pole) down to PI/2 (top of the barrel).
+  for (let j = 0; j <= caps; j++) {
+    const theta = (j / caps) * (Math.PI * 0.5);
+    rows.push({ st: Math.sin(theta), ct: Math.cos(theta), yOff: hh });
+  }
+  // Bottom hemisphere: theta PI/2 (bottom of the barrel) down to PI (south pole).
+  for (let j = 0; j <= caps; j++) {
+    const theta = Math.PI * 0.5 + (j / caps) * (Math.PI * 0.5);
+    rows.push({ st: Math.sin(theta), ct: Math.cos(theta), yOff: -hh });
+  }
+  const rowCount = rows.length;
+  // Arc length parameterization for v (measured from the south pole upwards).
+  const vs = new Array(rowCount);
+  const total = Math.PI * radius + h;
+  for (let j = 0; j < rowCount; j++) {
+    const r = rows[j];
+    const capArc = Math.acos(Math.max(-1, Math.min(1, r.ct))) * radius;
+    const dist = r.yOff > 0
+      ? (Math.PI * radius * 0.5 + h + (Math.PI * radius * 0.5 - capArc))
+      : (Math.PI * radius - capArc);
+    vs[j] = total > TINY ? dist / total : 0;
+  }
+
+  const vertCount = rowCount * (seg + 1);
+  const positions = new Float32Array(vertCount * 3);
+  const normals = new Float32Array(vertCount * 3);
+  const uvs = new Float32Array(vertCount * 2);
+  const indices = [];
+  let vp = 0;
+  let up = 0;
+  for (let j = 0; j < rowCount; j++) {
+    const row = rows[j];
+    for (let i = 0; i <= seg; i++) {
+      const phi = (i / seg) * TWO_PI;
+      const nx = row.st * Math.sin(phi);
+      const ny = row.ct;
+      const nz = row.st * Math.cos(phi);
+      positions[vp] = nx * radius;
+      positions[vp + 1] = ny * radius + row.yOff;
+      positions[vp + 2] = nz * radius;
+      normals[vp] = nx;
+      normals[vp + 1] = ny;
+      normals[vp + 2] = nz;
+      vp += 3;
+      uvs[up] = i / seg;
+      uvs[up + 1] = vs[j];
+      up += 2;
+    }
+  }
+  const stride = seg + 1;
+  for (let j = 0; j < rowCount - 1; j++) {
+    const northPole = j === 0;
+    const southPole = j === rowCount - 2;
+    for (let i = 0; i < seg; i++) {
+      const a = j * stride + i;
+      const b = a + 1;
+      const d = a + stride;
+      const c = d + 1;
+      if (!northPole) indices.push(a, d, b);
+      if (!southPole) indices.push(b, d, c);
+    }
+  }
+
+  const geo = { positions, normals, uvs, indices: new Uint32Array(indices) };
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Builds a torus lying in the XZ plane (its axis is +Y), centered on the origin.
+ * @param {number} radius Distance from the center to the tube center (meters).
+ * @param {number} tube Tube radius (meters).
+ * @param {number} [radialSeg=16] Segments around the tube cross-section (>= 3).
+ * @param {number} [tubularSeg=24] Segments around the main ring (>= 3).
+ * @returns {object} Geometry object with 0..1 UVs (u around the ring).
+ */
+export function torus(radius, tube, radialSeg = 16, tubularSeg = 24) {
+  const rs = Math.max(3, Math.floor(radialSeg));
+  const ts = Math.max(3, Math.floor(tubularSeg));
+  const vertCount = (rs + 1) * (ts + 1);
+  const positions = new Float32Array(vertCount * 3);
+  const normals = new Float32Array(vertCount * 3);
+  const uvs = new Float32Array(vertCount * 2);
+  const indices = new Uint32Array(rs * ts * 6);
+
+  let vp = 0;
+  let up = 0;
+  for (let i = 0; i <= ts; i++) {
+    const u = (i / ts) * TWO_PI;
+    const su = Math.sin(u);
+    const cu = Math.cos(u);
+    for (let j = 0; j <= rs; j++) {
+      const v = (j / rs) * TWO_PI;
+      const sv = Math.sin(v);
+      const cv = Math.cos(v);
+      const nx = cv * su;
+      const ny = sv;
+      const nz = cv * cu;
+      positions[vp] = su * radius + nx * tube;
+      positions[vp + 1] = ny * tube;
+      positions[vp + 2] = cu * radius + nz * tube;
+      normals[vp] = nx;
+      normals[vp + 1] = ny;
+      normals[vp + 2] = nz;
+      vp += 3;
+      uvs[up] = i / ts;
+      uvs[up + 1] = j / rs;
+      up += 2;
+    }
+  }
+  let ip = 0;
+  const stride = rs + 1;
+  for (let i = 0; i < ts; i++) {
+    for (let j = 0; j < rs; j++) {
+      const a = i * stride + j;
+      const b = a + stride;
+      const c = b + 1;
+      const d = a + 1;
+      indices[ip] = a;
+      indices[ip + 1] = b;
+      indices[ip + 2] = d;
+      indices[ip + 3] = b;
+      indices[ip + 4] = c;
+      indices[ip + 5] = d;
+      ip += 6;
+    }
+  }
+
+  const geo = { positions, normals, uvs, indices };
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Builds a right-triangle prism (ramp) centered on the origin. The ramp surface
+ * rises from y = -h/2 at z = +d/2 to y = +h/2 at z = -d/2, so it faces +Z and +Y.
+ * UVs are world meters (scale 1).
+ * @param {number} w Width along X (meters).
+ * @param {number} h Height along Y (meters).
+ * @param {number} d Depth along Z (meters).
+ * @returns {object} Geometry object (18 vertices, 8 triangles).
+ */
+export function wedge(w, h, d) {
+  const hw = w * 0.5;
+  const hh = h * 0.5;
+  const hd = d * 0.5;
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  const slantLen = Math.sqrt(h * h + d * d);
+  const rampNy = slantLen > TINY ? d / slantLen : 0;
+  const rampNz = slantLen > TINY ? h / slantLen : 1;
+
+  // Bottom face (-Y).
+  let base = 0;
+  pushVertex(positions, normals, uvs, -hw, -hh, -hd, 0, -1, 0, 0, 0);
+  pushVertex(positions, normals, uvs, hw, -hh, -hd, 0, -1, 0, w, 0);
+  pushVertex(positions, normals, uvs, hw, -hh, hd, 0, -1, 0, w, d);
+  pushVertex(positions, normals, uvs, -hw, -hh, hd, 0, -1, 0, 0, d);
+  indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+
+  // Back face (-Z), the tall vertical wall.
+  base = positions.length / 3;
+  pushVertex(positions, normals, uvs, hw, -hh, -hd, 0, 0, -1, 0, 0);
+  pushVertex(positions, normals, uvs, -hw, -hh, -hd, 0, 0, -1, w, 0);
+  pushVertex(positions, normals, uvs, -hw, hh, -hd, 0, 0, -1, w, h);
+  pushVertex(positions, normals, uvs, hw, hh, -hd, 0, 0, -1, 0, h);
+  indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+
+  // Ramp face (+Z / +Y).
+  base = positions.length / 3;
+  pushVertex(positions, normals, uvs, -hw, -hh, hd, 0, rampNy, rampNz, 0, 0);
+  pushVertex(positions, normals, uvs, hw, -hh, hd, 0, rampNy, rampNz, w, 0);
+  pushVertex(positions, normals, uvs, hw, hh, -hd, 0, rampNy, rampNz, w, slantLen);
+  pushVertex(positions, normals, uvs, -hw, hh, -hd, 0, rampNy, rampNz, 0, slantLen);
+  indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+
+  // Right side triangle (+X).
+  base = positions.length / 3;
+  pushVertex(positions, normals, uvs, hw, -hh, hd, 1, 0, 0, 0, 0);
+  pushVertex(positions, normals, uvs, hw, -hh, -hd, 1, 0, 0, d, 0);
+  pushVertex(positions, normals, uvs, hw, hh, -hd, 1, 0, 0, d, h);
+  indices.push(base, base + 1, base + 2);
+
+  // Left side triangle (-X).
+  base = positions.length / 3;
+  pushVertex(positions, normals, uvs, -hw, -hh, -hd, -1, 0, 0, 0, 0);
+  pushVertex(positions, normals, uvs, -hw, -hh, hd, -1, 0, 0, d, 0);
+  pushVertex(positions, normals, uvs, -hw, hh, -hd, -1, 0, 0, 0, h);
+  indices.push(base, base + 1, base + 2);
+
+  return fromArrays(positions, normals, uvs, indices, null);
+}
