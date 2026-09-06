@@ -26,6 +26,13 @@ const START_COUNTDOWN = 3;
 const COOLDOWN_SUCCESS = 30;
 /** Cooldown after a failure / abort. */
 const COOLDOWN_FAIL = 15;
+/** Distance at which a marker has faded out completely (the player is standing in it). */
+const MARKER_FADE_NEAR = 2.2;
+/** Distance beyond which a marker is drawn at full strength. */
+const MARKER_FADE_FAR = 9;
+/** Floor so a marker never disappears entirely while the player is inside it. */
+const MARKER_MIN_ALPHA = 0.12;
+
 /** Metres from the camera beyond which a start marker is not drawn. */
 const MARKER_DRAW_RANGE = 180;
 /** Seconds between objective-line refreshes (the HUD rebuilds its DOM whenever it changes). */
@@ -2299,9 +2306,27 @@ export class MissionManager {
     _mm[13] = y + Math.sin(time * 2.1) * 0.12;
     _mm[14] = z;
     _mm[15] = 1;
-    renderer.submit(meshes.mesh, meshes.material, _mm, meshes.opts);
+
+    // Fade the pillar out as the camera closes in. It is an additive, unlit volume roughly 2 m
+    // across, so at point-blank range it saturates the whole frame to flat white - which is
+    // exactly what the player sees while standing in the marker waiting for the mission to start.
+    const eye = this._viewPoint();
+    let fade = 1;
+    if (eye) {
+      const dx = x - eye[0];
+      const dy = (y + 1) - eye[1];
+      const dz = z - eye[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const t = (dist - MARKER_FADE_NEAR) / (MARKER_FADE_FAR - MARKER_FADE_NEAR);
+      fade = t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
+    }
+    const opts = meshes.opts;
+    const base = meshes.baseAlpha;
+    opts.tint[3] = base * (MARKER_MIN_ALPHA + (1 - MARKER_MIN_ALPHA) * fade);
+    renderer.submit(meshes.mesh, meshes.material, _mm, opts);
     if (typeof renderer.submitLight === 'function') {
-      renderer.submitLight(x, y + 0.6, z, color[0], color[1], color[2], 8 * scale, 2.4);
+      const li = 2.4 * (0.35 + 0.65 * fade);
+      renderer.submitLight(x, y + 0.6, z, color[0], color[1], color[2], 8 * scale, li);
     }
   }
 
@@ -2335,7 +2360,7 @@ export class MissionManager {
           unlit: true,
         })
         : null;
-      this._meshes = { mesh, material, opts: { castShadow: false, tint: [1, 1, 1, 0.65] } };
+      this._meshes = { mesh, material, baseAlpha: 0.65, opts: { castShadow: false, tint: [1, 1, 1, 0.65] } };
     } catch (err) {
       this._meshFailed = true;
     }

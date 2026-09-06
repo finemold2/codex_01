@@ -108,6 +108,36 @@ const POSE_ROOT = BONE_COUNT * POSE_STRIDE;
 
 const D2R = Math.PI / 180;
 
+/**
+ * Largest time step any animation layer is ever integrated with, in seconds.
+ *
+ * `update()` clamps its own `dt`, but the LOD accumulator can still hand a single step of up
+ * to two clamped frames to the layers below. Every damped spring in this module (ragdoll,
+ * recoil) is only unconditionally stable up to a bounded step, so the accumulated step is
+ * clamped here as well and the excess is dropped.
+ */
+const MAX_STEP = 0.1;
+
+/**
+ * Distance a corpse must be moved before an animation request is read as "the owner recycled
+ * this body" rather than "the owner is still driving the dead character". Metres.
+ */
+const RAGDOLL_RECYCLE_DIST = 1;
+
+/**
+ * Returns `v` when it is a finite number, otherwise `fallback`.
+ *
+ * Every value that crosses the module boundary (`dt`, the frame context, `yaw`, `position`)
+ * goes through this: a single non-finite frame from a caller would otherwise latch into the
+ * smoothing accumulators and leave the character permanently un-drawable.
+ * @param {*} v Candidate value.
+ * @param {number} fallback Value to use when `v` is not a finite number.
+ * @returns {number} A finite number.
+ */
+function num(v, fallback) {
+  return typeof v === 'number' && v - v === 0 ? v : fallback;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Keyframe authoring                                                          */
 /* -------------------------------------------------------------------------- */
@@ -1486,7 +1516,8 @@ function buildPartGeometries() {
 
 /**
  * Static part table. `tint` names the colour slot each part samples from the character:
- *   skin | hair | shirt | pants | shoe | accent | sleeve (shirt or skin) | leg (pants or skin).
+ *   skin | hair | shirt | pants | shoe | accent | gear | sleeve (upper arm: shirt or skin) |
+ *   cuff (forearm: shirt only with long sleeves) | leg (shin: pants or skin).
  * `kinds` restricts a part to certain character kinds; `optional` parts are enabled per
  * character. `lodCut` drops the part once the LOD level reaches that value.
  * @type {Array<{id:string, bone:string, tint:string, kinds:?string[], optional:boolean, lodCut:number}>}
@@ -1540,6 +1571,9 @@ const PART_INDEX = (() => {
 
 /** Local muzzle offset in the right-hand bone frame (metres). */
 const MUZZLE_LOCAL = new Float32Array([0, -0.040, -0.272]);
+
+/** Leg parts that show skin instead of trousers when a skirt is worn. */
+const SKIRT_BARE_PARTS = ['thighL', 'thighR', 'shinL', 'shinR'];
 
 /**
  * Builds the shared, immutable character asset set: one geometry, material and instanced
@@ -1804,12 +1838,14 @@ const SHOE_TONES = [
  * @returns {{rest: Float32Array, mats: Float32Array, views: Float32Array[]}} Shape tables.
  */
 function getShape(assets, kind, female, build) {
-  const key = kind + '|' + (female ? 1 : 0) + '|' + Math.round(build * 20);
+  // The key has to be derived from the *clamped* bulk: keying on the raw value stores one
+  // duplicate entry per distinct out-of-range build, and this cache is never evicted.
+  const bulk = clamp(num(build, 1), 0.8, 1.25);
+  const key = kind + '|' + (female ? 1 : 0) + '|' + Math.round(bulk * 20);
   const cached = assets._shapeCache.get(key);
   if (cached) return cached;
 
   const rest = new Float32Array(REST_OFFSET);
-  const bulk = clamp(build, 0.8, 1.25);
   if (female) {
     rest[BONE_INDEX.pelvis * 3 + 1] = 0.985;
     rest[BONE_INDEX.chest * 3 + 1] = 0.150;
@@ -1899,8 +1935,11 @@ export class Character {
    * @param {number[]} [opts.pants] Linear rgb trouser colour.
    * @param {number[]} [opts.hair] Linear rgb hair colour.
    * @param {number[]} [opts.shoe] Linear rgb shoe colour.
-   * @param {number[]} [opts.accent] Linear rgb accent colour (cap, vest, gear).
-   * @param {number} [opts.height=1.8] Total height in metres (1.68 by default for females).
+   * @param {number[]} [opts.accent] Linear rgb accent colour (cap, vest, hood).
+   * @param {number[]} [opts.gearColor] Linear rgb colour of the held weapon.
+   * @param {boolean} [opts.weaponVisible] Draw the weapon in the right hand.
+   * @param {number} [opts.height=1.8] Total height in metres (1.69 by default for females),
+   *   clamped to 0.6 - 2.6 m.
    * @param {string} [opts.kind='civ'] `'civ'` | `'cop'` | `'player'` | `'gangster'`.
    * @param {boolean} [opts.female=false] Use the female skeleton and silhouette.
    * @param {number} [opts.build=1] Bulk multiplier 0.8 .. 1.25.
@@ -1920,17 +1959,21 @@ export class Character {
     this.kind = o.kind || 'civ';
     /** @type {boolean} */
     this.female = !!o.female;
-    /** @type {number} Total height in metres. */
-    this.height = o.height === undefined ? (this.female ? 1.69 : 1.8) : o.height;
+    // A non-finite or absurd height would divide straight through to `scale` and bake NaN (or
+    // a zero-volume rig) into every bone matrix for the lifetime of the character.
+    /** @type {number} Total height in metres, clamped to 0.6 - 2.6 m. */
+    this.height = clamp(num(o.height, this.female ? 1.69 : 1.8), 0.6, 2.6);
     /** @type {number} Uniform rig scale. */
     this.scale = this.height / RIG_HEIGHT;
     /** @type {number} Capsule radius used by gameplay code. */
     this.radius = 0.34 * this.scale;
-    /** @type {number} Bulk multiplier. */
-    this.build = o.build === undefined ? (this.kind === 'cop' ? 1.08 : 1) : o.build;
+    /** @type {number} Bulk multiplier, clamped to the range the silhouette actually spans. */
+    this.build = clamp(num(o.build, this.kind === 'cop' ? 1.08 : 1), 0.8, 1.25);
 
     /** @type {Float32Array} World position of the feet. */
     this.position = vec3.create();
+    /** @type {Float32Array} Last finite position, used to heal a bad write. @private */
+    this._lastPos = vec3.create();
     /** @type {number} Facing yaw; 0 looks down -Z. */
     this.yaw = 0;
     /** @type {Float32Array} World velocity (informational, written by the owner). */
@@ -2023,6 +2066,8 @@ export class Character {
     this._speed = 0;
     this._speedSmooth = 0;
     this._moveBlend = 0;
+    /** Weight of the gait-locked additive layer; 0 unless a gait clip is contributing. */
+    this._gaitWeight = 0;
 
     // ---- procedural layers ------------------------------------------------------------
     this._lookYaw = 0;
@@ -2053,6 +2098,8 @@ export class Character {
     this._ragVel = new Float32Array(BONE_COUNT * POSE_STRIDE);
     this._ragTarget = new Float32Array(POSE_LEN);
     this._ragSettle = 0;
+    /** Where the body collapsed; moving it away from here means the owner recycled it. */
+    this._ragOrigin = vec3.create();
 
     // ---- per-instance draw data ---------------------------------------------------------
     /** @type {Float32Array} rgba tint per part. */
@@ -2113,23 +2160,15 @@ export class Character {
     on('hood', this.kind === 'gangster');
     on('skirt', this.skirt);
     on('weapon', this.weaponVisible);
-    // A skirt replaces the trouser legs above the knee, so slim the thighs a touch by
-    // reusing the skin tint on bare legs.
+    // A skirt covers the trousers, so both the thighs and the shins below it read as bare skin.
     if (this.skirt) {
-      const ti = PART_INDEX.thighL;
-      const tj = PART_INDEX.thighR;
-      const bare = this.shorts ? c.skin : c.skin;
-      for (const idx of [ti, tj]) {
-        this._tints[idx * 4] = bare[0];
-        this._tints[idx * 4 + 1] = bare[1];
-        this._tints[idx * 4 + 2] = bare[2];
-      }
-      const si = PART_INDEX.shinL;
-      const sj = PART_INDEX.shinR;
-      for (const idx of [si, sj]) {
-        this._tints[idx * 4] = c.skin[0];
-        this._tints[idx * 4 + 1] = c.skin[1];
-        this._tints[idx * 4 + 2] = c.skin[2];
+      const skin = c.skin;
+      for (const id of SKIRT_BARE_PARTS) {
+        const idx = PART_INDEX[id];
+        if (idx === undefined) continue;
+        this._tints[idx * 4] = skin[0];
+        this._tints[idx * 4 + 1] = skin[1];
+        this._tints[idx * 4 + 2] = skin[2];
       }
     }
   }
@@ -2141,12 +2180,24 @@ export class Character {
    * @param {Object} [opts] Options.
    * @param {number} [opts.blend] Cross-fade seconds (0.12 - 0.25 by default).
    * @param {boolean} [opts.restart] Restart the clip even if it is already playing.
+   * @param {boolean} [opts.revive] Cancel an active ragdoll instead of ignoring the request.
    * @returns {void}
    */
   setState(name, opts) {
     const clip = CLIPS[name];
     if (!clip) return;
-    if (this._ragActive) return;
+    if (this._ragActive) {
+      // A ragdoll deliberately ignores animation requests, otherwise a corpse would pop back
+      // upright because some unrelated system (a finishing reload, say) asked for 'idle'.
+      // It must not be a dead end either: `playRagdoll` used to be irreversible, which left
+      // a respawned player lying on the ground for the rest of the session and forced ped.js
+      // and police.js to throw every killed body away instead of recycling it. Two ways out:
+      // an explicit `{revive: true}`, or a body the owner has clearly recycled by moving it
+      // somewhere else — nothing ever moves a corpse in place.
+      if (!(opts && opts.revive) && !this._recycled()) return;
+      this.revive(name);
+      return;
+    }
     const restart = !!(opts && opts.restart);
     if (name === this.state && !restart) return;
 
@@ -2198,9 +2249,9 @@ export class Character {
    */
   update(dt, ctx) {
     const c = ctx || _defaultCtx;
-    let d = dt;
+    let d = num(dt, 0);
     if (!(d > 0)) d = 0;
-    else if (d > 0.1) d = 0.1;
+    else if (d > MAX_STEP) d = MAX_STEP;
 
     if (c.lod !== undefined) this.lod = c.lod | 0;
     else if (c.distance !== undefined) {
@@ -2212,21 +2263,38 @@ export class Character {
     this._pendingDt += d;
     const step = this.lod >= 3 ? 0.1 : (this.lod >= 2 ? 0.05 : 0);
     if (step > 0 && this._pendingDt < step) return;
-    const adt = this._pendingDt;
+    // The accumulator can hold up to two clamped frames, so clamp again: the springs below
+    // are only stable up to MAX_STEP, and a 0.2 s step used to make them diverge.
+    let adt = this._pendingDt;
     this._pendingDt = 0;
     if (adt <= 0) return;
+    if (adt > MAX_STEP) adt = MAX_STEP;
+
+    // Heal a non-finite transform written by the owner instead of latching it into every
+    // smoothing accumulator (which used to leave the character invisible for good).
+    const p = this.position;
+    if (Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])) {
+      this._lastPos[0] = p[0]; this._lastPos[1] = p[1]; this._lastPos[2] = p[2];
+    } else {
+      p[0] = this._lastPos[0]; p[1] = this._lastPos[1]; p[2] = this._lastPos[2];
+    }
+    this.yaw = num(this.yaw, this._prevYaw);
 
     this._stateTime += adt;
     this._clipTime += adt;
 
     // --- speed & gait clock ---------------------------------------------------------
     const moveSpeed = c.moveSpeed !== undefined
-      ? Math.abs(c.moveSpeed)
-      : Math.hypot(this.velocity[0], this.velocity[2]);
+      ? Math.abs(num(c.moveSpeed, 0))
+      : Math.hypot(num(this.velocity[0], 0), num(this.velocity[2], 0));
     this._speed = moveSpeed;
     this._speedSmooth = damp(this._speedSmooth, moveSpeed, 9, adt);
     const gaitNow = GAIT_STATES[this.state] === 1;
     const gaitPrev = this._prevClip !== null && this._prevClip.gait;
+    // The hip bob / arm swing additive layer is locked to the gait clock, so it may only run
+    // while a gait clip actually contributes. Driving it off speed alone bled a *frozen*
+    // gait phase into jump, fall and swim as a constant asymmetric twist of the arms and hips.
+    this._gaitWeight = damp(this._gaitWeight, gaitNow || gaitPrev ? 1 : 0, 9, adt);
     if (gaitNow || gaitPrev) {
       const stride = strideFor(this.state, this._speedSmooth) * this.scale;
       const cycles = clamp(moveSpeed / stride, 0.32, 4.6);
@@ -2285,7 +2353,7 @@ export class Character {
    */
   _applyProcedural(adt, c) {
     const pose = this._pose;
-    const mb = this._moveBlend;
+    const mb = this._moveBlend * this._gaitWeight;
 
     // --- lean into turns and into acceleration ------------------------------------
     const dy = wrapAngle(this.yaw - this._prevYaw);
@@ -2320,8 +2388,8 @@ export class Character {
     pose[BONE_INDEX.spine * POSE_STRIDE] += breath * 0.5;
 
     // --- head look-at, spread over chest / neck / head and hard clamped -------------
-    const lookT = clamp(c.lookYaw || 0, -1.9, 1.9);
-    const pitchT = clamp(c.aimPitch || 0, -1.0, 1.0);
+    const lookT = clamp(num(c.lookYaw, 0), -1.9, 1.9);
+    const pitchT = clamp(num(c.aimPitch, 0), -1.0, 1.0);
     this._lookYaw = angleDamp(this._lookYaw, lookT, 10, adt);
     this._lookPitch = damp(this._lookPitch, pitchT, 10, adt);
     const ly = clamp(this._lookYaw, -1.5, 1.5);
@@ -2336,7 +2404,7 @@ export class Character {
     pose[headX] = clamp(pose[headX] + lp * 0.5, -0.95, 0.95);
 
     // --- steering while seated -------------------------------------------------------
-    this._steer = damp(this._steer, clamp(c.steer || 0, -1, 1), 8, adt);
+    this._steer = damp(this._steer, clamp(num(c.steer, 0), -1, 1), 8, adt);
     if (this.state === 'drive' || this.state === 'enter' || this.state === 'exit') {
       const st = this._steer;
       pose[BONE_INDEX.armL * POSE_STRIDE] += st * 0.30;
@@ -2347,8 +2415,13 @@ export class Character {
     }
 
     // --- additive recoil (damped spring, decays back to zero) -------------------------
-    this._recoilVel += (-44 * this._recoil - 10 * this._recoilVel) * adt;
-    this._recoil += this._recoilVel * adt;
+    // Implicit damping: `v = (v + f*dt) / (1 + c*dt)` instead of `v += (f - c*v)*dt`. The
+    // explicit form needs `c*dt < 2` and blew up on the throttled LOD path, leaving the
+    // shoulder rattling against its clamps forever on distant shooters and at low frame rates.
+    let rv = (this._recoilVel - 44 * this._recoil * adt) / (1 + 10 * adt);
+    if (rv > 60) rv = 60; else if (rv < -60) rv = -60;
+    this._recoilVel = rv;
+    this._recoil += rv * adt;
     if (this._recoil > 1.2) this._recoil = 1.2;
     else if (this._recoil < -0.6) this._recoil = -0.6;
     const r = this._recoil;
@@ -2386,7 +2459,10 @@ export class Character {
     for (let i = 0; i < n; i++) {
       const x = a[i];
       const e = wrapAngle(t[i] - x);
-      let vel = v[i] + (e * k - v[i] * dmp) * adt;
+      // Implicit damping. The old explicit step needed `dmp * adt < 2`; once the springs
+      // stiffened up (`dmp` reaches 25 as the body settles) that failed at 10 fps and on the
+      // LOD-3 update path, so distant corpses shook themselves apart instead of lying still.
+      let vel = (v[i] + e * k * adt) / (1 + dmp * adt);
       if (vel > 26) vel = 26; else if (vel < -26) vel = -26;
       v[i] = vel;
       const nx = x + vel * adt;
@@ -2471,7 +2547,11 @@ export class Character {
       const fr = views[BONE_INDEX.footR][13];
       const lowest = fl < fr ? fl : fr;
       const want = this.position[1] + 0.055 * s;
-      const need = clamp((want - lowest) / s, 0, 0.14);
+      // `lowest` was measured with the current lift already folded in, so the measurement is
+      // the *residual* error, not the total one. Damping straight onto it made the loop settle
+      // at half the required lift and left the feet permanently sunk; add the residual to the
+      // lift in flight instead.
+      const need = clamp(this._footLift + (want - lowest) / s, 0, 0.14);
       this._footLift = damp(this._footLift, need, 22, dt);
     } else {
       this._footLift = damp(this._footLift, 0, 14, dt);
@@ -2482,12 +2562,15 @@ export class Character {
    * Collapses the character with a cheap procedural ragdoll: the body topples in the
    * direction of the impulse while every limb follows a damped spring into a slack pose,
    * then it stays lying flat.
+   * Reversible: call {@link Character#revive} to hand the body back to the animation system
+   * (respawning the player, recycling a ped or a cop into its pool).
    * @param {ArrayLike<number>} [impulse] World-space impulse / velocity of the killing blow.
    * @returns {void}
    */
   playRagdoll(impulse) {
     if (this._ragActive) return;
     this._ragActive = true;
+    vec3.copy(this._ragOrigin, this.position);
     this.dead = true;
     this.state = 'die';
     this._clip = CLIPS.die;
@@ -2515,6 +2598,67 @@ export class Character {
       this._ragAngle[i] = this._pose[i];
       this._ragVel[i] = (this._rng.next() * 2 - 1) * kick;
     }
+  }
+
+  /**
+   * True once the owner has moved a collapsed body away from where it fell, which is the
+   * signal that the record has been respawned or handed back to an entity pool. Nothing in
+   * the game moves a corpse in place, so this never fires for a body that is merely dead.
+   * @returns {boolean} Whether this ragdoll has been recycled.
+   * @private
+   */
+  _recycled() {
+    const p = this.position;
+    const o = this._ragOrigin;
+    const dx = p[0] - o[0];
+    const dy = p[1] - o[1];
+    const dz = p[2] - o[2];
+    return dx * dx + dy * dy + dz * dz > RAGDOLL_RECYCLE_DIST * RAGDOLL_RECYCLE_DIST;
+  }
+
+  /**
+   * Cancels an active ragdoll and hands the body back to the animation system, cross-fading
+   * out of the pose the corpse is actually in and letting the toppled root stand back up over
+   * the next fraction of a second (no pop).
+   *
+   * This is the counterpart to {@link Character#playRagdoll}. Without it a killed character
+   * was a dead end: a respawned player stayed face-down for the rest of the session, and
+   * `ped.js` / `police.js` had to drop every killed body on the floor instead of recycling it
+   * into their character pools.
+   * @param {string} [state='idle'] State to wake up in.
+   * @returns {void}
+   */
+  revive(state) {
+    const clip = CLIPS[state] || CLIPS.idle;
+
+    // Fade from what is on screen right now, not from the death clip's timeline.
+    this._snap.set(this._pose);
+    this._useSnap = true;
+    this._prevClip = null;
+    this.state = clip.name;
+    this._clip = clip;
+    this._clipTime = 0;
+    this._stateTime = 0;
+    this._blend = 0;
+    this._blendDur = Math.max(0.04, BLEND_TIME[clip.name] || 0.18);
+
+    // Carry the toppled root over as the starting point so `_computeMatrices` damps it back
+    // to upright instead of teleporting the body onto its feet.
+    this._rootPitchCur = -this._ragFall;
+    this._rootLiftCur = this._ragLift;
+
+    this._ragActive = false;
+    this.dead = false;
+    this._ragFall = 0;
+    this._ragFallVel = 0;
+    this._ragLift = 0;
+    this._ragYaw = 0;
+    this._ragSettle = 0;
+    this._ragAngle.fill(0);
+    this._ragVel.fill(0);
+    this._footLift = 0;
+    this._recoil = 0;
+    this._recoilVel = 0;
   }
 
   /**

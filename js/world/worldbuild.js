@@ -593,6 +593,66 @@ const WHITE = [1, 1, 1];
 const _patchGlow = { emissiveStrength: 1, albedo: [1, 1, 1] };
 const _patchUv = { uvOffset: null };
 
+/**
+ * Axis-aligned bounds of the whole road network, padded by one carriageway width so the
+ * outermost kerbs are inside it. Falls back to the city bounds for a road-less city.
+ * @param {object} city CityData.
+ * @param {number[]} out Destination `[minX, minZ, maxX, maxZ]`.
+ * @returns {number[]} out
+ */
+function roadBounds(city, out) {
+  out[0] = Infinity; out[1] = Infinity; out[2] = -Infinity; out[3] = -Infinity;
+  const roads = city.roads || [];
+  for (let i = 0; i < roads.length; i++) {
+    const r = roads[i];
+    if (r.ax - r.width < out[0]) out[0] = r.ax - r.width;
+    if (r.bx - r.width < out[0]) out[0] = r.bx - r.width;
+    if (r.az - r.width < out[1]) out[1] = r.az - r.width;
+    if (r.bz - r.width < out[1]) out[1] = r.bz - r.width;
+    if (r.ax + r.width > out[2]) out[2] = r.ax + r.width;
+    if (r.bx + r.width > out[2]) out[2] = r.bx + r.width;
+    if (r.az + r.width > out[3]) out[3] = r.az + r.width;
+    if (r.bz + r.width > out[3]) out[3] = r.bz + r.width;
+  }
+  if (!isFinite(out[0])) {
+    out[0] = city.bounds.min[0]; out[1] = city.bounds.min[1];
+    out[2] = city.bounds.max[0]; out[3] = city.bounds.max[1];
+  }
+  return out;
+}
+
+/**
+ * Writes a lot's rectangle, accepting both the centre/size and the corner form.
+ * @param {object} l Lot.
+ * @param {number[]} out Destination `[x0, z0, x1, z1]`.
+ * @returns {number[]} out
+ */
+function lotRect(l, out) {
+  out[0] = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
+  out[1] = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
+  out[2] = l.x1 !== undefined ? l.x1 : l.x + l.w * 0.5;
+  out[3] = l.z1 !== undefined ? l.z1 : l.z + l.d * 0.5;
+  return out;
+}
+
+/** Scratch rectangle for {@link lotIsPaved}; build-time only, never reentrant. */
+const _lotR = [0, 0, 0, 0];
+
+/**
+ * Whether {@link buildLotSurfaces} will cover this lot with a raised pavement slab.
+ * Single-sourced so the height field ({@link Terrain}) and the geometry can never disagree
+ * about which blocks are paved.
+ * @param {object} l Lot.
+ * @param {number[]} rb Road bounds from {@link roadBounds}.
+ * @returns {boolean} True when the lot gets a slab.
+ */
+function lotIsPaved(l, rb) {
+  if (l.kind === 'water' || l.surface === 'water' || l.surface === 'sand') return false;
+  const r = lotRect(l, _lotR);
+  if (r[0] < rb[0] - 6 || r[1] < rb[1] - 6 || r[2] > rb[2] + 6 || r[3] > rb[3] + 6) return false;
+  return (r[2] - r[0]) >= 4 && (r[3] - r[1]) >= 4;
+}
+
 /* ----------------------------------------------------------------- terrain */
 
 /**
@@ -622,6 +682,118 @@ class Terrain {
     this.cityMin = [b.min[0], b.min[1]];
     this.cityMax = [b.max[0], b.max[1]];
     this._build(city);
+  }
+
+  /**
+   * Rasterises every surface the world builder paves over — road carriageways, junction pads
+   * and the raised block slabs — onto the height field lattice.
+   *
+   * The sea slope and the carved water lots must not eat into those cells: roads and pavements
+   * are drawn dead flat at {@link ROAD_Y} / `SIDEWALK_H`, so a height field that dipped below
+   * them would drop cars and pedestrians straight through the visible asphalt (the waterfront
+   * road runs within the 14 m carve of the marina lots, and was sinking by up to 1.6 m).
+   *
+   * @param {object} city CityData.
+   * @returns {Uint8Array} 1 per lattice point that must stay at road level.
+   */
+  _pavedMask(city) {
+    const nx = this.nx, nz = this.nz, cell = this.cell;
+    const minX = this.minX, minZ = this.minZ;
+    const mask = new Uint8Array(nx * nz);
+    const hard = new Uint8Array(nx * nz);
+
+    /**
+     * Marks the lattice points covered by an oriented rectangle.
+     * @param {Uint8Array} dst Target mask.
+     * @param {number} cx Centre x.
+     * @param {number} cz Centre z.
+     * @param {number} ux Unit direction x (the `hl` axis).
+     * @param {number} uz Unit direction z.
+     * @param {number} hl Half extent along the direction.
+     * @param {number} hw Half extent across it.
+     * @param {number} pad Extra slack in metres.
+     * @returns {void}
+     */
+    const stamp = (dst, cx, cz, ux, uz, hl, hw, pad) => {
+      const el = hl + pad, ew = hw + pad;
+      const ex = Math.abs(ux) * el + Math.abs(uz) * ew;
+      const ez = Math.abs(uz) * el + Math.abs(ux) * ew;
+      const i0 = clamp(Math.floor((cx - ex - minX) / cell), 0, nx - 1);
+      const i1 = clamp(Math.ceil((cx + ex - minX) / cell), 0, nx - 1);
+      const j0 = clamp(Math.floor((cz - ez - minZ) / cell), 0, nz - 1);
+      const j1 = clamp(Math.ceil((cz + ez - minZ) / cell), 0, nz - 1);
+      for (let j = j0; j <= j1; j++) {
+        const dz = minZ + j * cell - cz;
+        const row = j * nx;
+        for (let i = i0; i <= i1; i++) {
+          const dx = minX + i * cell - cx;
+          const a = dx * ux + dz * uz;
+          if (a < -el || a > el) continue;
+          const b = dz * ux - dx * uz;
+          if (b < -ew || b > ew) continue;
+          dst[row + i] = 1;
+        }
+      }
+    };
+
+    // One cell of slack so the bilinear filter cannot dip between a paved sample and a carved
+    // neighbour, which is what would otherwise sink the outer half of every kerbside lane.
+    const pad = cell;
+    const roads = city.roads || [];
+    const nodes = city.nodes || [];
+    const nodeHalf = new Float32Array(nodes.length);
+    for (let i = 0; i < roads.length; i++) {
+      const r = roads[i];
+      const dx = r.bx - r.ax, dz = r.bz - r.az;
+      const len = Math.hypot(dx, dz);
+      if (!(len > 0.01)) continue;
+      const half = r.width * 0.5;
+      const cx = (r.ax + r.bx) * 0.5, cz = (r.az + r.bz) * 0.5;
+      // Match buildRoadSurfaces: the quad overshoots each end by half a carriageway.
+      stamp(mask, cx, cz, dx / len, dz / len, len * 0.5 + half, half, pad);
+      stamp(hard, cx, cz, dx / len, dz / len, len * 0.5 + half, half, 0);
+      if (nodes[r.nodeA] && half > nodeHalf[r.nodeA]) nodeHalf[r.nodeA] = half;
+      if (nodes[r.nodeB] && half > nodeHalf[r.nodeB]) nodeHalf[r.nodeB] = half;
+    }
+    for (let i = 0; i < nodes.length; i++) {
+      const half = nodeHalf[i];
+      if (!(half > 0)) continue;
+      stamp(mask, nodes[i].x, nodes[i].z, 1, 0, half, half, pad);
+      stamp(hard, nodes[i].x, nodes[i].z, 1, 0, half, half, 0);
+    }
+
+    const rb = roadBounds(city, [0, 0, 0, 0]);
+    const lots = city.lots || [];
+    const r4 = [0, 0, 0, 0];
+    for (let i = 0; i < lots.length; i++) {
+      if (!lotIsPaved(lots[i], rb)) continue;
+      lotRect(lots[i], r4);
+      stamp(mask, (r4[0] + r4[2]) * 0.5, (r4[1] + r4[3]) * 0.5, 1, 0,
+        (r4[2] - r4[0]) * 0.5, (r4[3] - r4[1]) * 0.5, pad);
+    }
+
+    // The padding must never shelve over open water: clear anything inside a water lot that is
+    // not actually carrying a carriageway (a bridge deck keeps its flat cells).
+    for (let i = 0; i < lots.length; i++) {
+      const l = lots[i];
+      if (l.kind !== 'water' && l.surface !== 'water') continue;
+      lotRect(l, r4);
+      const i0 = clamp(Math.floor((r4[0] - minX) / cell), 0, nx - 1);
+      const i1 = clamp(Math.ceil((r4[2] - minX) / cell), 0, nx - 1);
+      const j0 = clamp(Math.floor((r4[1] - minZ) / cell), 0, nz - 1);
+      const j1 = clamp(Math.ceil((r4[3] - minZ) / cell), 0, nz - 1);
+      for (let j = j0; j <= j1; j++) {
+        const z = minZ + j * cell;
+        if (z < r4[1] || z > r4[3]) continue;
+        for (let i2 = i0; i2 <= i1; i2++) {
+          const x = minX + i2 * cell;
+          if (x < r4[0] || x > r4[2]) continue;
+          const k = j * nx + i2;
+          if (!hard[k]) mask[k] = 0;
+        }
+      }
+    }
+    return mask;
   }
 
   /**
@@ -670,6 +842,10 @@ class Terrain {
     }
     this.waterRects = waterRects;
 
+    // Everything the world builder paves stays at road level, whatever the sea and the water
+    // lots would otherwise carve out from under it.
+    const paved = this._pavedMask(city);
+
     for (let j = 0; j < nz; j++) {
       const z = this.minZ + j * cell;
       for (let i = 0; i < nx; i++) {
@@ -710,6 +886,10 @@ class Terrain {
             h = Math.min(h, lerp(h, depth, t));
             if (t > 0.02) flat = false;
           }
+        }
+        if (paved[k]) {
+          if (h < ROAD_Y) h = ROAD_Y;
+          flat = true;
         }
         this.h[k] = h;
         this.flat[k] = flat ? 1 : 0;
@@ -1577,17 +1757,15 @@ function buildLotSurfaces(bc) {
   const plazaCol = [0.92, 0.9, 0.88];
   const rb = bc.roadBox;
 
+  const r4 = [0, 0, 0, 0];
   for (let i = 0; i < lots.length; i++) {
     const l = lots[i];
-    if (l.kind === 'water' || l.surface === 'water' || l.surface === 'sand') continue;
-    const x0 = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
-    const z0 = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
-    const x1 = l.x1 !== undefined ? l.x1 : l.x + l.w * 0.5;
-    const z1 = l.z1 !== undefined ? l.z1 : l.z + l.d * 0.5;
-    // Fringe lots outside the road network keep the natural terrain.
-    if (x0 < rb[0] - 6 || z0 < rb[1] - 6 || x1 > rb[2] + 6 || z1 > rb[3] + 6) continue;
+    // Water, sand and fringe lots outside the road network keep the natural terrain. The same
+    // predicate drives Terrain's paved mask, so mesh and height field cannot disagree.
+    if (!lotIsPaved(l, rb)) continue;
+    lotRect(l, r4);
+    const x0 = r4[0], z0 = r4[1], x1 = r4[2], z1 = r4[3];
     const w = x1 - x0, d = z1 - z0;
-    if (w < 4 || d < 4) continue;
     bc.raised[l.id] = 1;
 
     const cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
@@ -3373,25 +3551,20 @@ export function buildWorld(gl, renderer, textures, city, opts = {}) {
   for (let i = 0; i < lots.length; i++) if (lots[i].id >= maxLotId) maxLotId = lots[i].id + 1;
   const lotIndex = new LotIndex(lots, [terrain.minX, terrain.minZ], [terrain.maxX, terrain.maxZ], 16);
   const raised = new Uint8Array(maxLotId);
-  const waterRects = terrain.waterRects;
+  // Captured per world: the module-level constant is only a default, and two worlds built from
+  // cities with different metrics must not share one another's kerb height.
+  const slabY = SIDEWALK_H;
 
   /**
    * Walkable surface height: raised block slabs inside the city, terrain everywhere else.
+   * Called for every mover sub-step through `collision.terrainHeight`, so it stays branch-light.
    * @param {number} x World x.
    * @param {number} z World z.
    * @returns {number} Height in metres.
    */
   const surfaceY = (x, z) => {
     const lot = lotIndex.at(x, z);
-    if (lot && raised[lot.id]) {
-      for (let i = 0; i < waterRects.length; i++) {
-        const r = waterRects[i];
-        if (x > r.x - r.w * 0.5 && x < r.x + r.w * 0.5 && z > r.z - r.d * 0.5 && z < r.z + r.d * 0.5) {
-          return terrain.height(x, z);
-        }
-      }
-      return SIDEWALK_H;
-    }
+    if (lot && raised[lot.id]) return slabY;
     return terrain.height(x, z);
   };
 
