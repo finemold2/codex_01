@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0c10" />
+  <meta name="description" content="모바일 테트리스 — 터치 제스처와 온스크린 버튼으로 즐기는 테트리스 PWA" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>TETRIS · 모바일 테트리스</title>
+
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0c10'/%3E%3Crect x='24' y='12' width='16' height='16' rx='3' fill='%23c77dff'/%3E%3Crect x='8' y='28' width='16' height='16' rx='3' fill='%23c77dff'/%3E%3Crect x='24' y='28' width='16' height='16' rx='3' fill='%23c77dff'/%3E%3Crect x='40' y='28' width='16' height='16' rx='3' fill='%23c77dff'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ===== 상단 HUD ===== -->
+    <header class="hud">
+      <div class="hud-item">
+        <span class="hud-label">점수</span>
+        <span class="hud-value" id="hudScore">0</span>
+      </div>
+      <div class="hud-item">
+        <span class="hud-label">레벨</span>
+        <span class="hud-value" id="hudLevel">1</span>
+      </div>
+      <div class="hud-item">
+        <span class="hud-label">줄</span>
+        <span class="hud-value" id="hudLines">0</span>
+      </div>
+      <div class="hud-item">
+        <span class="hud-label">최고</span>
+        <span class="hud-value" id="hudBest">0</span>
+      </div>
+      <button id="btnPause" class="icon-btn" aria-label="일시정지">❚❚</button>
+    </header>
+
+    <!-- ===== 플레이 영역 ===== -->
+    <main class="play" id="play">
+      <aside class="side">
+        <div class="side-label">HOLD</div>
+        <canvas id="holdCanvas" width="52" height="39"></canvas>
+      </aside>
+
+      <div class="board-wrap">
+        <canvas id="board" width="200" height="400" aria-label="테트리스 보드"></canvas>
+        <div class="toast" id="toast"></div>
+      </div>
+
+      <aside class="side">
+        <div class="side-label">NEXT</div>
+        <canvas id="nextCanvas" width="52" height="117"></canvas>
+      </aside>
+    </main>
+
+    <!-- ===== 온스크린 컨트롤 ===== -->
+    <footer class="controls" id="controls">
+      <button class="ctl" data-action="left" aria-label="왼쪽">◀</button>
+      <button class="ctl" data-action="right" aria-label="오른쪽">▶</button>
+      <button class="ctl" data-action="rotCCW" aria-label="반시계 회전">⟲</button>
+      <button class="ctl" data-action="rotCW" aria-label="시계 회전">⟳</button>
+      <button class="ctl ctl--text" data-action="hold" aria-label="홀드">HOLD</button>
+      <button class="ctl" data-action="soft" aria-label="소프트 드롭">▼</button>
+      <button class="ctl ctl--wide ctl--accent" data-action="hard" aria-label="하드 드롭">⤓ DROP</button>
+    </footer>
+  </div>
+
+  <!-- ===== 시작 화면 ===== -->
+  <div id="ovStart" class="overlay">
+    <div class="card">
+      <h1 class="title">TETRIS</h1>
+      <p class="sub">모바일 테트리스</p>
+      <div class="best-line">최고 점수 <b id="startBest">0</b></div>
+      <button id="btnStart" class="btn btn--primary">게임 시작</button>
+      <ul class="guide">
+        <li><b>좌우 드래그</b><span>이동</span></li>
+        <li><b>탭</b><span>회전</span></li>
+        <li><b>아래로 드래그</b><span>소프트 드롭</span></li>
+        <li><b>빠르게 아래로 스와이프</b><span>하드 드롭</span></li>
+      </ul>
+      <div class="settings">
+        <button class="toggle" data-setting="sound" aria-pressed="true">🔊 소리</button>
+        <button class="toggle" data-setting="vibrate" aria-pressed="true">📳 진동</button>
+        <button class="toggle" data-setting="ghost" aria-pressed="true">👻 고스트</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 일시정지 ===== -->
+  <div id="ovPause" class="overlay" hidden>
+    <div class="card">
+      <h2 class="card-title">일시정지</h2>
+      <button id="btnResume" class="btn btn--primary">계속하기</button>
+      <button id="btnRestartPause" class="btn btn--ghost">다시 시작</button>
+      <div class="settings">
+        <button class="toggle" data-setting="sound" aria-pressed="true">🔊 소리</button>
+        <button class="toggle" data-setting="vibrate" aria-pressed="true">📳 진동</button>
+        <button class="toggle" data-setting="ghost" aria-pressed="true">👻 고스트</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 게임 오버 ===== -->
+  <div id="ovOver" class="overlay" hidden>
+    <div class="card">
+      <h2 class="card-title">게임 오버</h2>
+      <div class="new-record" id="overNew" hidden>🏆 신기록!</div>
+      <div class="result-grid">
+        <div><div class="r-val" id="overScore">0</div><div class="r-lab">점수</div></div>
+        <div><div class="r-val" id="overLines">0</div><div class="r-lab">줄</div></div>
+        <div><div class="r-val" id="overLevel">1</div><div class="r-lab">레벨</div></div>
+        <div><div class="r-val" id="overBest">0</div><div class="r-lab">최고</div></div>
+      </div>
+      <button id="btnRestart" class="btn btn--primary">다시 시작</button>
+    </div>
+  </div>
+
+  <script src="js/tetrominoes.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
