@@ -146,7 +146,13 @@
     $('#menu').hidden = false;
   }
 
-  $('#btnQuit').addEventListener('click', () => { if (confirm('게임을 종료하고 메뉴로 돌아갈까요?')) quitToMenu(); });
+  // 나가기: 두 번 눌러 확인 (샌드박스 환경에서도 동작하도록 confirm() 미사용)
+  let quitArmed = null;
+  $('#btnQuit').addEventListener('click', () => {
+    if (quitArmed) { clearTimeout(quitArmed); quitArmed = null; quitToMenu(); return; }
+    ui.banner('한 번 더 누르면 메뉴로 나갑니다', 2500);
+    quitArmed = setTimeout(() => { quitArmed = null; }, 2500);
+  });
   $('#goMenu').addEventListener('click', quitToMenu);
   $('#goAgain').addEventListener('click', () => { if (lastCfg) startGame(lastCfg); });
   $('#btnMute').addEventListener('click', () => { const m = Sfx.toggle(); $('#btnMute').textContent = m ? '🔇' : '🔊'; });
