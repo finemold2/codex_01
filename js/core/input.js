@@ -1245,3 +1245,371 @@ export class Input {
     }
     t.active = this._stickId >= 0 || this._lookId >= 0 || this._touchActions.size > 0;
   }
+
+  // ==================================================================== DOM handlers
+
+  /**
+   * Should this key's browser default be suppressed?
+   * @param {string} code normalized code
+   * @returns {boolean}
+   * @private
+   */
+  _shouldPreventDefault(code) {
+    if (ALWAYS_PREVENT[code] === true) return true;
+    // F-keys are only swallowed when something is actually bound to them.
+    if (code.charCodeAt(0) === 102 && code.length <= 3) {
+      const d = code.charCodeAt(1);
+      if (d >= 48 && d <= 57) return this._codeToActions.has(code);
+    }
+    return false;
+  }
+
+  /**
+   * @param {KeyboardEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleKeyDown(e) {
+    const target = e.target;
+    if (target && (TEXT_INPUT_NODES[target.nodeName] === true || target.isContentEditable === true)) {
+      return;
+    }
+    const code = Input.normalizeCode(e.code);
+    if (code === '') return;
+    if (this._shouldPreventDefault(code)) e.preventDefault();
+    if (e.repeat === true) {
+      // Auto-repeat must never produce a new "just pressed" edge.
+      if (!this.keys.has(code)) this.keys.add(code);
+      return;
+    }
+    this._pressCode(code);
+  }
+
+  /**
+   * @param {KeyboardEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleKeyUp(e) {
+    const code = Input.normalizeCode(e.code);
+    if (code === '') return;
+    if (this._shouldPreventDefault(code)) e.preventDefault();
+    this._releaseCode(code);
+  }
+
+  /**
+   * @param {MouseEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleMouseDown(e) {
+    this._updateCanvasRect();
+    this._updateMousePos(e);
+    if (this.pointerLockOnClick && !this.blocked) this.requestPointerLock();
+    this._setMouseButton(e.button, true);
+    if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * @param {MouseEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleMouseUp(e) {
+    this._updateMousePos(e);
+    this._setMouseButton(e.button, false);
+  }
+
+  /**
+   * @param {MouseEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleMouseMove(e) {
+    this._updateMousePos(e);
+    if (!this.pointerLocked) return;
+    let dx = e.movementX || 0;
+    let dy = e.movementY || 0;
+    // Chrome occasionally emits a single enormous delta right after the lock is granted.
+    if (dx > MAX_MOUSE_DELTA) dx = MAX_MOUSE_DELTA;
+    else if (dx < -MAX_MOUSE_DELTA) dx = -MAX_MOUSE_DELTA;
+    if (dy > MAX_MOUSE_DELTA) dy = MAX_MOUSE_DELTA;
+    else if (dy < -MAX_MOUSE_DELTA) dy = -MAX_MOUSE_DELTA;
+    this.mouseDX += dx;
+    this.mouseDY += dy;
+  }
+
+  /**
+   * @param {WheelEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleWheel(e) {
+    if (e.cancelable) e.preventDefault();
+    let d = e.deltaY || 0;
+    if (e.deltaMode === 1) d /= 3;          // lines -> notches
+    else if (e.deltaMode === 2) d *= 1;     // pages -> notches
+    else d /= 100;                          // pixels -> notches
+    if (d > 8) d = 8;
+    else if (d < -8) d = -8;
+    this.wheelDelta += d;
+  }
+
+  /**
+   * @param {Event} e
+   * @returns {void}
+   * @private
+   */
+  _handleContextMenu(e) {
+    e.preventDefault();
+  }
+
+  /**
+   * @returns {void}
+   * @private
+   */
+  _handlePointerLockChange() {
+    const doc = this.doc;
+    const locked = !!doc && doc.pointerLockElement === this.canvas;
+    if (locked === this.pointerLocked) return;
+    this.pointerLocked = locked;
+    // Never carry a stale delta across a lock transition: it would snap the camera.
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+  }
+
+  /**
+   * @returns {void}
+   * @private
+   */
+  _handlePointerLockError() {
+    this.pointerLocked = false;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    this._lockCooldown = now + 1200;
+  }
+
+  /**
+   * @returns {void}
+   * @private
+   */
+  _handleBlur() {
+    this._clearAll();
+  }
+
+  /**
+   * @returns {void}
+   * @private
+   */
+  _handleVisibility() {
+    if (this.doc && this.doc.hidden) this._clearAll();
+  }
+
+  /**
+   * @returns {void}
+   * @private
+   */
+  _handleResize() {
+    this._updateCanvasRect();
+  }
+
+  /**
+   * Caches the canvas rectangle used to map client coordinates to canvas space.
+   * @returns {void}
+   * @private
+   */
+  _updateCanvasRect() {
+    const c = this.canvas;
+    if (!c || typeof c.getBoundingClientRect !== 'function') return;
+    const r = c.getBoundingClientRect();
+    this._rectX = r.left;
+    this._rectY = r.top;
+    this._rectW = r.width > 0 ? r.width : 1;
+    this._rectH = r.height > 0 ? r.height : 1;
+  }
+
+  /**
+   * @param {MouseEvent} e
+   * @returns {void}
+   * @private
+   */
+  _updateMousePos(e) {
+    this.mouseX = e.clientX - this._rectX;
+    this.mouseY = e.clientY - this._rectY;
+  }
+
+  // ==================================================================== touch handlers
+
+  /**
+   * @param {TouchEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleTouchStart(e) {
+    this._updateCanvasRect();
+    const list = e.changedTouches;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      const x = t.clientX - this._rectX;
+      const y = t.clientY - this._rectY;
+      const btn = this._hitTestTouchButton(x, y);
+      if (btn !== null) {
+        btn.touchId = t.identifier;
+        this._touchPress(btn.action);
+        continue;
+      }
+      if (x < this._rectW * 0.5) {
+        if (this._stickId < 0) {
+          this._stickId = t.identifier;
+          this._stickOx = x;
+          this._stickOy = y;
+          this.touch.moveVec.x = 0;
+          this.touch.moveVec.y = 0;
+        }
+      } else if (this._lookId < 0) {
+        this._lookId = t.identifier;
+        this._lookLastX = x;
+        this._lookLastY = y;
+      }
+    }
+    this.touch.active = true;
+    if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * @param {TouchEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleTouchMove(e) {
+    const list = e.changedTouches;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      const x = t.clientX - this._rectX;
+      const y = t.clientY - this._rectY;
+      if (t.identifier === this._stickId) {
+        let dx = (x - this._stickOx) / TOUCH_STICK_RADIUS;
+        let dy = (this._stickOy - y) / TOUCH_STICK_RADIUS;
+        const mag = Math.sqrt(dx * dx + dy * dy);
+        if (mag > 1) {
+          dx /= mag;
+          dy /= mag;
+          // Let the stick origin follow the finger once it leaves the ring, like a floating pad.
+          this._stickOx = x - dx * TOUCH_STICK_RADIUS;
+          this._stickOy = y + dy * TOUCH_STICK_RADIUS;
+        }
+        const dead = 0.12;
+        this.touch.moveVec.x = mag > dead ? dx : 0;
+        this.touch.moveVec.y = mag > dead ? dy : 0;
+      } else if (t.identifier === this._lookId) {
+        let dx = (x - this._lookLastX) * this.touchLookScale;
+        let dy = (y - this._lookLastY) * this.touchLookScale;
+        this._lookLastX = x;
+        this._lookLastY = y;
+        if (dx > MAX_MOUSE_DELTA) dx = MAX_MOUSE_DELTA;
+        else if (dx < -MAX_MOUSE_DELTA) dx = -MAX_MOUSE_DELTA;
+        if (dy > MAX_MOUSE_DELTA) dy = MAX_MOUSE_DELTA;
+        else if (dy < -MAX_MOUSE_DELTA) dy = -MAX_MOUSE_DELTA;
+        this.touch.lookDX = dx;
+        this.touch.lookDY = dy;
+        this.mouseDX += dx;
+        this.mouseDY += dy;
+      }
+    }
+    if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * @param {TouchEvent} e
+   * @returns {void}
+   * @private
+   */
+  _handleTouchEnd(e) {
+    const list = e.changedTouches;
+    for (let i = 0; i < list.length; i++) {
+      const id = list[i].identifier;
+      if (id === this._stickId) {
+        this._stickId = -1;
+        this.touch.moveVec.x = 0;
+        this.touch.moveVec.y = 0;
+      } else if (id === this._lookId) {
+        this._lookId = -1;
+      }
+      for (let b = 0; b < this._touchButtons.length; b++) {
+        const btn = this._touchButtons[b];
+        if (btn.touchId !== id) continue;
+        btn.touchId = -1;
+        this._touchRelease(btn.action);
+      }
+    }
+    const remaining = e.touches ? e.touches.length : 0;
+    this.touch.active = remaining > 0;
+    if (remaining === 0) this._releaseAllTouches();
+    if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * Finds the free on-screen button under a canvas-space point.
+   * @param {number} x
+   * @param {number} y
+   * @returns {{id:string,action:string,x:number,y:number,w:number,h:number,rel:boolean,
+   *            touchId:number}|null}
+   * @private
+   */
+  _hitTestTouchButton(x, y) {
+    for (let i = 0; i < this._touchButtons.length; i++) {
+      const b = this._touchButtons[i];
+      if (b.touchId >= 0) continue;
+      const bx = b.rel ? b.x * this._rectW : b.x;
+      const by = b.rel ? b.y * this._rectH : b.y;
+      const bw = b.rel ? b.w * this._rectW : b.w;
+      const bh = b.rel ? b.h * this._rectH : b.h;
+      if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) return b;
+    }
+    return null;
+  }
+
+  /**
+   * @param {string} action
+   * @returns {void}
+   * @private
+   */
+  _touchPress(action) {
+    if (this._touchActions.has(action)) return;
+    this._touchActions.add(action);
+    this.touch.buttons[action] = true;
+    this._touchPressed.add(action);
+    this._emit(action);
+  }
+
+  /**
+   * @param {string} action
+   * @returns {void}
+   * @private
+   */
+  _touchRelease(action) {
+    if (!this._touchActions.has(action)) return;
+    this._touchActions.delete(action);
+    this.touch.buttons[action] = false;
+    this._touchReleased.add(action);
+  }
+
+  /**
+   * Lifts every finger: virtual stick, look drag and all on-screen buttons.
+   * @returns {void}
+   * @private
+   */
+  _releaseAllTouches() {
+    for (let i = 0; i < this._touchButtons.length; i++) {
+      const btn = this._touchButtons[i];
+      btn.touchId = -1;
+      this._touchRelease(btn.action);
+    }
+    this._stickId = -1;
+    this._lookId = -1;
+    this.touch.moveVec.x = 0;
+    this.touch.moveVec.y = 0;
+    this.touch.lookDX = 0;
+    this.touch.lookDY = 0;
+    this.touch.active = false;
+  }
+}

@@ -2403,3 +2403,390 @@ function hslToRgbBytes(h, s, l) {
   const m = l - c * 0.5;
   return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
 }
+
+/* ------------------------------------------------------------------------- *
+ * 3c. Signage: neon, billboards, graffiti
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Traces a rounded rectangle path.
+ * @param {CanvasRenderingContext2D} ctx Context.
+ * @param {number} x Left.
+ * @param {number} y Top.
+ * @param {number} w Width.
+ * @param {number} h Height.
+ * @param {number} r Corner radius.
+ * @returns {void}
+ */
+function roundRectPath(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w * 0.5, h * 0.5);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+}
+
+/**
+ * Strokes the current path as a glowing neon tube (wide dim halo, bright core).
+ * @param {CanvasRenderingContext2D} ctx Context.
+ * @param {string} color Tube colour.
+ * @param {number} width Core width in pixels.
+ * @returns {void}
+ */
+function neonStroke(ctx, color, width) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.16;
+  ctx.lineWidth = width * 4.5;
+  ctx.stroke();
+  ctx.globalAlpha = 0.30;
+  ctx.lineWidth = width * 2.4;
+  ctx.stroke();
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = width * 1.15;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = '#fffaff';
+  ctx.lineWidth = Math.max(1, width * 0.42);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Draws glowing text (halo passes then a bright core).
+ * @param {CanvasRenderingContext2D} ctx Context.
+ * @param {string} text Text to draw.
+ * @param {number} x Centre x.
+ * @param {number} y Centre y.
+ * @param {string} font CSS font.
+ * @param {string} color Glow colour.
+ * @param {string} core Core colour.
+ * @returns {void}
+ */
+function glowText(ctx, text, x, y, font, color, core) {
+  ctx.save();
+  ctx.font = font;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.18;
+  ctx.lineWidth = 18;
+  ctx.strokeText(text, x, y);
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = 9;
+  ctx.strokeText(text, x, y);
+  ctx.globalAlpha = 0.9;
+  ctx.lineWidth = 4;
+  ctx.strokeText(text, x, y);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = core;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+/**
+ * Neon sign cards. Transparent background, saturated emissive artwork.
+ * @param {number} index 1..3 design selector.
+ * @param {number} S Texture size (width; height is S/2).
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genNeonSign(index, S, seed) {
+  const W = S, H = Math.round(S * 0.5);
+  const canvas = createCanvas(W, H);
+  const ctx = ctx2d(canvas);
+  ctx.clearRect(0, 0, W, H);
+
+  /* Dark backing panel so the tubes read against bright buildings. */
+  ctx.fillStyle = 'rgba(7,6,14,0.88)';
+  roundRectPath(ctx, W * 0.03, H * 0.06, W * 0.94, H * 0.88, H * 0.10);
+  ctx.fill();
+
+  if (index === 1) {
+    roundRectPath(ctx, W * 0.07, H * 0.13, W * 0.86, H * 0.74, H * 0.09);
+    neonStroke(ctx, '#00e5ff', 5);
+    glowText(ctx, '네온', W * 0.5, H * 0.42, 'bold ' + Math.round(H * 0.38) + 'px ' + FONT_KO, '#ff2e88', '#ffe6f4');
+    glowText(ctx, 'NEON CITY', W * 0.5, H * 0.74, 'bold ' + Math.round(H * 0.15) + 'px ' + FONT_DISPLAY, '#00e5ff', '#e8feff');
+  } else if (index === 2) {
+    /* Ramen bowl icon + text. */
+    ctx.beginPath();
+    ctx.arc(W * 0.22, H * 0.56, H * 0.20, 0, Math.PI);
+    ctx.closePath();
+    neonStroke(ctx, '#ffb648', 5);
+    ctx.beginPath();
+    ctx.moveTo(W * 0.09, H * 0.36);
+    ctx.lineTo(W * 0.35, H * 0.36);
+    neonStroke(ctx, '#ffb648', 4);
+    for (let i = 0; i < 3; i++) {
+      const sx = W * (0.16 + i * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(sx, H * 0.30);
+      ctx.quadraticCurveTo(sx + W * 0.03, H * 0.20, sx, H * 0.11);
+      neonStroke(ctx, '#ff5a3c', 3);
+    }
+    glowText(ctx, '라면', W * 0.63, H * 0.36, 'bold ' + Math.round(H * 0.30) + 'px ' + FONT_KO, '#ff2e88', '#fff0f6');
+    glowText(ctx, 'RAMEN 24H', W * 0.63, H * 0.72, 'bold ' + Math.round(H * 0.19) + 'px ' + FONT_DISPLAY, '#ffb648', '#fff6e2');
+  } else {
+    /* Pawn shop: three-ball emblem + Korean sign. */
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.arc(W * (0.14 + i * 0.075), H * (i === 1 ? 0.30 : 0.42), H * 0.07, 0, TWO_PI);
+      neonStroke(ctx, '#ffd34d', 4);
+    }
+    glowText(ctx, '전당포', W * 0.62, H * 0.38, 'bold ' + Math.round(H * 0.30) + 'px ' + FONT_KO, '#00e5ff', '#e9ffff');
+    glowText(ctx, 'PAWN · 24', W * 0.62, H * 0.74, 'bold ' + Math.round(H * 0.17) + 'px ' + FONT_DISPLAY, '#ff2e88', '#ffe9f4');
+  }
+
+  /* Subtle panel grunge + a flicker-friendly vignette. */
+  const noise = new NoiseSource(seed + index);
+  const grime = fbmField(W, H, noise, { freq: 8, octaves: 3 });
+  const img = ctx.getImageData(0, 0, W, H);
+  const px = img.data;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    if (px[p + 3] === 0) continue;
+    const g = 0.88 + grime[i] * 0.24;
+    px[p] *= g; px[p + 1] *= g; px[p + 2] *= g;
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Printed billboard artwork (opaque, 2:1).
+ * @param {number} index 1..4 design selector.
+ * @param {number} S Texture width (height is S/2).
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genBillboard(index, S, seed) {
+  const W = S, H = Math.round(S * 0.5);
+  const canvas = createCanvas(W, H);
+  const ctx = ctx2d(canvas);
+  const rng = new Rand(seed ^ (index * 7919));
+
+  if (index === 1) {
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#2b0b4a');
+    grad.addColorStop(0.55, '#7a1170');
+    grad.addColorStop(1, '#ff3d6e');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    /* Skyline silhouette. */
+    ctx.fillStyle = 'rgba(10,6,22,0.92)';
+    let x = 0;
+    while (x < W) {
+      const bw = W * rng.range(0.04, 0.10);
+      const bh = H * rng.range(0.18, 0.52);
+      ctx.fillRect(x, H - bh, bw - 2, bh);
+      x += bw;
+    }
+    ctx.fillStyle = '#ffd34d';
+    for (let i = 0; i < 60; i++) {
+      ctx.fillRect(rng.next() * W, H - rng.next() * H * 0.45, W * 0.006, W * 0.008);
+    }
+    glowText(ctx, 'NEON CITY', W * 0.5, H * 0.34, 'bold ' + Math.round(H * 0.28) + 'px ' + FONT_DISPLAY, '#00e5ff', '#ffffff');
+    ctx.fillStyle = '#ffe9f4';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold ' + Math.round(H * 0.13) + 'px ' + FONT_KO;
+    ctx.fillText('어서 오세요', W * 0.5, H * 0.62);
+  } else if (index === 2) {
+    ctx.fillStyle = '#12060a';
+    ctx.fillRect(0, 0, W, H);
+    const grad = ctx.createRadialGradient(W * 0.5, H * 0.5, H * 0.05, W * 0.5, H * 0.5, H * 0.9);
+    grad.addColorStop(0, 'rgba(190,26,52,0.95)');
+    grad.addColorStop(1, 'rgba(24,4,10,0.9)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    /* Card suits. */
+    ctx.fillStyle = '#f7d774';
+    for (let i = 0; i < 4; i++) {
+      const cx = W * (0.10 + i * 0.06), cy = H * 0.82;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - H * 0.06);
+      ctx.lineTo(cx + H * 0.045, cy);
+      ctx.lineTo(cx, cy + H * 0.06);
+      ctx.lineTo(cx - H * 0.045, cy);
+      ctx.closePath();
+      ctx.fill();
+    }
+    glowText(ctx, 'CASINO', W * 0.5, H * 0.34, 'bold ' + Math.round(H * 0.30) + 'px ' + FONT_DISPLAY, '#ffd34d', '#fff8e0');
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd34d';
+    ctx.font = 'bold ' + Math.round(H * 0.17) + 'px ' + FONT_KO;
+    ctx.fillText('카지노 · 잭팟', W * 0.5, H * 0.63);
+  } else if (index === 3) {
+    ctx.fillStyle = '#0d3a3f';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#0a2b2f';
+    for (let i = 0; i < 14; i++) ctx.fillRect(0, H * i / 14, W, H / 28);
+    /* Plate and fish. */
+    ctx.beginPath();
+    ctx.arc(W * 0.20, H * 0.52, H * 0.30, 0, TWO_PI);
+    ctx.fillStyle = '#f3efe2';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(W * 0.20, H * 0.50, H * 0.19, H * 0.10, -0.2, 0, TWO_PI);
+    ctx.fillStyle = '#e8604c';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(W * 0.20 + H * 0.17, H * 0.50);
+    ctx.lineTo(W * 0.20 + H * 0.30, H * 0.40);
+    ctx.lineTo(W * 0.20 + H * 0.30, H * 0.60);
+    ctx.closePath();
+    ctx.fillStyle = '#e8604c';
+    ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f6f1e0';
+    ctx.font = 'bold ' + Math.round(H * 0.26) + 'px ' + FONT_KO;
+    ctx.fillText('초밥', W * 0.64, H * 0.42);
+    ctx.fillStyle = '#7fe3c8';
+    ctx.font = 'bold ' + Math.round(H * 0.16) + 'px ' + FONT_DISPLAY;
+    ctx.fillText('SUSHI BAR', W * 0.64, H * 0.70);
+  } else {
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, '#f4e6c8');
+    grad.addColorStop(1, '#d9b877');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(40,26,10,0.55)';
+    ctx.lineWidth = Math.max(1, H * 0.012);
+    for (let i = 0; i < 5; i++) {
+      const yy = H * (0.24 + i * 0.075);
+      ctx.beginPath();
+      ctx.moveTo(W * 0.05, yy);
+      ctx.lineTo(W * 0.42, yy);
+      ctx.stroke();
+    }
+    /* A couple of quaver glyphs drawn as paths. */
+    ctx.fillStyle = '#23180a';
+    for (let i = 0; i < 3; i++) {
+      const nx = W * (0.11 + i * 0.10), ny = H * (0.42 - i * 0.075);
+      ctx.beginPath();
+      ctx.ellipse(nx, ny, H * 0.045, H * 0.033, -0.4, 0, TWO_PI);
+      ctx.fill();
+      ctx.fillRect(nx + H * 0.036, ny - H * 0.24, H * 0.014, H * 0.24);
+    }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#23180a';
+    ctx.font = 'bold ' + Math.round(H * 0.22) + 'px ' + FONT_DISPLAY;
+    ctx.fillText('CLASSIC FM', W * 0.66, H * 0.38);
+    ctx.font = 'bold ' + Math.round(H * 0.20) + 'px ' + FONT_KO;
+    ctx.fillText('클래식 88.7', W * 0.66, H * 0.66);
+  }
+
+  /* Print grain, paper wear and a vignette. */
+  const noise = new NoiseSource(seed + index * 13);
+  const wear = fbmField(W, H, noise, { freq: 6, octaves: 4 });
+  const grain = fbmField(W, H, new NoiseSource(seed + index * 29), { freq: Math.max(60, W / 6), octaves: 2, value: true });
+  const img = ctx.getImageData(0, 0, W, H);
+  const px = img.data;
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    const dy = (y / H - 0.5) * 2;
+    for (let x = 0; x < W; x++) {
+      const i = row + x;
+      const p = i * 4;
+      const dx = (x / W - 0.5) * 2;
+      const vig = 1 - smoothstep(0.75, 1.5, Math.sqrt(dx * dx + dy * dy)) * 0.45;
+      const g = (0.9 + wear[i] * 0.2) * vig + (grain[i] - 0.5) * 0.08;
+      px[p] *= g; px[p + 1] *= g; px[p + 2] *= g;
+      px[p + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Spray-paint graffiti decal with drips and a stencil-rough alpha edge.
+ * @param {number} index 1..2 design selector.
+ * @param {number} S Texture width (height is S/2).
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genGraffiti(index, S, seed) {
+  const W = S, H = Math.round(S * 0.5);
+  const canvas = createCanvas(W, H);
+  const ctx = ctx2d(canvas);
+  const rng = new Rand(seed ^ (index * 4111));
+  ctx.clearRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+
+  const main = index === 1 ? '#ff2e88' : '#8dff5a';
+  const outline = index === 1 ? '#00e5ff' : '#ffd34d';
+  const word = index === 1 ? '네온' : '자유';
+  const tag = index === 1 ? 'CREW 96' : 'FREE!';
+
+  /* Halo cloud of over-spray. */
+  ctx.save();
+  ctx.globalAlpha = 0.25;
+  ctx.fillStyle = main;
+  for (let i = 0; i < 90; i++) {
+    const x = W * (0.5 + rng.gaussian() * 0.16);
+    const y = H * (0.5 + rng.gaussian() * 0.18);
+    ctx.beginPath();
+    ctx.arc(x, y, W * rng.range(0.01, 0.05), 0, TWO_PI);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.font = 'bold ' + Math.round(H * 0.52) + 'px ' + FONT_KO;
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = H * 0.10;
+  ctx.strokeText(word, W * 0.42, H * 0.46);
+  ctx.fillStyle = main;
+  ctx.fillText(word, W * 0.42, H * 0.46);
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = H * 0.02;
+  ctx.strokeText(word, W * 0.42, H * 0.46);
+
+  ctx.font = 'bold ' + Math.round(H * 0.20) + 'px ' + FONT_DISPLAY;
+  ctx.fillStyle = outline;
+  ctx.save();
+  ctx.translate(W * 0.80, H * 0.72);
+  ctx.rotate(-0.18);
+  ctx.fillText(tag, 0, 0);
+  ctx.restore();
+
+  /* Paint drips. */
+  ctx.fillStyle = main;
+  for (let i = 0; i < 12; i++) {
+    const x = W * rng.range(0.14, 0.72);
+    const y = H * rng.range(0.52, 0.66);
+    const len = H * rng.range(0.06, 0.30);
+    const wdt = W * rng.range(0.004, 0.011);
+    ctx.fillRect(x, y, wdt, len);
+    ctx.beginPath();
+    ctx.arc(x + wdt * 0.5, y + len, wdt * 1.15, 0, TWO_PI);
+    ctx.fill();
+  }
+
+  /* Spray speckle: erode the alpha with noise so edges look aerosol-blown. */
+  const noise = new NoiseSource(seed + index * 17);
+  const speck = fbmField(W, H, noise, { freq: Math.max(40, W / 8), octaves: 3, value: true });
+  const blotch = fbmField(W, H, new NoiseSource(seed + index * 23), { freq: 7, octaves: 3 });
+  const img = ctx.getImageData(0, 0, W, H);
+  const px = img.data;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    let a = px[p + 3] / 255;
+    if (a === 0) continue;
+    a *= 0.55 + 0.6 * speck[i];
+    a *= 0.72 + 0.5 * blotch[i];
+    px[p + 3] = clamp(a, 0, 1) * 255;
+  }
+  bleedAlpha(px, W, H, 3);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
