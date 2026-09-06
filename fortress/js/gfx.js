@@ -6,8 +6,26 @@
  * Gfx.drawSky(ctx, scene, t)       하늘 · 태양/달 · 구름 · 원경
  * Gfx.drawTerrain(ctx, scene, g,t) 지형 (지층 · 텍스처 · 표면 디테일)
  * Gfx.drawOverlay(ctx, scene, t)   날씨 · 비네팅 · 색보정
+ * Gfx.setWind(w)                   현재 바람 (-10~10). 구름·날씨·풀이 이 방향으로 흐릅니다
  */
 const Gfx = (() => {
+
+  /* ═════════ 바람 ═════════
+   * 게임의 wind 값을 그대로 받아 씁니다. 양수 = 오른쪽 (포탄이 밀리는 방향과 같음).
+   * 턴이 바뀌며 값이 튈 때 구름이 순간 이동하지 않도록 부드럽게 따라갑니다.
+   */
+  let windTarget = 0, windNow = 0;
+  function setWind(w) { windTarget = w || 0; }
+
+  /** 프레임 간격을 재고 바람·구름 위치를 진행시킵니다 (drawSky 가 프레임마다 먼저 호출) */
+  function tickWind(sc, t) {
+    const dt = Math.min(0.06, Math.max(0, t - (sc.lastSkyT != null ? sc.lastSkyT : t)));
+    sc.lastSkyT = t;
+    windNow += (windTarget - windNow) * Math.min(1, dt * 3.2);
+    // 구름은 바람에만 실려 흐릅니다 — 누적이라 방향이 바뀌어도 이어서 되돌아갑니다
+    sc.cloudDrift = (sc.cloudDrift || 0) + windNow * dt * 2.4;
+    return dt;
+  }
 
   /* ═════════ 테마 ═════════ */
   const THEMES = {
@@ -218,6 +236,9 @@ const Gfx = (() => {
     }
 
     sc.noise = makeNoise(seed);
+    sc.cloudDrift = 0;
+    sc.lastSkyT = null;
+    windTarget = 0; windNow = 0;   // 새 판은 무풍에서 시작해 첫 턴 바람을 받습니다
     return sc;
   }
 
@@ -265,6 +286,7 @@ const Gfx = (() => {
   function drawSky(ctx, sc, t) {
     if (!sc) return;
     const th = sc.th, g = grads(ctx, sc);
+    tickWind(sc, t);
     ctx.save();
     ctx.fillStyle = g.sky;
     ctx.fillRect(-40, -40, W + 80, H + 80);
@@ -297,9 +319,9 @@ const Gfx = (() => {
       }
     }
 
-    // 구름
+    // 구름 — 바람이 부는 쪽으로 흐릅니다 (높이 뜬 층일수록 빠르게)
     for (const c of sc.clouds) {
-      const x = wrap(c.x + t * c.v * 6, -220, W + 220);
+      const x = wrap(c.x + sc.cloudDrift * c.v, -220, W + 220);
       ctx.globalAlpha = c.a;
       ctx.fillStyle = sc.key === 'night' ? '#5a6a92' : sc.key === 'volcano' ? '#5b3b34' : '#ffffff';
       ctx.beginPath();
@@ -390,7 +412,9 @@ const Gfx = (() => {
       const yy = v.base - v.h - 20 - k * 210;
       const rr = 22 + k * 92;
       ctx.beginPath();
-      ctx.ellipse(v.x + Math.sin(t * 0.4 + i) * (12 + k * 44), yy, rr, rr * 0.62, 0, 0, Math.PI * 2);
+      // 분연주도 바람에 밀려 기웁니다 (높이 오를수록 더)
+      const drift = Math.sin(t * 0.4 + i) * (12 + k * 44) + windNow * k * 7;
+      ctx.ellipse(v.x + drift, yy, rr, rr * 0.62, 0, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
@@ -566,9 +590,10 @@ const Gfx = (() => {
         ctx.strokeStyle = d.k < 0.4 ? '#67cf67' : '#3f9c46';
         ctx.lineWidth = 1.4;
         ctx.beginPath();
+        const lean = windNow * 0.34;   // 풀은 바람이 부는 쪽으로 눕습니다
         for (let b = -1; b <= 1; b++) {
           const bx = x + b * 2.4;
-          const sway = Math.sin(t * 1.6 + x * 0.05 + b) * 1.6;
+          const sway = Math.sin(t * 1.6 + x * 0.05 + b) * 1.6 + lean;
           ctx.moveTo(bx, y);
           ctx.quadraticCurveTo(bx + sway, y - 5 * d.h, bx + sway * 2 + b, y - 9 * d.h);
         }
@@ -649,8 +674,12 @@ const Gfx = (() => {
     if (sc.weather.length) {
       ctx.save();
       const kind = th.weather;
+      // 눈·모래·화산재도 바람에 실려 날립니다 (가벼울수록 많이 밀립니다)
+      const blowK = kind === 'sand' ? 0.62 : kind === 'snow' ? 0.42 : kind === 'ash' ? 0.24 : 0.5;
+      const blow = windNow * blowK;
       for (const p of sc.weather) {
-        p.x += (p.vx + (kind === 'sand' ? 4.2 : kind === 'ash' ? 0.8 : 0)) * dt * 60;
+        const vx = p.vx * 0.35 + blow;
+        p.x += vx * dt * 60;
         p.y += p.vy * dt * 60 * (kind === 'ash' ? 0.5 : 1);
         if (p.y > H) { p.y = -6; p.x = Math.random() * W; }
         if (p.x > W + 8) p.x = -8;
@@ -661,9 +690,11 @@ const Gfx = (() => {
           ctx.fillStyle = '#ffffff';
           ctx.beginPath(); ctx.arc(p.x + sway, p.y, p.r, 0, Math.PI * 2); ctx.fill();
         } else if (kind === 'sand') {
+          // 모래 줄기는 실제로 날아가는 방향으로 눕습니다
+          const len = 3.2;
           ctx.strokeStyle = 'rgba(240,205,150,0.7)';
           ctx.lineWidth = p.r * 0.7;
-          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + 16, p.y + 1.6); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + vx * len, p.y + p.vy * len * 0.6); ctx.stroke();
         } else if (kind === 'ash') {
           ctx.fillStyle = p.a > 0.6 ? 'rgba(255,140,60,0.8)' : 'rgba(70,60,58,0.9)';
           ctx.fillRect(p.x + sway, p.y, p.r, p.r);
@@ -700,5 +731,5 @@ const Gfx = (() => {
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
   }
 
-  return { THEMES, createScene, drawSky, drawTerrain, drawOverlay };
+  return { THEMES, createScene, drawSky, drawTerrain, drawOverlay, setWind };
 })();

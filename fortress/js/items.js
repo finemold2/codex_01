@@ -410,7 +410,9 @@ defActive({
   desc: (v) => `바람을 즉시 잠재웁니다. (${v}회)`,
   apply(game, t) {
     game.wind = 0;
+    game.windHold = Math.max(game.windHold || 0, 3);   // 잠재운 바람은 한동안 유지됩니다
     if (typeof FX !== 'undefined' && FX.setWind) FX.setWind(0);
+    if (typeof Gfx !== 'undefined' && Gfx.setWind) Gfx.setWind(0);
     return '무풍';
   },
 });
@@ -595,7 +597,9 @@ defActive({
   desc: (v) => `바람을 세기 ${v}까지 몰아칩니다. 풍향 보정기가 있다면 나만 유리해집니다.`,
   apply(game, t, v) {
     game.wind = (t.facing >= 0 ? 1 : -1) * v;
+    game.windHold = Math.max(game.windHold || 0, 3);   // 일으킨 폭풍은 한동안 유지됩니다
     if (typeof FX !== 'undefined' && FX.setWind) FX.setWind(game.wind);
+    if (typeof Gfx !== 'undefined' && Gfx.setWind) Gfx.setWind(game.wind);
     if (typeof Sfx !== 'undefined' && Sfx.windGust) Sfx.windGust(game.wind);
     return `폭풍 ${game.wind > 0 ? '→' : '←'}${v}`;
   },

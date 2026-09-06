@@ -309,6 +309,17 @@ kbd {
 .wind-box { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .wind-box canvas { background: #0b0e15; border: 1px solid var(--line-soft); border-radius: 5px; }
 .wind-box b { min-width: 30px; color: var(--text); font-variant-numeric: tabular-nums; }
+/* 바람이 바뀐 순간에만 눈에 띄게 (몇 라운드에 한 번뿐입니다) */
+.wind-box.is-shift canvas { animation: windShift 1.5s ease-out; }
+.wind-box.is-shift b { animation: windShiftText 1.5s ease-out; }
+@keyframes windShift {
+  0%, 55% { border-color: var(--warn, #ffcc2e); box-shadow: 0 0 0 2px rgba(255, 204, 46, 0.22); }
+  100% { border-color: var(--line-soft); box-shadow: none; }
+}
+@keyframes windShiftText {
+  0%, 55% { color: var(--warn, #ffcc2e); }
+  100% { color: var(--text); }
+}
 
 .timer-box { position: relative; width: 34px; height: 34px; display: grid; place-items: center; }
 .timer-ring { position: absolute; inset: 0; transform: rotate(-90deg); }

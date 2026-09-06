@@ -679,6 +679,7 @@
     fitCanvas();
     game = new Game($('#canvas'), cfg, ui);
     window.__game = game;
+    lastWind = game.wind;   // 판 시작의 첫 바람은 번쩍이지 않습니다
     const tag = $('#hudStage');
     if (run && Profile.MODES[run.mode].total !== 1) {
       tag.hidden = false;
@@ -755,6 +756,7 @@
   /* ═══════════════ 게임 HUD ═══════════════ */
 
   let bannerTimer = null;
+  let lastWind = null;
 
   const ui = {
     onTurn(g) {
@@ -784,6 +786,14 @@
       $('#ffill').style.width = `${(t.fuel / t.maxFuel) * 100}%`;
       drawWind(g.wind);
       $('#hudWind').textContent = Math.abs(g.wind).toFixed(1);
+      // 바람은 몇 라운드에 한 번만 바뀝니다 — 바뀐 순간에만 표시를 번쩍입니다
+      if (g.wind !== lastWind) {
+        lastWind = g.wind;
+        const box = $('.wind-box');
+        box.classList.remove('is-shift');
+        void box.offsetWidth;          // 애니메이션 재시작
+        box.classList.add('is-shift');
+      }
       const left = Math.max(0, Math.ceil(g.turnLeft));
       $('#hudTimer').textContent = left;
       $('#timerRing').style.strokeDashoffset = (97.4 * (1 - Math.max(0, g.turnLeft) / TURN_SECONDS)).toFixed(1);

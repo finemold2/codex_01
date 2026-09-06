@@ -74,6 +74,8 @@ class Game {
     this.turnIdx = -1;
     this.round = 1;
     this.wind = 0;
+    this.windHold = 0;        // 몇 라운드 더 이 바람이 유지되는지
+    this.windChanged = false; // 이번 턴 안내에 '바람이 바뀌었습니다' 를 붙일지
     this.projectiles = [];
     this.pending = [];        // 지연 폭발 (연쇄탄 등)
     this.burns = [];          // 네이팜 불바다
@@ -97,6 +99,7 @@ class Game {
     this.last = performance.now();
     this.stats = { shots: 0, totalDamage: 0 };
 
+    this.rollWind(true);   // 첫 바람은 조용히 정합니다
     this.nextTurn();
     this._loop = this.loop.bind(this);
     requestAnimationFrame(this._loop);
@@ -136,6 +139,26 @@ class Game {
   /* ─────────────────── 턴 관리 ─────────────────── */
 
   setState(s) { this.state = s; this.stateT = 0; }
+
+  /**
+   * 바람은 매 턴이 아니라 몇 라운드에 한 번씩만 바뀝니다.
+   * 한 번 불면 3~5 라운드 동안 그대로라, 그동안은 조준값을 그대로 써먹을 수 있습니다.
+   */
+  rollWind(silent) {
+    const prev = this.wind;
+    let w = prev, tries = 0;
+    do {
+      w = Math.round(clamp(prev * 0.25 + (Math.random() * 2 - 1) * 9.5, -10, 10) * 10) / 10;
+    } while (Math.abs(w - prev) < 1.5 && ++tries < 8);   // 바뀌었으면 티가 나게
+    this.wind = w;
+    this.windHold = 3 + Math.floor(Math.random() * 3);   // 3~5 라운드 유지
+    if (HAS_FX && FX.setWind) FX.setWind(this.wind);
+    if (HAS_GFX && Gfx.setWind) Gfx.setWind(this.wind);
+    if (!silent) {
+      this.windChanged = true;
+      if (typeof Sfx !== 'undefined' && Sfx.windGust) Sfx.windGust(this.wind);
+    }
+  }
   aliveTeams() { return new Set(this.tanks.filter((t) => t.alive).map((t) => t.team)); }
   aliveTanks() { return this.tanks.filter((t) => t.alive); }
 
@@ -164,12 +187,13 @@ class Game {
       }
     }
 
-    // 라운드가 넘어갈 때 보급기 등장
+    // 라운드가 넘어갈 때 보급기 등장 / 바람이 바뀔 때가 됐는지 확인
     if (wrapped) {
       if (--this.supplyIn <= 0) {
         this.callSupplyPlane(1 + (Math.random() < 0.45 ? 1 : 0));
         this.supplyIn = 2 + Math.floor(Math.random() * 3);
       }
+      if (--this.windHold <= 0) this.rollWind(false);
     }
 
     this.turnIdx = i;
@@ -209,13 +233,14 @@ class Game {
       t.weapon = 0;
       for (let k = 0; k < t.weapons.length; k++) if (t.hasAmmo(k)) { t.weapon = k; break; }
     }
-    this.wind = Math.round(clamp(this.wind * 0.35 + (Math.random() * 2 - 1) * 9.5, -10, 10) * 10) / 10;
-    if (HAS_FX && FX.setWind) FX.setWind(this.wind);
-    if (typeof Sfx !== 'undefined' && Sfx.windGust) Sfx.windGust(this.wind);
     this.turnLeft = TURN_SECONDS;
     this.ai = t.isAI ? { phase: 'wait', t: 0, plan: null, moved: 0 } : null;
     this.setState('intro');
-    this.ui.banner(`${t.name} 턴${t.isAI ? '' : ' — 당신 차례!'}`, 1000);
+    this.ui.banner(
+      `${t.name} 턴${t.isAI ? '' : ' — 당신 차례!'}${this.windChanged ? '  ·  🌬 바람이 바뀌었습니다' : ''}`,
+      this.windChanged ? 1700 : 1000,
+    );
+    this.windChanged = false;
     if (typeof Sfx !== 'undefined' && Sfx.turnStart) Sfx.turnStart(!t.isAI);
     this.updateMusicIntensity();
     this.ui.onTurn(this);
