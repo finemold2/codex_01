@@ -1,3 +1,8 @@
+> 이 저장소에는 두 개의 독립 웹앱이 있습니다.
+>
+> - **🏃 RunClub** (루트) — GPS 러닝 트래커. 아래 설명 참고.
+> - **💣 Fortress** (`fortress/`) — AI와 대결하는 턴제 포격 게임. 개인전·팀전 지원. → [fortress/README.md](fortress/README.md)
+
 # 🏃 RunClub — 러닝 트래커 웹앱
 
 런데이 / Nike Run Club 스타일의 **GPS 러닝 트래커** 웹앱입니다.
