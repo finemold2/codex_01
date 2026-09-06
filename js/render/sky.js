@@ -57,8 +57,6 @@ const MS_SOFT = 0.40;
 const MIE_ALBEDO = 0.9;
 /** Sample distribution steepness for the view-ray integral (higher = more samples near the eye). */
 const STEP_K = 6.0;
-/** CPU integration step count (the GPU uses 4..10 depending on quality). */
-const CPU_STEPS = 7;
 
 /** Observer latitude used by the solar position model, radians. */
 const LATITUDE = 36.0 * DEG2RAD;
@@ -160,6 +158,10 @@ const _roots = new Float32Array(2);
 /** Azimuth weights for the fog colour average; the sun's side counts double. */
 const FOG_AZIMUTH_WEIGHTS = [0.34, 0.22, 0.22, 0.22];
 
+/** `params` entries that change what `_recompute()` produces; watched for runtime edits. */
+const PARAM_KEYS = ['turbidity', 'mieG', 'sunIrradiance', 'multiScatter', 'moonElongation',
+  'dayLightIntensity', 'moonLightIntensity', 'lightPollution'];
+
 /* -------------------------------------------------------------------------- */
 /* GLSL                                                                        */
 /* -------------------------------------------------------------------------- */
@@ -216,6 +218,7 @@ uniform float uCloudCoverB;
 uniform float uCloudSharp;
 uniform float uStarDensity;
 uniform float uMilkyWay;
+uniform float uGroundFog;     // aerial perspective for the terrain below the horizon, per km
 uniform vec2 uWindA;
 uniform vec2 uWindB;
 
@@ -311,23 +314,33 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
   vec3 sumM = vec3(0.0);
   vec3 sumMS = vec3(0.0);
   float kInv = 1.0 / (exp(STEP_K) - 1.0);
+  float invN = 1.0 / float(SKY_STEPS);
   float tPrev = 0.0;
 
   for (int i = 0; i < SKY_STEPS; i++) {
-    float f = float(i + 1) / float(SKY_STEPS);
-    float tNext = tMax * (exp(STEP_K * f) - 1.0) * kInv;
+    float tNext = tMax * (exp(STEP_K * float(i + 1) * invN) - 1.0) * kInv;
+    // Evaluate the density at the segment's PARAMETRIC centre, not its arithmetic midpoint:
+    // with an exponential step distribution that lands near the density-weighted centroid,
+    // which is what makes a 4-step and a 10-step march agree to a couple of percent.
+    float tMid = tMax * (exp(STEP_K * (float(i) + 0.5) * invN) - 1.0) * kInv;
     float dt = tNext - tPrev;
-    vec3 p = ro + rd * (tPrev + dt * 0.5);
+    vec3 p = ro + rd * tMid;
     tPrev = tNext;
 
     float alt = max(length(p) - RG, 0.0);
     float dR = exp(-alt / HR) * dt;
     float dM = exp(-alt / HM) * dt;
+    float dO = max(0.0, 1.0 - abs(alt - O3_PEAK) / O3_HALF) * dt;
+
+    // Extinction between the eye and THIS sample: everything already integrated plus half of
+    // the segment the sample sits in. Advancing the whole segment first would shadow the
+    // sample with air that lies behind it and throws away 10-30% of the sky (and makes the
+    // result depend on the step count, i.e. on the quality tier).
+    vec3 tauView = BETA_R * (odR + dR * 0.5) + betaMe * (odM + dM * 0.5) + BETA_O3 * (odO + dO * 0.5);
     odR += dR;
     odM += dM;
-    odO += max(0.0, 1.0 - abs(alt - O3_PEAK) / O3_HALF) * dt;
+    odO += dO;
 
-    vec3 tauView = BETA_R * odR + betaMe * odM + BETA_O3 * odO;
     vec3 tauSun = lightTau(p, uSunDir);
     vec3 T = exp(-min(tauView + tauSun, 60.0));
     sumR += T * dR;
@@ -541,9 +554,12 @@ vec3 moonDisc(vec3 rd, out float coverage) {
   vec3 up = abs(uMoonDir.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
   vec3 mr = normalize(cross(up, uMoonDir));
   vec3 mu2 = cross(uMoonDir, mr);
-  vec2 duv = vec2(dot(rd, mr), dot(rd, mu2)) / uMoonAngular;
+  // Guard the divide: a zero angular radius would produce inf -> NaN and, through the NaN
+  // guard at the end of main(), flatten the entire sky to the fog colour.
+  float mang = max(uMoonAngular, 1e-4);
+  vec2 duv = vec2(dot(rd, mr), dot(rd, mu2)) / mang;
   float r2 = dot(duv, duv);
-  float edge = max(uPixelAngle / uMoonAngular, 0.01);
+  float edge = max(uPixelAngle / mang, 0.01);
   if (r2 > (1.0 + edge) * (1.0 + edge)) return vec3(0.0);
 
   float r = sqrt(r2);
@@ -593,6 +609,10 @@ void main() {
     vec3 sunT = exp(-min(lightTau(gp, uSunDir), 60.0));
     vec3 lit = sunT * uSunIrradiance * max(dot(gn, uSunDir), 0.0) * 0.318;
     col += uGroundAlbedo * (lit + uAmbientSky * 0.6 + uNightSky * 12.0 * uNightFactor) * viewT;
+    // Aerial perspective with the same exponential the renderer fogs geometry with. Without
+    // it this strip is half as bright as `fogColor`, so the moment the city's ground plane
+    // runs out you get a hard dark band hugging the horizon instead of a seamless dissolve.
+    col = mix(col, uHorizonColor, 1.0 - exp(-tGround * uGroundFog));
   } else {
     // ---- celestial bodies, all attenuated by the air in front of them ----
     if (uStarIntensity > 0.002) {
@@ -620,10 +640,11 @@ void main() {
 
     // Sun disc with limb darkening, plus a tight halo on top of the Mie glow.
     float sang = acos(clamp(muS, -1.0, 1.0));
-    float sEdge = max(uPixelAngle * 1.1, uSunAngular * 0.02);
-    float disc = 1.0 - smoothstep(uSunAngular - sEdge, uSunAngular + sEdge, sang);
+    float sunAng = max(uSunAngular, 1e-5);
+    float sEdge = max(uPixelAngle * 1.1, sunAng * 0.02);
+    float disc = 1.0 - smoothstep(sunAng - sEdge, sunAng + sEdge, sang);
     if (disc > 0.0) {
-      float rr = clamp(sang / uSunAngular, 0.0, 1.0);
+      float rr = clamp(sang / sunAng, 0.0, 1.0);
       float cosPsi = sqrt(max(1.0 - rr * rr, 0.0));
       float limb = 1.0 - 0.62 * (1.0 - pow(max(cosPsi, 1e-3), 0.45));
       col += vec3(1.0, 0.97, 0.93) * (uSunIrradiance * 1.05 * limb * disc) * viewT;
@@ -721,6 +742,10 @@ export class Sky {
       haze: 1.0,
       lightPollution: 1.0,
       groundAlbedo: [0.085, 0.082, 0.078],
+      // Aerial perspective applied to the terrain the sky draws below the horizon, in 1/km.
+      // Keep it in step with the renderer's fog density (metres) so the strip of sky under
+      // the horizon lands on the same colour distant geometry fades to.
+      groundFog: 1.6,
       dayLightIntensity: 3.2,
       moonLightIntensity: 0.055
     };
@@ -771,7 +796,14 @@ export class Sky {
     this._dirty = true;
     /** @type {number} Effective Mie scattering coefficient, per km. */
     this._betaM = BETA_M_BASE;
+    /**
+     * Snapshot of every `params` entry that feeds `_recompute`, so editing a knob at runtime
+     * takes effect even when the clock is frozen (`daySpeed = 0`, which is the default).
+     * @type {Float32Array}
+     */
+    this._paramCache = new Float32Array(PARAM_KEYS.length + 3);
 
+    this._watchParams();
     this._recompute();
     // Compile the current tier up front so shader errors surface at load time.
     this._shader(this._qualityName);
@@ -806,12 +838,23 @@ export class Sky {
     this.elapsed += d;
     const s = speed === undefined || speed === null ? this.daySpeed : speed;
     if (s) this.setTimeOfDay(this.timeOfDay + d * s);
+    this._watchParams();
     const spd = this.params.cloudSpeed;
     this._wind[0] += d * this.params.windX * 0.0016 * spd;
     this._wind[1] += d * this.params.windZ * 0.0016 * spd;
     this._wind[2] += d * this.params.windX * 0.00042 * spd;
     this._wind[3] += d * this.params.windZ * 0.00042 * spd;
     if (this._dirty) this._recompute();
+  }
+
+  /**
+   * Forces the derived lighting (sun colour, fog, ambient) to be recomputed on the next
+   * `update()`/`render()`. Only needed when `params` is mutated through an alias this class
+   * cannot see; direct edits to `sky.params.*` are picked up automatically.
+   * @returns {void}
+   */
+  invalidate() {
+    this._dirty = true;
   }
 
   /**
@@ -843,7 +886,11 @@ export class Sky {
    */
   setQuality(nameOrObject) {
     const name = typeof nameOrObject === 'string' ? nameOrObject : (nameOrObject && nameOrObject.name);
-    this._qualityName = QUALITY_PRESETS[name] ? name : 'high';
+    const next = QUALITY_PRESETS[name] ? name : 'high';
+    if (next !== this._qualityName) {
+      this._qualityName = next;
+      this._dirty = true;   // the CPU mirror marches with the tier's step count
+    }
   }
 
   /**
@@ -874,10 +921,11 @@ export class Sky {
    */
   render(camera) {
     if (this.disposed || !camera) return;
-    if (this._dirty) this._recompute();
     const gl = this.gl;
 
     this._syncQuality();
+    this._watchParams();
+    if (this._dirty) this._recompute();
     const shader = this._shader(this._qualityName);
     shader.use();
 
@@ -927,6 +975,7 @@ export class Sky {
     shader.setFloat('uHaze', this.params.haze);
     shader.setFloat('uStarDensity', this.params.starDensity);
     shader.setFloat('uMilkyWay', this.params.milkyWay);
+    shader.setFloat('uGroundFog', clamp(this.params.groundFog, 0.02, 40.0));
 
     const cover = clamp(1.0 - this.params.cloudiness, 0.02, 0.98);
     shader.setFloat('uCloudCoverA', 0.30 + cover * 0.42);
@@ -936,13 +985,25 @@ export class Sky {
     shader.setVec2('uWindB', this._wind[2], this._wind[3]);
     shader.setFloat('uPixelAngle', this._pixelAngle(camera));
 
-    gl.depthFunc(gl.LEQUAL);
-    gl.depthMask(false);
-    gl.disable(gl.BLEND);
-    gl.disable(gl.CULL_FACE);
+    // The frame graph runs the sky in the middle of the renderer's own passes, so every bit
+    // of state touched here is put back exactly as it was found. These four queries are
+    // client-side cached in WebGL implementations and do not stall the pipeline.
+    const hadBlend = gl.isEnabled(gl.BLEND);
+    const hadCull = gl.isEnabled(gl.CULL_FACE);
+    const prevDepthFunc = gl.getParameter(gl.DEPTH_FUNC);
+    const prevDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+
+    if (hadBlend) gl.disable(gl.BLEND);
+    if (hadCull) gl.disable(gl.CULL_FACE);
+    if (prevDepthFunc !== gl.LEQUAL) gl.depthFunc(gl.LEQUAL);
+    if (prevDepthMask) gl.depthMask(false);
+
     drawFullscreen(gl);
-    gl.enable(gl.CULL_FACE);
-    gl.depthMask(true);
+
+    if (prevDepthMask) gl.depthMask(true);
+    if (prevDepthFunc !== gl.LEQUAL) gl.depthFunc(prevDepthFunc);
+    if (hadCull) gl.enable(gl.CULL_FACE);
+    if (hadBlend) gl.enable(gl.BLEND);
   }
 
   /**
@@ -980,7 +1041,44 @@ export class Sky {
     if (name !== this._rendererQuality) {
       this._rendererQuality = name;
       this._qualityName = name;
+      // The CPU mirror marches with the tier's step count, so the derived colours have to be
+      // rebuilt when the tier changes or fog stops matching the sky.
+      this._dirty = true;
     }
+  }
+
+  /**
+   * Marks the derived lighting dirty when any `params` entry that feeds `_recompute` changed
+   * since the last pass. Allocation free; runs once per frame.
+   * @returns {void}
+   * @private
+   */
+  _watchParams() {
+    const p = this.params;
+    const cache = this._paramCache;
+    let changed = false;
+    for (let i = 0; i < PARAM_KEYS.length; i++) {
+      const v = p[PARAM_KEYS[i]];
+      if (cache[i] !== v) { cache[i] = v; changed = true; }
+    }
+    const ga = p.groundAlbedo;
+    for (let i = 0; i < 3; i++) {
+      const v = ga ? ga[i] : 0;
+      const k = PARAM_KEYS.length + i;
+      if (cache[k] !== v) { cache[k] = v; changed = true; }
+    }
+    if (changed) this._dirty = true;
+  }
+
+  /**
+   * Number of ray-march steps the active shader variant uses, so the CPU mirror integrates
+   * with exactly the same quadrature and `fogColor`/`ambientSky` really do match the picture.
+   * @returns {number} Step count.
+   * @private
+   */
+  _steps() {
+    const preset = QUALITY_PRESETS[this._qualityName] || QUALITY_PRESETS.high;
+    return preset.SKY_STEPS;
   }
 
   /**

@@ -126,7 +126,17 @@ export default async function run({ canvas }) {
   for (const e of consoleErrors.slice(0, 12)) bad(`console.error: ${e}`);
   console.error = origError;
 
-  window.__shot = async () => { game.update(1 / 60); game.render(1 / 60); };
+  window.__shot = async () => {
+    // main.js hides these once boot finishes; this probe drives Game directly, so do it here.
+    dom.loading.classList.add('hidden');
+    dom.loading.style.display = 'none';
+    game.menu.hide();
+    dom.menuRoot.style.display = 'none';
+    game.hud.show();
+    game.player.aiming = false;
+    for (let i = 0; i < 3; i++) { game.update(1 / 60); game.hud.update(1 / 60); }
+    game.render(1 / 60);
+  };
   window.__game = game;
   return out;
 }

@@ -2280,3 +2280,991 @@ export class Vehicle {
       this._safeYaw = this.yaw;
     }
   }
+
+  /**
+   * Resolves the frame's motion against the static world.
+   *
+   * Four spheres at the body corners are swept from where the vehicle was at the start of the
+   * frame to where the integration put it. Because the test is swept, nothing can tunnel through
+   * a wall no matter how large the time step or how fast the car is going. Any impact produces an
+   * impulse, a yaw kick, speed loss, damage, sparks and a metal crunch.
+   * @param {Object} collision CollisionWorld.
+   * @returns {void}
+   */
+  _collideWorld(collision) {
+    if (!collision || typeof collision.sweepSphere !== 'function') return;
+    const t = this.type;
+    const r = t.hitRadius;
+    const dx = this.position[0] - this._prevX;
+    const dy = this.position[1] - this._prevY;
+    const dz = this.position[2] - this._prevZ;
+    const moved2 = dx * dx + dy * dy + dz * dz;
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    // Corner offsets pulled in by the sphere radius so the spheres approximate the box.
+    const hx = Math.max(0.05, t.width * 0.5 - r);
+    const hz = Math.max(0.05, t.length * 0.5 - r);
+    const cy = t.height * 0.30 - t.comHeight + r;
+    _corner[0] = -hx; _corner[1] = -hz;
+    _corner[2] = hx; _corner[3] = -hz;
+    _corner[4] = -hx; _corner[5] = hz;
+    _corner[6] = hx; _corner[7] = hz;
+
+    if (moved2 > 1e-8) {
+      for (let iter = 0; iter < 3; iter++) {
+        let bestT = 1.1;
+        let bnx = 0;
+        let bny = 0;
+        let bnz = 0;
+        let bcx = 0;
+        let bcz = 0;
+        let found = false;
+        const px = this.position[0];
+        const py = this.position[1];
+        const pz = this.position[2];
+        const mx = px - this._prevX;
+        const my = py - this._prevY;
+        const mz = pz - this._prevZ;
+        if (mx * mx + my * my + mz * mz < 1e-8) break;
+        for (let k = 0; k < 4; k++) {
+          const ox = _corner[k * 2];
+          const oz = _corner[k * 2 + 1];
+          const wx = ox * c - oz * s;
+          const wz = -ox * s - oz * c;
+          _from[0] = this._prevX + wx;
+          _from[1] = this._prevY + cy;
+          _from[2] = this._prevZ + wz;
+          _to[0] = px + wx;
+          _to[1] = py + cy;
+          _to[2] = pz + wz;
+          const hit = collision.sweepSphere(_from, _to, r);
+          if (hit && hit.t < bestT) {
+            bestT = hit.t;
+            bnx = hit.normal[0];
+            bny = hit.normal[1];
+            bnz = hit.normal[2];
+            bcx = wx;
+            bcz = wz;
+            found = true;
+          }
+        }
+        if (!found) break;
+        // Back the body up to the contact point, leaving a small skin gap.
+        const tt = Math.max(0, bestT - 0.002);
+        this.position[0] = this._prevX + mx * tt;
+        this.position[1] = this._prevY + my * tt;
+        this.position[2] = this._prevZ + mz * tt;
+        this._applyWorldImpulse(bnx, bny, bnz, bcx, bcz);
+        // Continue the remaining motion along the wall next iteration.
+        this._prevX = this.position[0];
+        this._prevY = this.position[1];
+        this._prevZ = this.position[2];
+      }
+    }
+
+    // Depenetration: push out of anything the body is already inside (resting contact).
+    if (typeof collision.querySphere === 'function') {
+      for (let k = 0; k < 4; k++) {
+        const ox = _corner[k * 2];
+        const oz = _corner[k * 2 + 1];
+        const wx = ox * c - oz * s;
+        const wz = -ox * s - oz * c;
+        const px = this.position[0] + wx;
+        const py = this.position[1] + cy;
+        const pz = this.position[2] + wz;
+        _bodies.length = 0;
+        collision.querySphere(px, py, pz, r, _bodies);
+        for (let i = 0; i < _bodies.length; i++) {
+          const b = _bodies[i];
+          if (!b || b.tag === 'trigger' || b.userData === this) continue;
+          const dist = closestOnBody(b, px, py, pz, _pt);
+          let nx;
+          let ny;
+          let nz;
+          let depth;
+          if (dist > 1e-5) {
+            nx = (px - _pt[0]) / dist;
+            ny = (py - _pt[1]) / dist;
+            nz = (pz - _pt[2]) / dist;
+            depth = r - dist;
+          } else {
+            // Deeply inside: push out along the shallowest box axis.
+            nx = px - b.cx;
+            ny = 0;
+            nz = pz - b.cz;
+            const l = Math.hypot(nx, nz);
+            if (l < 1e-5) { nx = 0; nz = 1; } else { nx /= l; nz /= l; }
+            depth = r;
+          }
+          if (depth <= 0) continue;
+          // Only push horizontally when the contact is a wall; the suspension owns vertical.
+          if (ny > 0.7) continue;
+          this.position[0] += nx * depth;
+          this.position[2] += nz * depth;
+          if (depth > 0.02) this._applyWorldImpulse(nx, 0, nz, wx, wz);
+        }
+      }
+      _bodies.length = 0;
+    }
+  }
+
+  /**
+   * Applies a collision impulse from a world contact and books the resulting damage.
+   * @param {number} nx Contact normal X (pointing away from the obstacle).
+   * @param {number} ny Contact normal Y.
+   * @param {number} nz Contact normal Z.
+   * @param {number} rxx Contact offset from the centre of mass, world X.
+   * @param {number} rzz Contact offset from the centre of mass, world Z.
+   * @returns {void}
+   */
+  _applyWorldImpulse(nx, ny, nz, rxx, rzz) {
+    const t = this.type;
+    const vn = this.velocity[0] * nx + this.velocity[1] * ny + this.velocity[2] * nz;
+    if (vn >= 0) return;
+    const impact = -vn;
+    const j = -(1 + WORLD_RESTITUTION) * vn;
+    this.velocity[0] += nx * j;
+    this.velocity[1] += ny * j * 0.35;
+    this.velocity[2] += nz * j;
+    // Tangential scrub: the car loses speed rubbing along the wall.
+    const tvx = this.velocity[0] - nx * (this.velocity[0] * nx + this.velocity[2] * nz);
+    const tvz = this.velocity[2] - nz * (this.velocity[0] * nx + this.velocity[2] * nz);
+    const scrub = clamp(impact * 0.055, 0, 0.55);
+    this.velocity[0] -= tvx * scrub;
+    this.velocity[2] -= tvz * scrub;
+    // Yaw kick: hitting a corner spins the car.
+    const torque = (rzz * nx - rxx * nz) * j * t.mass * 0.30;
+    this.yawRate = clamp(this.yawRate + torque / t.yawInertia, -MAX_YAW_RATE, MAX_YAW_RATE);
+
+    const fwd = this.velocity[0] * -Math.sin(this.yaw) + this.velocity[2] * -Math.cos(this.yaw);
+    this.forwardSpeed = fwd;
+
+    if (impact > DAMAGE_FLOOR) {
+      _pt[0] = this.position[0] + rxx;
+      _pt[1] = this.position[1];
+      _pt[2] = this.position[2] + rzz;
+      this._impactEffects(impact, _pt, nx, nz);
+      const dmg = Math.pow(impact - DAMAGE_FLOOR, 1.45) * 3.4 * (t.mass / 1500);
+      this.applyDamage(dmg, _pt, null);
+    }
+  }
+
+  /**
+   * Sparks, debris, sound and camera shake for one impact.
+   * @param {number} impact Normal impact speed in m/s.
+   * @param {ArrayLike<number>} point World contact point.
+   * @param {number} nx Contact normal X.
+   * @param {number} nz Contact normal Z.
+   * @returns {void}
+   */
+  _impactEffects(impact, point, nx, nz) {
+    const game = this.game;
+    this._lastCrashSpeed = impact;
+    if (!game) return;
+    if (this._impactCooldown > 0) return;
+    this._impactCooldown = 0.11;
+    const parts = game.particles || (game.renderer && game.renderer.particles) || null;
+    if (parts && this._viewDist < 140) {
+      const n = Math.min(22, 3 + Math.round(impact * 1.4));
+      parts.burst('spark', point[0], point[1], point[2], n,
+        { dir: [nx, 0.35, nz], spread: 0.55, power: 0.6 + impact * 0.08 });
+      if (impact > 7) {
+        parts.burst('debris', point[0], point[1], point[2], Math.min(10, Math.round(impact * 0.5)),
+          { dir: [nx, 0.6, nz], power: 0.5 + impact * 0.05 });
+      }
+      if (impact > 11) {
+        parts.burst('glass', point[0], point[1] + 0.3, point[2], 8,
+          { dir: [nx, 0.5, nz], power: 0.8 });
+      }
+      if (impact > 5) {
+        parts.burst('smoke', point[0], point[1], point[2], 3, { power: 0.5 });
+      }
+    }
+    if (game.sfx) {
+      if (typeof game.sfx.carCollision === 'function') game.sfx.carCollision(impact, point);
+      if (impact > 11 && typeof game.sfx.glassBreak === 'function') {
+        game.sfx.glassBreak(point, clamp(impact / 24, 0.2, 1));
+      }
+    }
+    if (this.isPlayer && typeof game.shakeCamera === 'function') {
+      game.shakeCamera(clamp(impact * 0.035, 0.05, 0.85), clamp(impact * 0.02, 0.12, 0.45));
+    }
+    if (game.peds && typeof game.peds.alertNoise === 'function' && impact > 6) {
+      game.peds.alertNoise(point, 14);
+    }
+  }
+
+  /**
+   * Elastic impulse against another vehicle. Callers (traffic, police, game) detect the
+   * overlap and hand both vehicles to this method.
+   * @param {Vehicle} other The other vehicle.
+   * @returns {boolean} True when the pair actually overlapped and was resolved.
+   */
+  collideWith(other) {
+    if (!other || other === this) return false;
+    const ta = this.type;
+    const tb = other.type;
+    let dx = other.position[0] - this.position[0];
+    let dz = other.position[2] - this.position[2];
+    const dy = other.position[1] - this.position[1];
+    if (Math.abs(dy) > (ta.height + tb.height) * 0.6) return false;
+    const ra = ta.boundRadius * 0.78;
+    const rb = tb.boundRadius * 0.78;
+    const minDist = ra + rb;
+    let dist = Math.hypot(dx, dz);
+    if (dist > minDist) return false;
+    if (dist < 1e-4) {
+      dx = Math.cos(this.yaw + 1.2);
+      dz = -Math.sin(this.yaw + 1.2);
+      dist = 1;
+    }
+    const nx = dx / dist;
+    const nz = dz / dist;
+    const overlap = minDist - dist;
+
+    const ma = ta.mass;
+    const mb = tb.mass;
+    const invA = 1 / ma;
+    const invB = 1 / mb;
+    const invSum = invA + invB;
+
+    // Positional correction proportional to inverse mass.
+    const push = overlap * 0.55;
+    this.position[0] -= nx * push * (invA / invSum);
+    this.position[2] -= nz * push * (invA / invSum);
+    other.position[0] += nx * push * (invB / invSum);
+    other.position[2] += nz * push * (invB / invSum);
+
+    const rvx = other.velocity[0] - this.velocity[0];
+    const rvz = other.velocity[2] - this.velocity[2];
+    const vn = rvx * nx + rvz * nz;
+    if (vn > 0) return true;   // already separating
+
+    const j = -(1 + CAR_RESTITUTION) * vn / invSum;
+    this.velocity[0] -= nx * j * invA;
+    this.velocity[2] -= nz * j * invA;
+    other.velocity[0] += nx * j * invB;
+    other.velocity[2] += nz * j * invB;
+
+    // Glancing blows spin both cars.
+    const armA = (this.position[0] - other.position[0]) * nz -
+      (this.position[2] - other.position[2]) * nx;
+    this.yawRate = clamp(this.yawRate - armA * j / ta.yawInertia * 0.5,
+      -MAX_YAW_RATE, MAX_YAW_RATE);
+    other.yawRate = clamp(other.yawRate + armA * j / tb.yawInertia * 0.5,
+      -MAX_YAW_RATE, MAX_YAW_RATE);
+
+    const impact = -vn;
+    if (impact > DAMAGE_FLOOR) {
+      _pt[0] = this.position[0] + nx * ra;
+      _pt[1] = this.position[1] + ta.height * 0.15;
+      _pt[2] = this.position[2] + nz * ra;
+      this._impactEffects(impact, _pt, -nx, -nz);
+      const base = Math.pow(impact - DAMAGE_FLOOR, 1.4) * 2.6;
+      this.applyDamage(base * (mb / ma) * 0.9, _pt, null);
+      other.applyDamage(base * (ma / mb) * 0.9, _pt, null);
+    }
+    return true;
+  }
+
+  /**
+   * Applies structural damage. Below 40% health the wreck smokes, below 15% it burns and a
+   * fuse starts; when the fuse runs out {@link Vehicle#explode} fires.
+   * @param {number} amount Damage points (health runs 0..1000).
+   * @param {ArrayLike<number>} [point3] World impact point.
+   * @param {ArrayLike<number>} [impulse3] Optional world impulse to add (N.s).
+   * @returns {void}
+   */
+  applyDamage(amount, point3, impulse3) {
+    const a = fin(amount, 0);
+    if (impulse3) {
+      const m = this.type.mass;
+      this.velocity[0] += fin(impulse3[0], 0) / m;
+      this.velocity[1] += clamp(fin(impulse3[1], 0) / m, -8, 12);
+      this.velocity[2] += fin(impulse3[2], 0) / m;
+    }
+    if (this.isDestroyed || a <= 0) return;
+    this.health -= a;
+    if (this.health < 0) this.health = 0;
+    const dmg = this.damage;
+    if (!this._smoking && dmg >= SMOKE_DAMAGE) this._smoking = true;
+    if (!this._burning && dmg >= FIRE_DAMAGE) {
+      this._burning = true;
+      if (this._fuse < 0) this._fuse = 3.4 + this.rng.next() * 2.2;
+    }
+    if (this.health <= 0 && this._fuse < 0) this._fuse = 0.9 + this.rng.next() * 0.8;
+  }
+
+  /**
+   * Blows the vehicle up: hands the blast to `game.explosionAt`, kills the engine and
+   * leaves a burnt-out wreck behind.
+   * @returns {void}
+   */
+  explode() {
+    if (this.isDestroyed) return;
+    this.isDestroyed = true;
+    this.health = 0;
+    this._fuse = -1;
+    this._burning = true;
+    this.engineOn = false;
+    this.sirenOn = false;
+    this.lights.head = false;
+    this.lights.siren = false;
+    this._stopEngineVoice();
+    this._stopScreech();
+    this._stopSiren();
+    const g = this.game;
+    if (g) {
+      const y = this.position[1] + this.type.height * 0.25;
+      if (typeof g.explosionAt === 'function') {
+        g.explosionAt(this.position[0], y, this.position[2],
+          6.5 + this.type.length * 0.55, 150 + this.type.mass * 0.035, this);
+      }
+      if (typeof g.emit === 'function') g.emit('vehicleDestroyed', this);
+    }
+    // The wreck jumps and settles.
+    this.velocity[1] += 3.4;
+    this.yawRate += (this.rng.next() - 0.5) * 2.4;
+  }
+
+  /**
+   * Per-frame bookkeeping after the physics sub-steps: derived speeds, visual suspension,
+   * lamp state, audio, particles and the destruction fuse.
+   * @param {number} dt Frame delta in seconds.
+   * @returns {void}
+   */
+  _postStep(dt) {
+    const t = this.type;
+    this.speedMs = Math.hypot(this.velocity[0], this.velocity[2]);
+    this.speed = this.speedMs * 3.6;
+    this._distanceDriven += this.speedMs * dt;
+    if (this.occupants.length > 0) this.occupants[0] = this.driver;
+
+    // --- visual suspension, pitch and roll -------------------------------------------------------
+    const staticLoad = t.mass * GRAVITY * 0.25;
+    let cFront = 0;
+    let cRear = 0;
+    let cLeft = 0;
+    let cRight = 0;
+    for (let i = 0; i < 4; i++) {
+      const w = this.wheels[i];
+      const extra = (w.load - staticLoad) / Math.max(1, t.springRate * t.travel);
+      const target = w.contact ? clamp(w.compression + extra, 0, 1) : 0;
+      w.visualComp = damp(w.visualComp, target, 16, dt);
+      if (w.front) cFront += w.visualComp * 0.5; else cRear += w.visualComp * 0.5;
+      if (w.localX < 0) cLeft += w.visualComp * 0.5; else cRight += w.visualComp * 0.5;
+    }
+    const pitchTarget = clamp(-(cFront - cRear) * t.travel * 3.4 / t.wheelBase * 4.0,
+      -MAX_BODY_TILT, MAX_BODY_TILT);
+    const rollTarget = clamp((cLeft - cRight) * t.travel * 3.4 / t.track * 4.0,
+      -MAX_BODY_TILT * 1.3, MAX_BODY_TILT * 1.3);
+    this.pitch = damp(this.pitch, pitchTarget, 12, dt);
+    this.roll = damp(this.roll, rollTarget, 12, dt);
+
+    // --- lamps ----------------------------------------------------------------------------------
+    const g = this.game;
+    const night = g && typeof g.isNight === 'function' ? g.isNight() : false;
+    if (!this._lightsForced) {
+      this.lights.head = !this.isDestroyed && this.engineOn &&
+        (night || (g && g.weather && g.weather.rain > 0.3));
+      this.lights.brake = !this.isDestroyed &&
+        (this._inBrake > 0.05 || (this._inHandbrake && this.speedMs > 0.4));
+      this.lights.reverse = !this.isDestroyed && this.gear === -1 && this._drive > 0.03;
+      this.lights.siren = this.sirenOn && this.isPolice && !this.isDestroyed;
+    }
+    this._sirenPhase += dt * 3.1;
+    if (this._sirenPhase > 1e6) this._sirenPhase = 0;
+
+    // --- destruction fuse ---------------------------------------------------------------------------
+    if (this._fuse > 0) {
+      this._fuse -= dt;
+      if (this._fuse <= 0) this.explode();
+    }
+
+    this._updateEffects(dt);
+    this._updateAudio(dt);
+  }
+
+  /**
+   * Tyre smoke, skid marks, exhaust puffs, damage smoke and wreck fire.
+   * All emission is distance gated so a full city of traffic stays cheap.
+   * @param {number} dt Frame delta.
+   * @returns {void}
+   */
+  _updateEffects(dt) {
+    const g = this.game;
+    if (!g) return;
+    const parts = g.particles || (g.renderer && g.renderer.particles) || null;
+    if (!parts || typeof parts.burst !== 'function') return;
+    const t = this.type;
+    const near = this._viewDist;
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+
+    // --- tyre smoke and skid streaks ------------------------------------------------------------
+    if (near < 95 && this.speedMs > 3) {
+      let skidSum = 0;
+      for (let i = 0; i < 4; i++) skidSum += this.wheels[i].contact ? this.wheels[i].skid : 0;
+      if (skidSum > 0.35) {
+        this._skidAccum += dt * (10 + skidSum * 22);
+        while (this._skidAccum >= 1) {
+          this._skidAccum -= 1;
+          let idx = this.wheels[WHEEL_RL].skid >= this.wheels[WHEEL_FL].skid ? 2 : 0;
+          if (this.rng.next() < 0.5) idx += 1;
+          const w = this.wheels[idx];
+          if (!w.contact) continue;
+          const wx = this.position[0] + w.localX * c - w.localZ * s;
+          const wz = this.position[2] - w.localX * s - w.localZ * c;
+          const gy = w.groundY + 0.04;
+          parts.burst('tireSmoke', wx, gy + 0.1, wz, 1, {
+            power: 0.5 + skidSum * 0.45,
+            velocity: [this.velocity[0] * 0.18, 0.35, this.velocity[2] * 0.18]
+          });
+          if (this.rng.next() < 0.45) {
+            parts.burst('skid', wx, gy, wz, 1, { power: 0.4 + skidSum * 0.3 });
+          }
+        }
+      } else {
+        this._skidAccum = 0;
+      }
+    }
+
+    // --- exhaust puffs on hard throttle -----------------------------------------------------------
+    if (near < 48 && this.engineOn && !this.isDestroyed && this._drive > 0.55 &&
+      this.rpm > t.redline * 0.42) {
+      this._exhaustAccum += dt * (6 + this._drive * 10);
+      while (this._exhaustAccum >= 1) {
+        this._exhaustAccum -= 1;
+        const a = this.model ? this.model.lampLocal.exhaust : null;
+        const lx = a ? a[0] : t.width * 0.28;
+        const ly = a ? a[1] : -t.comHeight + 0.14;
+        const lz = a ? a[2] : t.length * 0.5;
+        const wx = this.position[0] + lx * c - lz * s;
+        const wz = this.position[2] - lx * s - lz * c;
+        parts.burst('exhaust', wx, this.position[1] + ly, wz, 1, {
+          power: 0.35 + this._drive * 0.3,
+          velocity: [this.velocity[0] * 0.6 + s * 1.6, 0.4, this.velocity[2] * 0.6 + c * 1.6]
+        });
+      }
+    }
+
+    // --- damage smoke and fire ----------------------------------------------------------------------
+    if ((this._smoking || this._burning) && near < 160) {
+      this._smokeAccum += dt * (this._burning ? 26 : 9);
+      const a = this.model ? this.model.lampLocal.bonnet : null;
+      const lx = 0;
+      const ly = a ? a[1] : t.height * 0.3 - t.comHeight;
+      const lz = a ? a[2] : -t.length * 0.25;
+      const wx = this.position[0] + lx * c - lz * s;
+      const wz = this.position[2] - lx * s - lz * c;
+      const wy = this.position[1] + ly;
+      while (this._smokeAccum >= 1) {
+        this._smokeAccum -= 1;
+        parts.burst('smoke', wx, wy, wz, 1, {
+          power: this._burning ? 1.5 : 0.8,
+          velocity: [this.velocity[0] * 0.4, 1.2, this.velocity[2] * 0.4]
+        });
+        if (this._burning) {
+          parts.burst('fire', wx, wy, wz, 1, { power: 1.1 });
+        }
+      }
+    }
+    if (this.isDestroyed && near < 160) {
+      this._smokeAccum += dt * 8;
+      while (this._smokeAccum >= 1) {
+        this._smokeAccum -= 1;
+        parts.burst('smoke', this.position[0], this.position[1] + 0.4, this.position[2], 1,
+          { power: 1.7 });
+      }
+    }
+  }
+
+  /**
+   * Owns this vehicle's engine voice, tyre screech and siren. Voices are created only for
+   * vehicles near the listener and released again when they drive away.
+   * @param {number} dt Frame delta.
+   * @returns {void}
+   */
+  _updateAudio(dt) {
+    const g = this.game;
+    const sfx = g && g.sfx ? g.sfx : null;
+    if (!sfx) return;
+    const wantEngine = !this.isDestroyed && this.engineOn &&
+      (this.isPlayer || this._viewDist < 58);
+    const dropEngine = this.isDestroyed || !this.engineOn ||
+      (!this.isPlayer && this._viewDist > 78);
+
+    if (wantEngine && !this._engineVoice && typeof sfx.createEngine === 'function') {
+      const ext = g.ext || (g.ext = {});
+      const budget = this.isPlayer ? 999 : 10;
+      if ((ext.vehicleVoices || 0) < budget) {
+        ext.vehicleVoices = (ext.vehicleVoices || 0) + 1;
+        this._engineVoice = sfx.createEngine(this);
+      }
+    } else if (dropEngine && this._engineVoice) {
+      this._stopEngineVoice();
+    }
+    if (this._engineVoice && typeof this._engineVoice.update === 'function') {
+      this._engineVoice.update(this.rpm, this.engineLoad, this.speedMs, this.position);
+      if (typeof this._engineVoice.setVolume === 'function' && !this.isPlayer) {
+        this._engineVoice.setVolume(clamp(1 - this._viewDist / 78, 0.05, 1));
+      }
+    }
+
+    // --- tyre screech ---------------------------------------------------------------------------
+    let screech = 0;
+    if (!this.isDestroyed && this.speedMs > 4) {
+      for (let i = 0; i < 4; i++) {
+        const w = this.wheels[i];
+        if (w.contact && w.skid > screech) screech = w.skid;
+      }
+      screech = clamp((screech - 0.35) * 1.3, 0, 1);
+    }
+    this._screechLevel = damp(this._screechLevel, screech, 9, dt);
+    if (this._screechLevel > 0.06 && this._viewDist < 70) {
+      if (!this._screech && typeof sfx.tireScreech === 'function') {
+        this._screech = sfx.tireScreech(this.position, this._screechLevel);
+      }
+      if (this._screech) {
+        if (this._screech.setIntensity) this._screech.setIntensity(this._screechLevel);
+        if (this._screech.setPosition) this._screech.setPosition(this.position);
+      }
+    } else if (this._screech) {
+      this._stopScreech();
+    }
+
+    // --- siren -----------------------------------------------------------------------------------
+    if (this.lights.siren && !this._sirenHandle && typeof sfx.siren === 'function' &&
+      this._viewDist < 220) {
+      this._sirenHandle = sfx.siren(this.position);
+    } else if ((!this.lights.siren || this._viewDist > 260) && this._sirenHandle) {
+      this._stopSiren();
+    }
+    if (this._sirenHandle && this._sirenHandle.setPosition) {
+      this._sirenHandle.setPosition(this.position);
+    }
+  }
+
+  /** Stops and releases the engine voice. @returns {void} */
+  _stopEngineVoice() {
+    if (!this._engineVoice) return;
+    if (typeof this._engineVoice.stop === 'function') this._engineVoice.stop();
+    this._engineVoice = null;
+    const g = this.game;
+    if (g && g.ext && g.ext.vehicleVoices > 0) g.ext.vehicleVoices--;
+  }
+
+  /** Stops the tyre screech loop. @returns {void} */
+  _stopScreech() {
+    if (this._screech && typeof this._screech.stop === 'function') this._screech.stop();
+    this._screech = null;
+  }
+
+  /** Stops the siren loop. @returns {void} */
+  _stopSiren() {
+    if (this._sirenHandle && typeof this._sirenHandle.stop === 'function') {
+      this._sirenHandle.stop();
+    }
+    this._sirenHandle = null;
+  }
+
+  /**
+   * World transform of a seat, including the body's pitch and roll. Feed it to
+   * `Character#update` as `ctx.seatMatrix` so occupants ride with the car.
+   * @param {number} index Seat index (0 = driver).
+   * @param {Float32Array} out Receives the column-major matrix.
+   * @returns {Float32Array} out
+   */
+  getSeatMatrix(index, out) {
+    const m = out || mat4.create();
+    this._bodyMatrix(m);
+    const seats = this.model ? this.model.seatLocal : null;
+    const i = seats ? clamp(index | 0, 0, seats.length / 3 - 1) : 0;
+    const lx = seats ? seats[i * 3] : 0;
+    const ly = seats ? seats[i * 3 + 1] : this.type.height * 0.42 - this.type.comHeight;
+    const lz = seats ? seats[i * 3 + 2] : 0;
+    mat4.translate(m, m, lx, ly, lz);
+    return m;
+  }
+
+  /**
+   * World position of a seat (the occupant's hip point).
+   * @param {number} index Seat index (0 = driver).
+   * @param {ArrayLike<number>} out Receives `[x, y, z]`.
+   * @returns {ArrayLike<number>} out
+   */
+  getSeatPosition(index, out) {
+    const seats = this.model ? this.model.seatLocal : null;
+    const n = seats ? seats.length / 3 : 1;
+    const i = clamp(index | 0, 0, n - 1);
+    const lx = seats ? seats[i * 3] : 0;
+    const ly = seats ? seats[i * 3 + 1] : this.type.height * 0.42 - this.type.comHeight;
+    const lz = seats ? seats[i * 3 + 2] : 0;
+    return this.localToWorld(lx, ly, lz, out);
+  }
+
+  /**
+   * World position beside the car where a character stands to open a door.
+   * @param {number} index Seat index (0 = driver).
+   * @param {ArrayLike<number>} out Receives `[x, y, z]`.
+   * @returns {ArrayLike<number>} out
+   */
+  getDoorPosition(index, out) {
+    const doors = this.model ? this.model.doorLocal : null;
+    const n = doors ? doors.length / 3 : 1;
+    const i = clamp(index | 0, 0, n - 1);
+    const lx = doors ? doors[i * 3] : this.type.width * 0.5 + 0.6;
+    const ly = doors ? doors[i * 3 + 1] : -this.type.comHeight;
+    const lz = doors ? doors[i * 3 + 2] : 0;
+    return this.localToWorld(lx, ly, lz, out);
+  }
+
+  /**
+   * Transforms a point from the vehicle's local frame into world space (yaw only, so it
+   * stays stable for gameplay queries).
+   * @param {number} lx Local X.
+   * @param {number} ly Local Y.
+   * @param {number} lz Local Z.
+   * @param {ArrayLike<number>} out Receives `[x, y, z]`.
+   * @returns {ArrayLike<number>} out
+   */
+  localToWorld(lx, ly, lz, out) {
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    const o = out || vec3.create();
+    o[0] = this.position[0] + lx * c - lz * s;
+    o[1] = this.position[1] + ly;
+    o[2] = this.position[2] - lx * s - lz * c;
+    return o;
+  }
+
+  /**
+   * Overrides the automatic lamp logic. Pass `null` for `headlights` to hand control back
+   * to the vehicle (night detection, brake pedal, reverse gear, siren state).
+   * @param {boolean|null} headlights Head lights on.
+   * @param {boolean} [brake] Brake lights on.
+   * @param {boolean} [reverse] Reverse lights on.
+   * @param {boolean} [siren] Light bar and siren on.
+   * @returns {void}
+   */
+  setLights(headlights, brake, reverse, siren) {
+    if (headlights === null || headlights === undefined) {
+      this._lightsForced = false;
+      return;
+    }
+    this._lightsForced = true;
+    this.lights.head = !!headlights;
+    this.lights.brake = !!brake;
+    this.lights.reverse = !!reverse;
+    this.lights.siren = !!siren;
+    this.sirenOn = !!siren;
+  }
+
+  /**
+   * Builds the full body transform (yaw + suspension pitch/roll).
+   * @param {Float32Array} out Receives the matrix.
+   * @returns {Float32Array} out
+   * @private
+   */
+  _bodyMatrix(out) {
+    mat4.identity(out);
+    out[12] = this.position[0];
+    out[13] = this.position[1];
+    out[14] = this.position[2];
+    mat4.rotateY(out, out, this.yaw);
+    if (this.pitch) mat4.rotateX(out, out, this.pitch);
+    if (this.roll) mat4.rotateZ(out, out, this.roll);
+    return out;
+  }
+
+  /**
+   * Draws the vehicle: body parts, wheels with steering / rolling / suspension travel,
+   * lamps with the right emissive boost, head light spot lights and cones, the police light
+   * bar and the seated driver.
+   * @param {Object} renderer Renderer instance.
+   * @param {number} dt Frame delta in seconds.
+   * @returns {void}
+   */
+  submit(renderer, dt) {
+    if (!renderer || !this.model || !this.visible) return;
+    const t = this.type;
+    const model = this.model;
+    const dist = this._viewDist;
+    const detail = dist < 55 ? 2 : dist < 145 ? 1 : 0;
+
+    // --- body tint (paint colour, darkened by damage) ---------------------------------------
+    const dmg = this.damage;
+    const dark = this.isDestroyed ? 0.10 : 1 - dmg * 0.42;
+    _tint[0] = this.color[0] * dark;
+    _tint[1] = this.color[1] * dark;
+    _tint[2] = this.color[2] * dark;
+    _tint[3] = 1;
+    _tint2[0] = dark;
+    _tint2[1] = dark;
+    _tint2[2] = dark;
+    _tint2[3] = 1;
+
+    const body = this._bodyMatrix(_m);
+
+    if (detail === 0) {
+      if (model.lodMesh || model.lod) {
+        renderer.submit(model.lodMesh || model.lod, this.assets.materials.paint, body,
+          { tint: _tint });
+      }
+    } else {
+      for (let i = 0; i < model.parts.length; i++) {
+        const p = model.parts[i];
+        if (detail === 1 && (p.id === 'interior' || p.id === 'lampSide')) continue;
+        let boost = 1;
+        if (p.emissive) {
+          boost = this._lampBoost(p.id);
+          if (boost <= 0.001) continue;
+        }
+        renderer.submit(p.mesh || p.geometry, p.material, body,
+          { tint: p.tinted ? _tint : _tint2, emissiveBoost: boost });
+      }
+    }
+
+    this._submitWheels(renderer, body, detail);
+    if (detail > 0 && dist < 130) this._submitLights(renderer, detail);
+    this._submitDriver(renderer);
+  }
+
+  /**
+   * Emissive multiplier for one lamp group given the current lamp state.
+   * @param {string} id Part id.
+   * @returns {number} Emissive boost (0 hides the lamp entirely).
+   * @private
+   */
+  _lampBoost(id) {
+    const L = this.lights;
+    if (this.isDestroyed) return id === 'lampTail' ? 0.04 : 0;
+    switch (id) {
+      case 'lampHead': return L.head ? 1.4 : 0.06;
+      case 'lampTail': return L.brake ? 1.8 : (L.head ? 0.5 : 0.07);
+      case 'lampReverse': return L.reverse ? 1.5 : 0.02;
+      case 'lampSide': return L.head ? 0.55 : 0.05;
+      case 'sign': return this.type.taxi ? (this.driver ? 0.35 : 1.2) : 0.6;
+      case 'sirenRed': {
+        if (!L.siren) return 0.03;
+        return sirenPulse(this._sirenPhase, 0) * 2.2 + 0.05;
+      }
+      case 'sirenBlue': {
+        if (!L.siren) return 0.03;
+        return sirenPulse(this._sirenPhase, 0.5) * 2.2 + 0.05;
+      }
+      default: return 1;
+    }
+  }
+
+  /**
+   * Draws the wheels. Each wheel hangs from its (pitched and rolled) attachment point by the
+   * current suspension length and spins at the correct angular velocity.
+   * @param {Object} renderer Renderer.
+   * @param {Float32Array} body Body matrix.
+   * @param {number} detail LOD level.
+   * @returns {void}
+   * @private
+   */
+  _submitWheels(renderer, body, detail) {
+    const t = this.type;
+    const assets = this.assets;
+    if (!assets) return;
+    const src = detail === 2 ? assets.wheel : assets.wheelLod;
+    const mesh = src.mesh || src.geometry;
+    if (!mesh) return;
+    const count = this.model.wheelCount;
+    const bike = t.bike;
+    for (let i = 0; i < 4; i++) {
+      if (bike && (i === WHEEL_FR || i === WHEEL_RR)) continue;
+      const w = this.wheels[i];
+      // Attachment point through the full body transform, then straight down by susLen.
+      const ax = body[0] * w.localX + body[8] * w.localZ + body[12];
+      const ay = body[1] * w.localX + body[9] * w.localZ + body[13];
+      const az = body[2] * w.localX + body[10] * w.localZ + body[14];
+      let len = w.susLen;
+      if (w.contact) {
+        const want = ay - w.groundY - w.radius;
+        if (Number.isFinite(want)) {
+          len = clamp(want, t.restLength - t.travel, t.restLength + t.travel * 0.4);
+        }
+      }
+      mat4.identity(_m2);
+      _m2[12] = ax;
+      _m2[13] = ay - len;
+      _m2[14] = az;
+      mat4.rotateY(_m2, _m2, this.yaw - w.steerAngle);
+      mat4.rotateX(_m2, _m2, w.spin);
+      mat4.scale(_m2, _m2, bike ? t.wheelWidth : t.wheelWidth, t.wheelRadius, t.wheelRadius);
+      renderer.submit(mesh, src.material, _m2, { tint: _tint2 });
+      void count;
+    }
+  }
+
+  /**
+   * Submits the dynamic lights: head light spots plus their visible cones, brake glow,
+   * reverse glow and the alternating police light bar.
+   * @param {Object} renderer Renderer.
+   * @param {number} detail LOD level.
+   * @returns {void}
+   * @private
+   */
+  _submitLights(renderer, detail) {
+    const L = this.lights;
+    const anchors = this.model.lampLocal;
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    const fx = -s;
+    const fz = -c;
+
+    if (L.head && typeof renderer.submitSpotLight === 'function') {
+      _v2[0] = fx;
+      _v2[1] = -0.12;
+      _v2[2] = fz;
+      _v3[0] = 1.0;
+      _v3[1] = 0.95;
+      _v3[2] = 0.86;
+      for (let k = 0; k < 2; k++) {
+        const a = k === 0 ? anchors.headL : anchors.headR;
+        this.localToWorld(a[0], a[1], a[2], _v);
+        renderer.submitSpotLight(_v, _v2, _v3, 34, 0.94, 0.72, 5.5);
+      }
+      // Visible cone.
+      if (detail === 2 && this.model.coneMesh) {
+        _coneTint[0] = 0.32;
+        _coneTint[1] = 0.30;
+        _coneTint[2] = 0.26;
+        _coneTint[3] = 1;
+        for (let k = 0; k < 2; k++) {
+          const a = k === 0 ? anchors.headL : anchors.headR;
+          this.localToWorld(a[0], a[1], a[2], _v);
+          mat4.identity(_m2);
+          _m2[12] = _v[0];
+          _m2[13] = _v[1];
+          _m2[14] = _v[2];
+          mat4.rotateY(_m2, _m2, this.yaw);
+          mat4.rotateX(_m2, _m2, -0.11);
+          renderer.submit(this.model.coneMesh, this.assets.materials.cone, _m2,
+            { tint: _coneTint, castShadow: false });
+        }
+      }
+    }
+
+    if (typeof renderer.submitLight !== 'function') return;
+
+    if (L.brake) {
+      for (let k = 0; k < 2; k++) {
+        const a = k === 0 ? anchors.tailL : anchors.tailR;
+        this.localToWorld(a[0], a[1], a[2], _v);
+        renderer.submitLight(_v[0], _v[1], _v[2], 1.0, 0.06, 0.03, 5.0, 2.4);
+      }
+    } else if (L.head) {
+      this.localToWorld(0, anchors.tailL[1], anchors.tailL[2], _v);
+      renderer.submitLight(_v[0], _v[1], _v[2], 1.0, 0.08, 0.05, 3.2, 0.8);
+    }
+    if (L.reverse) {
+      this.localToWorld(0, anchors.tailL[1] - 0.08, anchors.tailL[2], _v);
+      renderer.submitLight(_v[0], _v[1], _v[2], 0.9, 0.94, 1.0, 4.5, 1.6);
+    }
+    if (L.siren) {
+      const r = sirenPulse(this._sirenPhase, 0);
+      const b = sirenPulse(this._sirenPhase, 0.5);
+      if (r > 0.02) {
+        this.localToWorld(anchors.sirenL[0], anchors.sirenL[1], anchors.sirenL[2], _v);
+        renderer.submitLight(_v[0], _v[1], _v[2], 1.0, 0.05, 0.04, 15, 7 * r);
+      }
+      if (b > 0.02) {
+        this.localToWorld(anchors.sirenR[0], anchors.sirenR[1], anchors.sirenR[2], _v);
+        renderer.submitLight(_v[0], _v[1], _v[2], 0.10, 0.24, 1.0, 15, 7 * b);
+      }
+    }
+    if (this.isDestroyed || this._burning) {
+      renderer.submitLight(this.position[0], this.position[1] + 0.5, this.position[2],
+        1.0, 0.42, 0.10, 8, 2.2 + Math.sin(this._age * 21) * 0.6);
+    }
+  }
+
+  /**
+   * Draws the seated driver, since `player.js` skips its own character while driving.
+   * @param {Object} renderer Renderer.
+   * @returns {void}
+   * @private
+   */
+  _submitDriver(renderer) {
+    const d = this.driver;
+    if (!d || d.dead) return;
+    const ch = d.character;
+    if (!ch || typeof ch.submit !== 'function') return;
+    const seat = typeof d.seat === 'number' ? d.seat : 0;
+    this.getSeatPosition(seat, _v);
+    const scale = (ch.height || 1.8) / 1.8;
+    if (ch.position) {
+      ch.position[0] = _v[0];
+      ch.position[1] = _v[1] - 0.98 * scale;
+      ch.position[2] = _v[2];
+    }
+    ch.yaw = this.yaw;
+    if (ch.state !== 'drive' && typeof ch.setState === 'function') ch.setState('drive');
+    ch.submit(renderer);
+  }
+
+  /**
+   * Releases every audio voice this vehicle owns. Meshes are shared and stay in the assets.
+   * @returns {void}
+   */
+  dispose() {
+    this._stopEngineVoice();
+    this._stopScreech();
+    this._stopSiren();
+    this.driver = null;
+    for (let i = 0; i < this.occupants.length; i++) this.occupants[i] = null;
+  }
+}
+
+/**
+ * Two-flash strobe pattern for the police light bar.
+ * @param {number} phase Free-running phase in seconds * rate.
+ * @param {number} offset Phase offset (0.5 for the opposite colour).
+ * @returns {number} 0..1 lamp intensity.
+ */
+function sirenPulse(phase, offset) {
+  const p = (phase + offset) % 1;
+  if (p < 0.10) return 1;
+  if (p < 0.16) return 0.08;
+  if (p < 0.26) return 1;
+  return 0;
+}
+
+/**
+ * Creates one suspension wheel record.
+ * @param {number} lx Local X offset.
+ * @param {number} lz Local Z offset (negative is toward the front).
+ * @param {boolean} front Whether this wheel steers.
+ * @param {Object} t Vehicle type record.
+ * @returns {Object} Wheel record.
+ */
+function makeWheel(lx, lz, front, t) {
+  return {
+    localX: lx,
+    localZ: lz,
+    front,
+    radius: t.wheelRadius,
+    restLength: t.restLength,
+    travel: t.travel,
+    susLen: t.restLength,
+    prevSusLen: t.restLength,
+    compression: 0,
+    visualComp: 0,
+    contact: true,
+    load: t.mass * GRAVITY * 0.25,
+    groundY: 0,
+    worldX: 0,
+    worldZ: 0,
+    steerAngle: 0,
+    spin: 0,
+    spinRate: 0,
+    slip: 0,
+    skid: 0,
+    locked: false
+  };
+}

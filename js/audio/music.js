@@ -145,6 +145,21 @@ function hash01(a, b) {
   return (h >>> 0) / 4294967296;
 }
 
+/** Rolling counter feeding {@link noiseOffset}; keeps successive transients on different slices. */
+let noiseCursor = 0;
+
+/**
+ * Deterministic playback offset into the shared noise buffer, so two transients in a row never
+ * read the same slice and repeated notes stay alive. Uses the hash instead of `Math.random()`:
+ * the determinism rule in `docs/ARCHITECTURE.md` forbids `Math.random` in generated content.
+ * @param {number} duration Length of the noise buffer in seconds.
+ * @returns {number} Offset in seconds, always inside the buffer.
+ */
+function noiseOffset(duration) {
+  const span = Number.isFinite(duration) && duration > 0.2 ? duration * 0.7 : 1.4;
+  return hash01(noiseCursor++, 0x6d2b79f5) * span;
+}
+
 /**
  * Frame-rate independent smoothing factor.
  * @param {number} dt Delta time in seconds.
@@ -413,7 +428,7 @@ function addTransient(mp, v, dest, t0, peak, decay, freq, q, type) {
   v.own(filt);
   v.own(g);
   // Cosmetic jitter only: a different slice of noise per hit keeps repeated notes alive.
-  src.start(safeTime(t0), Math.random() * 1.4);
+  src.start(safeTime(t0), noiseOffset(buf.duration));
 }
 
 /**
@@ -863,7 +878,7 @@ function buildWind(mp, deck, ch, v, freq, t0, dur, vel, peak, accent) {
     v.source(src);
     v.own(bf);
     v.own(bg);
-    src.start(safeTime(t0), Math.random() * 1.4);
+    src.start(safeTime(t0), noiseOffset(buf.duration));
   }
 
   const attack = clampNum(p.attack * (1.35 - vel * 0.5) * (accent ? 0.6 : 1), 0.015, 0.2);
@@ -1204,6 +1219,18 @@ class MusicDeck {
     let ph = (beat % phrase) / phrase;
     if (ph < 0) ph += 1;
     return 1 + r * 0.06 * Math.cos(ph * Math.PI * 2);
+  }
+
+  /**
+   * AudioContext time at which the next event will sound, without moving the cursor. The
+   * scheduler's resync test uses this rather than `time` (which sits on the event that already
+   * sounded) so that a long rest is never mistaken for a stalled deck. Allocation free.
+   * @returns {number} Absolute time of the next event, or of the loop point at the end.
+   */
+  nextEventTime() {
+    const events = this.prepared.events;
+    const nextBeat = this.cursor < events.length ? events[this.cursor].beat : this.prepared.lengthBeats;
+    return this.time + this.span(this.beat, nextBeat);
   }
 
   /**
@@ -2302,10 +2329,16 @@ export class MusicPlayer {
         continue;
       }
       // Resync: after tab throttling the cursor can be far in the past. Skip forward silently
-      // rather than firing hundreds of stale notes at once.
-      if (d.time < now - RESYNC_GAP) {
+      // rather than firing hundreds of stale notes at once. The test must look at the event that
+      // is still to come, never at `d.time` (which sits on the last note that already sounded):
+      // a rest or a held final chord longer than RESYNC_GAP is normal music, and testing the
+      // wrong end would push the cursor clock forward on every pump without ever advancing the
+      // beat, freezing the deck for good.
+      if (d.nextEventTime() < now - RESYNC_GAP) {
         d.schedule(now - 0.02, true, 400000);
-        d.time = Math.max(d.time, now);
+        // The silent walk stops on the first event still in the future, so the cursor clock is
+        // at most one event behind; pull it onto the audio clock so nothing lands in the past.
+        if (d.time < now) d.time = now;
       }
       d.schedule(horizon, false, 512);
       if (d.ended) ended = true;
