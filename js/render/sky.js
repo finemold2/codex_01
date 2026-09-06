@@ -1063,16 +1063,18 @@ export class Sky {
   _watchParams() {
     const p = this.params;
     const cache = this._paramCache;
+    const n = PARAM_KEYS.length;
     let changed = false;
-    for (let i = 0; i < PARAM_KEYS.length; i++) {
-      const v = p[PARAM_KEYS[i]];
-      if (cache[i] !== v) { cache[i] = v; changed = true; }
+    for (let i = 0; i < n; i++) {
+      const v = +p[PARAM_KEYS[i]];
+      // NaN-safe: a NaN knob must not mark the sky dirty on every single frame forever.
+      if (cache[i] !== v && !(cache[i] !== cache[i] && v !== v)) { cache[i] = v; changed = true; }
     }
     const ga = p.groundAlbedo;
     for (let i = 0; i < 3; i++) {
-      const v = ga ? ga[i] : 0;
-      const k = PARAM_KEYS.length + i;
-      if (cache[k] !== v) { cache[k] = v; changed = true; }
+      const v = ga ? +ga[i] : 0;
+      const k = n + i;
+      if (cache[k] !== v && !(cache[k] !== cache[k] && v !== v)) { cache[k] = v; changed = true; }
     }
     if (changed) this._dirty = true;
   }

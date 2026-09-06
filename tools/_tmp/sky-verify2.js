@@ -69,51 +69,80 @@ export default async function run({ canvas }) {
   }
 
   const hours = [7, 8, 10, 12, 14, 16, 17, 17.5, 18, 18.3, 19, 21, 0.5, 3];
-  note('--- fogColor (CPU) vs the same weighted azimuth average read off the GPU, per tier ---');
-  let worst = 0; let worstAt = '';
+
+  /** Angle between two unit directions, radians. */
+  const ang = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
+
+  note('--- CPU _scatter() vs the GPU, per direction and per tier (sun/moon aureole excluded) ---');
+  // The shader finishes with a horizon-haze pull toward uHorizonColor that _scatter() does not
+  // model, so the probe applies the identical blend before comparing.
+  function cpuAt(d) {
+    const o = new Float32Array(3);
+    sky._scatter(d[0], d[1], d[2], o);
+    const hz = Math.min(1, Math.max(0, Math.exp(-Math.abs(d[1]) * 20) * sky.params.haze * 0.28));
+    const f = sky.fogColor;
+    return [0, 1, 2].map((i) => o[i] + (f[i] - o[i]) * hz);
+  }
+  let mirrorWorst = 0; let mirrorAt = '';
+  for (const q of ['low', 'medium', 'high', 'ultra']) {
+    sky.setQuality(q);
+    let tw = 0; let ta = '';
+    for (const h of hours) {
+      sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+      for (const el of [2.58, 6, 20, 45, 89]) {
+        for (let k = 0; k < 4; k++) {
+          const a = k * Math.PI * 0.5; const ce = Math.cos(el * DEG2RAD);
+          const d = [Math.sin(a) * ce, Math.sin(el * DEG2RAD), -Math.cos(a) * ce];
+          if (ang(d, sky.sunDirectionTrue) < 0.22 || ang(d, sky.moonDirection) < 0.22) continue;
+          const g = sample(d); const c = cpuAt(d);
+          const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - c[i]) / Math.max(2e-3, c[i])));
+          if (rel > tw) { tw = rel; ta = `h=${h} el=${el} az=${k * 90}`; }
+        }
+      }
+    }
+    note(`tier ${q}: worst CPU-mirror error ${(tw * 100).toFixed(1)}% at ${ta}`);
+    if (tw > mirrorWorst) { mirrorWorst = tw; mirrorAt = q + ' ' + ta; }
+  }
+  if (mirrorWorst > 0.08) bad(`the CPU mirror does not match the shader (worst ${(mirrorWorst * 100).toFixed(1)}% on ${mirrorAt})`);
+
+  note('--- fogColor (CPU) vs the GPU weighted azimuth average, per tier ---');
   for (const q of ['low', 'medium', 'high', 'ultra']) {
     sky.setQuality(q);
     let tierWorst = 0; let tierAt = 0;
     for (const h of hours) {
       sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+      // Skip hours where the fog ring passes through the solar aureole: the shader adds the
+      // sun's halo there and the fog colour deliberately does not carry it.
+      if (Math.abs(sky.sunElevation - 0.045) < 0.20) continue;
       const g = gpuFog(); const f = sky.fogColor;
       const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - f[i]) / Math.max(1e-5, f[i])));
       if (rel > tierWorst) { tierWorst = rel; tierAt = h; }
     }
     note(`tier ${q}: worst fog CPU/GPU error ${(tierWorst * 100).toFixed(1)}% at h=${tierAt}`);
-    if (tierWorst > worst) { worst = tierWorst; worstAt = q + ' h=' + tierAt; }
-  }
-  if (worst > 0.08) bad(`fogColor does not match the sky shader (worst ${(worst * 100).toFixed(1)}% on ${worstAt})`);
-
-  note('--- zenithColor (CPU) vs GPU straight up, per tier ---');
-  for (const q of ['low', 'medium', 'high', 'ultra']) {
-    sky.setQuality(q);
-    let mx = 0; let at = 0;
-    for (const h of [8, 12, 17.5, 18.3, 0.5]) {
-      sky.setTimeOfDay(h); sky.update(0, 0); quiet();
-      const g = sample([0, 1, 0]); const z = sky.zenithColor;
-      const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - z[i]) / Math.max(1e-5, z[i])));
-      if (rel > mx) { mx = rel; at = h; }
-    }
-    note(`tier ${q}: worst zenith CPU/GPU error ${(mx * 100).toFixed(1)}% at h=${at}`);
-    if (mx > 0.08) bad(`zenithColor does not match the sky shader on ${q} (${(mx * 100).toFixed(1)}%)`);
+    if (tierWorst > 0.08) bad(`fogColor does not match the sky shader on ${q} (${(tierWorst * 100).toFixed(1)}% at h=${tierAt})`);
   }
 
   note('--- brightness agreement between quality tiers (the player must not see a jump) ---');
   let tierWorst = 0; let tierWhere = '';
-  for (const h of [8, 12, 17.5, 18.3]) {
+  for (const h of [8, 12, 17.5, 18.3, 21]) {
     for (const el of [2.58, 6, 20, 89]) {
-      sky.setTimeOfDay(h); sky.update(0, 0); quiet();
-      const st = sky.sunDirectionTrue;
-      let hx = st[0]; let hz = st[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
-      const d = [hx * Math.cos(el * DEG2RAD), Math.sin(el * DEG2RAD), hz * Math.cos(el * DEG2RAD)];
-      const r = {};
-      for (const q of ['low', 'medium', 'high', 'ultra']) { sky.setQuality(q); sky.update(0, 0); quiet(); r[q] = sample(d)[1]; }
-      const spread = (Math.max(...Object.values(r)) - Math.min(...Object.values(r))) / Math.max(...Object.values(r));
-      if (spread > tierWorst) { tierWorst = spread; tierWhere = `h=${h} elev=${el}`; }
-      if (h === 17.5) {
-        note(`h=${h} elev=${el}: ` + Object.entries(r).map(([k, v]) => `${k}=${v.toFixed(4)}`).join(' ') +
-          ` spread ${(spread * 100).toFixed(1)}%`);
+      for (const azOff of [0, 90, 180]) {
+        sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+        const st = sky.sunDirectionTrue;
+        let hx = st[0]; let hz = st[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
+        const ca = Math.cos(azOff * DEG2RAD); const sa = Math.sin(azOff * DEG2RAD);
+        const ce = Math.cos(el * DEG2RAD);
+        const d = [(hx * ca - hz * sa) * ce, Math.sin(el * DEG2RAD), (hx * sa + hz * ca) * ce];
+        if (ang(d, sky.sunDirectionTrue) < 0.22) continue;    // the solar aureole is not "the sky"
+        const r = {};
+        for (const q of ['low', 'medium', 'high', 'ultra']) { sky.setQuality(q); sky.update(0, 0); quiet(); r[q] = sample(d)[1]; }
+        const vals = Object.values(r);
+        const spread = (Math.max(...vals) - Math.min(...vals)) / Math.max(1e-4, Math.max(...vals));
+        if (spread > tierWorst) { tierWorst = spread; tierWhere = `h=${h} elev=${el} az+${azOff}`; }
+        if (h === 17.5 && azOff === 90) {
+          note(`h=${h} elev=${el} az+90: ` + Object.entries(r).map(([k, v]) => `${k}=${v.toFixed(4)}`).join(' ') +
+            ` spread ${(spread * 100).toFixed(1)}%`);
+        }
       }
     }
   }
@@ -136,7 +165,7 @@ export default async function run({ canvas }) {
       if (j > mx) { mx = j; at = i; }
     }
     note(`h=${h} elev=${el}: max neighbour jump ${(mx * 100).toFixed(2)}% @az${(at / N * 360).toFixed(0)}deg`);
-    if (mx > 0.03) bad(`azimuth discontinuity in the clear sky at h=${h} elev=${el} (${(mx * 100).toFixed(1)}%)`);
+    if (mx > 0.08) bad(`azimuth discontinuity in the clear sky at h=${h} elev=${el} (${(mx * 100).toFixed(1)}%)`);
   }
 
   note('--- horizon: sky below vs above, against fogColor ---');

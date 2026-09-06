@@ -924,12 +924,14 @@ export const MISSIONS = [
       const player = game.player;
       if (st.phase === 'toCar') {
         st.boardTime -= dt;
+        st.timeLeft = st.boardTime;
         if (st.playerCar && vehicleAlive(game, st.playerCar)) {
           waypoint(game, st, st.playerCar.position[0], st.playerCar.position[2]);
         }
         if (player && player.vehicle) {
           st.phase = 'race';
           st.waypointX = NaN;
+          st.timeLeft = st.raceLimit;
           if (typeof game.notify === 'function') game.notify('출발!', 'mission', 2);
         } else if (st.boardTime <= 0) {
           st.failReason = '차량에 탑승하지 않았습니다.';
@@ -939,7 +941,8 @@ export const MISSIONS = [
       }
 
       st.raceTime += dt;
-      if (st.raceTime > 420) {
+      st.timeLeft = Math.max(0, st.raceLimit - st.raceTime);
+      if (st.raceTime > st.raceLimit) {
         st.failReason = '제한 시간을 초과했습니다.';
         return 'fail';
       }
@@ -950,7 +953,7 @@ export const MISSIONS = [
         if (r.done) continue;
         if (!vehicleAlive(game, r.vehicle)) { r.done = true; r.cp = -1; continue; }
         const target = st.checkpoints[Math.min(r.cp, st.checkpoints.length - 1)];
-        const d = driveTowards(r.vehicle, target.x, target.z, r.skill);
+        const d = driveTowards(r.vehicle, target.x, target.z, r.skill, r.ai, dt);
         if (d < 13) {
           r.cp++;
           if (r.cp >= st.checkpoints.length) {
@@ -1168,6 +1171,10 @@ export const MISSIONS = [
       const st = newState(game, 'rampage');
       st.target = 18;
       st.kills = 0;
+      /** Kills reported through the `pedKilled` event. */
+      st.eventKills = 0;
+      /** `player.kills` when the rampage began — the contract's own kill counter. */
+      st.killBase = game.player ? fin(game.player.kills, 0) : 0;
       st.timeLeft = 90;
       st.wantedStep = 0;
       st.prevWeapon = game.weapons ? game.weapons.current : null;
@@ -1190,16 +1197,9 @@ export const MISSIONS = [
     onEvent(game, st, event, payload) {
       if (event !== 'pedKilled') return;
       if (payload && payload.byPlayer === false) return;
-      st.kills++;
+      st.eventKills++;
       if (game.particles && game.particles.burst && payload && Number.isFinite(payload.x)) {
         game.particles.burst('flash', payload.x, fin(payload.y, 1) + 1.6, payload.z, 3, { power: 0.8 });
-      }
-      const step = Math.floor(st.kills / 5);
-      if (step > st.wantedStep) {
-        st.wantedStep = step;
-        if (game.police && typeof game.police.addWanted === 'function') {
-          game.police.addWanted(1, 'rampage');
-        }
       }
     },
 
@@ -1212,6 +1212,20 @@ export const MISSIONS = [
     update(game, st, dt) {
       st.elapsed += dt;
       st.timeLeft -= dt;
+      // Two independent sources so the counter still works whichever one the ped manager feeds:
+      // the `pedKilled` event and the contract's own `player.kills` tally.
+      const tallied = game.player ? Math.max(0, fin(game.player.kills, 0) - st.killBase) : 0;
+      const kills = Math.max(st.eventKills, tallied);
+      if (kills !== st.kills) {
+        st.kills = kills;
+        const level = Math.floor(st.kills / 5);
+        if (level > st.wantedStep) {
+          st.wantedStep = level;
+          if (game.police && typeof game.police.addWanted === 'function') {
+            game.police.addWanted(1, 'rampage');
+          }
+        }
+      }
       if (st.kills >= st.target) {
         st.note = `${st.kills}명 처치`;
         return 'success';
@@ -1269,9 +1283,16 @@ export const MISSIONS = [
      * @returns {Object} Mission state.
      */
     setup(game) {
+      // Losing the cops is the whole mission: without a police system there is nothing to lose,
+      // and "wanted === 0" would hand out the reward on the first frame.
+      if (!game.police || typeof game.police.addWanted !== 'function') return null;
       const st = newState(game, 'getaway');
       const o = st.origin;
       st.timeLeft = 180;
+      /** Set once the stars have actually appeared; success is impossible before that. */
+      st.armed = false;
+      /** Seconds spent waiting for `wantedOnStart` to register. */
+      st.armTimer = 0;
       st.car = null;
       if (!game.player || !game.player.vehicle) {
         const yaw = st.rng.range(0, Math.PI * 2);
@@ -1306,6 +1327,21 @@ export const MISSIONS = [
         } else {
           st.marker.active = false;
         }
+      }
+      if (!st.armed) {
+        // Wait for the wanted level the manager applied on start to show up before the
+        // "no stars left" test can pass, otherwise the mission would win itself instantly.
+        st.armTimer += dt;
+        if (wanted > 0) st.armed = true;
+        else if (st.armTimer > 6) {
+          st.failReason = '수배가 발생하지 않았습니다.';
+          return 'fail';
+        }
+        if (st.timeLeft <= 0) {
+          st.failReason = '3분 안에 경찰을 따돌리지 못했습니다.';
+          return 'fail';
+        }
+        return 'running';
       }
       if (wanted <= 0) {
         st.clearTimer += dt;
@@ -1367,7 +1403,10 @@ export const MISSIONS = [
         return null;
       }
       st.vip.driver = { missionAI: true, character: null };
+      st.vipAi = newDriver();
       st.destination = roadPointNear(game, st.rng, o.x, o.z, 260, 420);
+      // Follow the road network instead of ploughing straight through the city blocks.
+      st.route = buildRoute(game, st.vip.position[0], st.vip.position[2], st.destination);
       st.marker = addMarker(st, st.destination.x, st.destination.y, st.destination.z,
         { radius: 9, color: [0.3, 1, 0.5], label: '목적지' });
       st.vipMarker = addMarker(st, o.x, o.y + 2, o.z,
@@ -1376,6 +1415,8 @@ export const MISSIONS = [
       st.spawnTimer = 18;
       st.wave = 0;
       st.timeLeft = 360;
+      st.remaining = dist2(st.vip.position[0], st.vip.position[2], st.destination.x, st.destination.z);
+      st.vipHealth = 1;
       return st;
     },
 
@@ -1401,9 +1442,12 @@ export const MISSIONS = [
       st.vipMarker.x = vx;
       st.vipMarker.y = st.vip.position[1] + 2.1;
       st.vipMarker.z = vz;
-      st.vipHealth = fin(st.vip.health, 100);
+      // Vehicle health is an absolute pool (1000 by default), so publish a fraction, not the raw
+      // number — the objective line renders it as a percentage.
+      const maxHp = Math.max(1, fin(st.vip.maxHealth, 1000));
+      st.vipHealth = clamp(fin(st.vip.health, maxHp) / maxHp, 0, 1);
 
-      const remaining = driveTowards(st.vip, st.destination.x, st.destination.z, 19);
+      const remaining = driveRoute(st.vip, st.route, st.vipAi, 19, dt);
       st.remaining = remaining;
       waypoint(game, st, st.destination.x, st.destination.z);
       if (remaining < 12) {
@@ -1422,7 +1466,9 @@ export const MISSIONS = [
         const v = spawnVehicle(game, st, 'muscle', sx, sz, a, { color: [0.35, 0.05, 0.08] });
         if (v) {
           v.driver = { missionAI: true, character: null };
-          st.attackers.push({ vehicle: v, fireTimer: st.rng.range(1, 3) });
+          const ai = newDriver();
+          ai.fireTimer = st.rng.range(1, 3);
+          st.attackers.push({ vehicle: v, ai, fireTimer: ai.fireTimer });
           if (typeof game.notify === 'function') game.notify('습격자 접근!', 'warn', 3);
           if (game.sfx && game.sfx.notify) game.sfx.notify('warn');
         }
@@ -1439,30 +1485,11 @@ export const MISSIONS = [
           st.attackers.splice(i, 1);
           continue;
         }
-        driveTowards(at.vehicle, vx, vz, 24);
+        driveTowards(at.vehicle, vx, vz, 24, at.ai, dt);
         // The gunman leans out and fires at the player, not at the client.
-        const player = game.player;
-        if (player && !player.dead && player.position) {
-          at.fireTimer -= dt;
-          const d = dist2(at.vehicle.position[0], at.vehicle.position[2],
-            player.position[0], player.position[2]);
-          if (at.fireTimer <= 0 && d < 45) {
-            at.fireTimer = 0.55;
-            _muzzle[0] = at.vehicle.position[0];
-            _muzzle[1] = at.vehicle.position[1] + 1.1;
-            _muzzle[2] = at.vehicle.position[2];
-            _dir[0] = player.position[0] - _muzzle[0];
-            _dir[1] = player.position[1] + 1 - _muzzle[1];
-            _dir[2] = player.position[2] - _muzzle[2];
-            const l = Math.hypot(_dir[0], _dir[1], _dir[2]);
-            if (l > 0.01 && game.weapons && typeof game.weapons.tryFire === 'function') {
-              _dir[0] /= l; _dir[1] /= l; _dir[2] /= l;
-              game.weapons.tryFire(_muzzle, _dir, false, 3.2, {
-                weapon: 'smg', shooter: at.vehicle, damageMul: 0.35,
-              });
-            }
-          }
-        }
+        driveByFire(game, at.vehicle, at.ai, dt,
+          { weapon: 'smg', range: 45, rate: 0.55, spread: 3.2, damageMul: 0.35 });
+        at.fireTimer = at.ai.fireTimer;
       }
       return 'running';
     },
@@ -1482,8 +1509,10 @@ export const MISSIONS = [
      * @returns {string} Korean objective line.
      */
     objectiveText(st) {
-      const d = Math.round(fin(st.remaining, 0));
-      const hp = Math.max(0, Math.round(fin(st.vipHealth, 100)));
+      // Quantised to 10 m: the HUD rebuilds its objective list whenever this string changes, so a
+      // metre-accurate readout would rewrite the DOM on every single frame while driving.
+      const d = Math.max(0, Math.round(fin(st.remaining, 0) / 10) * 10);
+      const hp = clamp(Math.round(fin(st.vipHealth, 1) * 100), 0, 100);
       return `의뢰인 호위 · 남은 거리 ${d}m · 차량 상태 ${hp}%`;
     },
   },
@@ -1653,7 +1682,9 @@ export const MISSIONS = [
           if (typeof v.setLights === 'function') {
             try { v.setLights(true, false, false, true); } catch (err) { /* no siren rig */ }
           }
-          st.cars.push({ vehicle: v, fireTimer: st.rng.range(1.5, 3.5) });
+          const ai = newDriver();
+          ai.fireTimer = st.rng.range(1.5, 3.5);
+          st.cars.push({ vehicle: v, ai, fireTimer: ai.fireTimer });
         }
         if (game.weapons && typeof game.weapons.addAmmo === 'function') game.weapons.addAmmo('rifle', 120);
         if (typeof game.notify === 'function') game.notify(`${st.wave}차 공세!`, 'warn', 3);
@@ -1671,26 +1702,10 @@ export const MISSIONS = [
           st.cars.splice(i, 1);
           continue;
         }
-        const d = driveTowards(c.vehicle, px, pz, 21);
-        if (d < 40 && !player.dead) {
-          c.fireTimer -= dt;
-          if (c.fireTimer <= 0) {
-            c.fireTimer = 0.85;
-            _muzzle[0] = c.vehicle.position[0];
-            _muzzle[1] = c.vehicle.position[1] + 1.1;
-            _muzzle[2] = c.vehicle.position[2];
-            _dir[0] = player.position[0] - _muzzle[0];
-            _dir[1] = player.position[1] + 1 - _muzzle[1];
-            _dir[2] = player.position[2] - _muzzle[2];
-            const l = Math.hypot(_dir[0], _dir[1], _dir[2]);
-            if (l > 0.01 && game.weapons && typeof game.weapons.tryFire === 'function') {
-              _dir[0] /= l; _dir[1] /= l; _dir[2] /= l;
-              game.weapons.tryFire(_muzzle, _dir, false, 2.8, {
-                weapon: 'pistol', shooter: c.vehicle, damageMul: 0.4,
-              });
-            }
-          }
-        }
+        driveTowards(c.vehicle, px, pz, 21, c.ai, dt);
+        driveByFire(game, c.vehicle, c.ai, dt,
+          { weapon: 'pistol', range: 40, rate: 0.85, spread: 2.8, damageMul: 0.4 });
+        c.fireTimer = c.ai.fireTimer;
       }
       return 'running';
     },
