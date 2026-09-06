@@ -13,6 +13,7 @@
   <!-- ═══════════════ 1. 설정 화면 ═══════════════ -->
   <section id="menu" class="screen is-active">
     <div class="menu-shell">
+      <button id="btnAudioMenu" class="icon-btn audio-toggle" title="소리 설정">🔊</button>
       <header class="title-block">
         <h1><span class="t-glow">FORTRESS</span></h1>
         <p class="tagline">전차 24종 · 무기 18종 · 개인전과 팀전 · 클래식 배경음악</p>
@@ -50,7 +51,7 @@
           <div><kbd>Enter</kbd><span>현재 파워로 즉시 발사</span></div>
           <div><kbd>PgUp</kbd><kbd>PgDn</kbd><span>파워 미세 조절</span></div>
           <div><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>Tab</kbd><span>무기 교체</span></div>
-          <div><kbd>M</kbd><span>음소거</span></div>
+          <div><kbd>M</kbd><span>음소거 (🔊 버튼에서 볼륨 조절)</span></div>
           <div><kbd>N</kbd><span>다음 곡</span></div>
         </div>
         <p class="help-note">
@@ -67,6 +68,7 @@
       <button id="btnBackMenu" class="btn btn--ghost">← 설정</button>
       <div class="pilot-strip" id="pilotStrip"></div>
       <div class="garage-tools">
+        <button id="btnAudioGarage" class="icon-btn" title="소리 설정">🔊</button>
         <button id="btnRandomAll" class="btn btn--ghost" title="AI가 탈 전차를 다시 뽑습니다">AI 다시 뽑기</button>
         <button id="btnStart" class="btn btn--primary">전투 시작</button>
       </div>
@@ -122,7 +124,7 @@
           <button id="btnNextTrack" class="mini-btn" title="다음 곡 (N)">⏭</button>
         </div>
         <span class="round-tag">R<b id="hudRound">1</b></span>
-        <button id="btnMute" class="icon-btn" title="음소거 (M)">🔊</button>
+        <button id="btnMute" class="icon-btn" title="소리 설정 (M: 음소거)">🔊</button>
         <button id="btnQuit" class="icon-btn" title="메뉴로">✕</button>
       </div>
     </header>
@@ -165,6 +167,22 @@
       </div>
     </footer>
   </section>
+
+  <!-- ═══════════════ 소리 설정 ═══════════════ -->
+  <div id="audioPanel" class="audio-panel" hidden>
+    <div class="ap-head">소리</div>
+    <label class="ap-row">
+      <span class="ap-lbl">효과음</span>
+      <input type="range" id="volSfx" min="0" max="100" step="1" value="85" />
+      <b id="volSfxVal">85</b>
+    </label>
+    <label class="ap-row">
+      <span class="ap-lbl">배경음악</span>
+      <input type="range" id="volMusic" min="0" max="100" step="1" value="40" />
+      <b id="volMusicVal">40</b>
+    </label>
+    <button id="btnMuteAll" class="ap-mute">전체 음소거 <span class="ap-key">M</span></button>
+  </div>
 
   <!-- ═══════════════ 결과 ═══════════════ -->
   <div id="gameover" class="modal" hidden>

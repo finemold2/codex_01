@@ -629,11 +629,98 @@
     bootAudio();
     if (typeof Music !== 'undefined' && Music.next) Music.next();
   });
-  $('#btnMute').addEventListener('click', () => {
-    const m = !AudioCore.isMuted();
-    AudioCore.setMuted(m);
-    $('#btnMute').textContent = m ? '🔇' : '🔊';
+  /* ═══════════════ 소리 설정 ═══════════════ */
+
+  const VK = { sfx: 'fortress.vol.sfx', music: 'fortress.vol.music', muted: 'fortress.muted' };
+
+  function readStore(key, def) {
+    try { const v = localStorage.getItem(key); return v == null ? def : v; } catch (e) { return def; }
+  }
+  function writeStore(key, v) {
+    try { localStorage.setItem(key, String(v)); } catch (e) { /* 저장이 막힌 브라우저 */ }
+  }
+  function readVol(key, def) {
+    const n = parseInt(readStore(key, String(def)), 10);
+    return Number.isFinite(n) ? clamp(n, 0, 100) : def;
+  }
+
+  let volSfx = readVol(VK.sfx, 85);
+  let volMusic = readVol(VK.music, 40);
+  let muted = readStore(VK.muted, '0') === '1';
+
+  function applyAudio() {
+    AudioCore.setSfxVolume(volSfx / 100);
+    AudioCore.setMusicVolume(volMusic / 100);
+    AudioCore.setMuted(muted);
+
+    $('#volSfx').value = volSfx;
+    $('#volSfxVal').textContent = volSfx;
+    $('#volMusic').value = volMusic;
+    $('#volMusicVal').textContent = volMusic;
+
+    const mb = $('#btnMuteAll');
+    mb.classList.toggle('is-on', muted);
+    mb.innerHTML = `${muted ? '음소거 해제' : '전체 음소거'} <span class="ap-key">M</span>`;
+    $('#audioPanel').classList.toggle('is-muted', muted);
+
+    const icon = muted ? '🔇' : (volSfx === 0 && volMusic === 0) ? '🔈' : '🔊';
+    for (const id of ['#btnMute', '#btnAudioMenu', '#btnAudioGarage']) {
+      const el = $(id);
+      if (el) el.textContent = icon;
+    }
+  }
+
+  function openAudioPanel(anchor) {
+    const p = $('#audioPanel');
+    if (!p.hidden && p.dataset.anchor === anchor.id) { p.hidden = true; return; }
+    p.hidden = false;
+    p.dataset.anchor = anchor.id;
+    const r = anchor.getBoundingClientRect();
+    const w = p.offsetWidth || 244, h = p.offsetHeight || 180;
+    const left = clamp(r.right - w, 8, Math.max(8, window.innerWidth - w - 8));
+    const top = r.bottom + 8 + h > window.innerHeight ? Math.max(8, r.top - h - 8) : r.bottom + 8;
+    p.style.left = `${left}px`;
+    p.style.top = `${top}px`;
+  }
+
+  function setMuted(v) {
+    muted = v;
+    writeStore(VK.muted, muted ? '1' : '0');
+    applyAudio();
+  }
+
+  for (const id of ['#btnMute', '#btnAudioMenu', '#btnAudioGarage']) {
+    const el = $(id);
+    if (el) el.addEventListener('click', (e) => { e.stopPropagation(); bootAudio(); openAudioPanel(el); });
+  }
+
+  $('#volSfx').addEventListener('input', (e) => {
+    volSfx = clamp(+e.target.value, 0, 100);
+    writeStore(VK.sfx, volSfx);
+    if (muted && volSfx > 0) { muted = false; writeStore(VK.muted, '0'); }
+    applyAudio();
   });
+  $('#volSfx').addEventListener('change', () => { bootAudio(); if (typeof Sfx !== 'undefined' && Sfx.select) Sfx.select(); });
+
+  $('#volMusic').addEventListener('input', (e) => {
+    volMusic = clamp(+e.target.value, 0, 100);
+    writeStore(VK.music, volMusic);
+    if (muted && volMusic > 0) { muted = false; writeStore(VK.muted, '0'); }
+    applyAudio();
+  });
+  $('#volMusic').addEventListener('change', bootAudio);
+
+  $('#btnMuteAll').addEventListener('click', (e) => { e.stopPropagation(); setMuted(!muted); });
+  $('#audioPanel').addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('pointerdown', (e) => {
+    const p = $('#audioPanel');
+    if (p.hidden) return;
+    if (p.contains(e.target)) return;
+    if (e.target.closest && e.target.closest('.icon-btn')) return;
+    p.hidden = true;
+  });
+
+  applyAudio();
 
   let quitArmed = null;
   $('#btnQuit').addEventListener('click', () => {
@@ -657,7 +744,7 @@
   window.addEventListener('keydown', (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
 
-    if (e.key === 'm' || e.key === 'M') { $('#btnMute').click(); return; }
+    if (e.key === 'm' || e.key === 'M') { setMuted(!muted); return; }
     if (e.key === 'n' || e.key === 'N') { $('#btnNextTrack').click(); return; }
 
     // 격납고 키보드 조작
