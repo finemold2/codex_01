@@ -43,12 +43,17 @@ export default async function run({ canvas }) {
   const diedAt = [p.position[0], p.position[2]];
   p.damage(9999, null, 'bullet');
   if (!p.dead) bad('player.damage(9999) did not kill the player');
-  for (let i = 0; i < 40; i++) game.update(1 / 60);
-  out.notes.push(`dead: state=${ch.state} ragdoll=${ch._ragActive} head ${headOf().toFixed(2)} m`);
-  if (headOf() > 1.0) bad('the ragdoll did not drop the player');
+  for (let i = 0; i < 90; i++) game.update(1 / 60);
+  out.notes.push(`dead 1.5 s: state=${ch.state} ragdoll=${ch._ragActive} head ${headOf().toFixed(2)} m`);
+  if (headOf() > 0.8) bad(`the ragdoll did not drop the player (head at ${headOf().toFixed(2)} m)`);
+  // The body must stay down for the whole death window: no unrelated system (a reload
+  // finishing, say) may trip the revive gate before respawnPlayer() runs at 3.2 s.
+  for (let i = 0; i < 90; i++) game.update(1 / 60);
+  out.notes.push(`dead 3.0 s: state=${ch.state} ragdoll=${ch._ragActive} head ${headOf().toFixed(2)} m`);
+  if (!ch._ragActive) bad('the corpse was revived during the death window');
 
   // 3.2 s of death timer + a little slack, then two more seconds of normal play.
-  for (let i = 0; i < 60 * 6; i++) game.update(1 / 60);
+  for (let i = 0; i < 60 * 5; i++) game.update(1 / 60);
   const movedAway = Math.hypot(p.position[0] - diedAt[0], p.position[2] - diedAt[1]);
   out.notes.push(`respawned ${movedAway.toFixed(0)} m away: player.dead=${p.dead} ` +
     `character.state=${ch.state} character.dead=${ch.dead} ragdoll=${ch._ragActive} ` +

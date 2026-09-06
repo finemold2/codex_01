@@ -125,6 +125,62 @@ export default async function run({ canvas }) {
     if (px && px.unique < 24) bad(`rendered frame looks blank (${px.unique} unique colours)`);
   } catch (e) { if (!e.__skip) bad(`readPixelStats threw: ${e.message}`); }
 
+  // --- AI soak: update-only (no render) so thousands of frames are affordable ----------------
+  if (!light) {
+    try {
+      const t2 = performance.now();
+      const bounds = game.city.bounds;
+      let maxPeds = 0; let maxVeh = 0; let nan = 0; let outOfBounds = 0; let inBuilding = 0;
+      let maxWanted = 0;
+      const spots = game.city.spawns.missionPoints;
+      for (let i = 0; i < 3000; i++) {
+        // Teleport every 500 frames so the streamers have to spawn and despawn repeatedly.
+        if (i % 500 === 0) {
+          const p = spots[(i / 500) % spots.length];
+          game.player.reset(p.x, game.worldToGround(p.x, p.z) + 0.1, p.z, 0);
+        }
+        if (i === 1200) game.police.addWanted(4, 'soak');
+        if (i === 2400) game.police.clearWanted();
+        game.update(1 / 60);
+
+        maxWanted = Math.max(maxWanted, game.police.wanted);
+        const peds = game.peds.peds || [];
+        maxPeds = Math.max(maxPeds, peds.length);
+        maxVeh = Math.max(maxVeh, game.vehicles.length);
+        if (i % 25 === 0) {
+          for (let k = 0; k < peds.length; k++) {
+            const c = peds[k].character || peds[k];
+            const pos = c.position || peds[k].position;
+            if (!pos) continue;
+            if (!Number.isFinite(pos[0]) || !Number.isFinite(pos[1]) || !Number.isFinite(pos[2])) { nan++; break; }
+            if (pos[0] < bounds.min[0] - 300 || pos[0] > bounds.max[0] + 300
+              || pos[2] < bounds.min[1] - 300 || pos[2] > bounds.max[1] + 300) { outOfBounds++; break; }
+            const hits = game.collision.querySphere(pos[0], pos[1] + 0.9, pos[2], 0.25, []);
+            if (hits.some((b) => b.tag === 'building')) { inBuilding++; break; }
+          }
+          for (let k = 0; k < game.vehicles.length; k++) {
+            const v = game.vehicles[k];
+            if (!Number.isFinite(v.position[0]) || !Number.isFinite(v.position[1]) || !Number.isFinite(v.position[2])) { nan++; break; }
+          }
+        }
+      }
+      const ms = (performance.now() - t2) / 3000;
+      out.notes.push(`AI soak: 3000 update-only frames, ${ms.toFixed(2)} ms/frame, peak peds ${maxPeds}, peak vehicles ${maxVeh}, peak wanted ${maxWanted}`);
+      out.notes.push(`soak invariants: NaN ${nan}, out-of-bounds ${outOfBounds}, ped-inside-building ${inBuilding}`);
+      if (nan) bad(`${nan} NaN entity positions during the AI soak`);
+      if (outOfBounds) bad(`${outOfBounds} entities left the world during the AI soak`);
+      if (inBuilding > 6) bad(`${inBuilding} sample points found a pedestrian inside a building`);
+      if (maxPeds > 120) bad(`pedestrian cap exceeded: ${maxPeds}`);
+      if (maxVeh > 160) bad(`vehicle cap exceeded: ${maxVeh}`);
+      if (maxWanted < 4) bad(`wanted level never escalated (peak ${maxWanted})`);
+      if (game.police.wanted !== 0) bad(`clearWanted left wanted at ${game.police.wanted}`);
+      const leftoverCops = (game.police.cars || []).length + (game.police.cops || []).length;
+      out.notes.push(`police entities after clearWanted: ${leftoverCops}`);
+      if (leftoverCops > 4) bad(`clearWanted leaked ${leftoverCops} police entities`);
+      if (ms > 12) bad(`AI update costs ${ms.toFixed(2)} ms/frame`);
+    } catch (e) { bad(`AI soak threw: ${e.message}\n${e.stack || ''}`); }
+  }
+
   // --- render target vs canvas geometry -------------------------------------------------------
   try {
     const r = game.renderer;
