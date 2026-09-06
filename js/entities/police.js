@@ -868,6 +868,11 @@ export class PoliceSystem {
     }
 
     // --- dispatch ---------------------------------------------------------------------
+    // While searching, units are sent to the last place the suspect was seen. Dispatching
+    // them around his *actual* position handed them a free sighting the moment they spawned,
+    // which re-armed the search timer for ever: the heat could never be lost by hiding.
+    const searchX = this.searching && this.lastKnown.valid ? this.lastKnown.x : px;
+    const searchZ = this.searching && this.lastKnown.valid ? this.lastKnown.z : pz;
     this._dispatchTimer -= step;
     let pursuing = 0;
     let closest = Infinity;
@@ -876,27 +881,21 @@ export class PoliceSystem {
       if (u.state !== 'roadblock') pursuing++;
       const v = u.vehicle;
       if (!v || !v.position || !Number.isFinite(v.position[0])) continue;
-      const dx = v.position[0] - px;
-      const dz = v.position[2] - pz;
+      const dx = v.position[0] - searchX;
+      const dz = v.position[2] - searchZ;
       const d2 = dx * dx + dz * dz;
       if (d2 < closest) closest = d2;
     }
-    // Starvation: cars are being dispatched but none of them can actually get to the suspect,
-    // because the lane route in is blocked or loops. Without this the response is infinite
-    // cars circling two blocks away and a wanted level nobody ever comes to collect. It only
-    // counts while the police can actually see the suspect - during a search they are not
-    // supposed to be converging on him at all.
-    if (closest < 3600 || !this.playerVisible) this._starveTimer = 0;
+    // Starvation: cars are being dispatched but none of them can reach the place they are
+    // being sent to, because the lane route in is blocked or the greedy route loops. Without
+    // this the response is an endless stream of cruisers circling two blocks away and a
+    // wanted level nobody ever comes to collect.
+    if (closest < 3600) this._starveTimer = 0;
     else this._starveTimer += step;
     if (this._dispatchTimer <= 0 && pursuing < plan.cars) {
       this._dispatchTimer = DISPATCH_INTERVAL;
       const armored = plan.armored > 0 && pursuing >= plan.cars - plan.armored;
-      // While searching, units are sent to the last place the suspect was seen. Dispatching
-      // them around his *actual* position handed them a free sighting the moment they spawned,
-      // which re-armed the search timer for ever: the heat could never be lost by hiding.
-      const sx = this.searching && this.lastKnown.valid ? this.lastKnown.x : px;
-      const sz = this.searching && this.lastKnown.valid ? this.lastKnown.z : pz;
-      this._dispatchCar(sx, sz, armored, this._starveTimer > 18);
+      this._dispatchCar(searchX, searchZ, armored, this._starveTimer > 18);
     }
 
     // --- roadblocks --------------------------------------------------------------------
