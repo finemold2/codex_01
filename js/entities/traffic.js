@@ -1362,7 +1362,14 @@ export class TrafficManager {
     const limit = lane && Number.isFinite(lane.speedLimit) ? lane.speedLimit : 12;
 
     // --- pure pursuit ---------------------------------------------------------------
-    const lookahead = clamp(4.5 + Math.abs(speed) * 0.72, 5.5, 26);
+    // The look-ahead shortens as the car drifts off the centre line. At the full 26 m a
+    // driver shunted seven metres sideways is aiming at a point almost straight ahead, so it
+    // converges over most of a block - which in practice means grinding along the kerb, or
+    // along the building behind it, until something stops it. Pulling the carrot in turns the
+    // recovery into a real steering command.
+    const offset = Math.sqrt(Math.max(0, offTrack));
+    const lookahead = clamp(4.5 + Math.abs(speed) * 0.72, 5.5, 26)
+      / (1 + clamp(offset * 0.25, 0, 2.5));
     this._routePoint(ai, lookahead, _pt);
     let tx = _pt[0];
     let tz = _pt[1];
@@ -1381,6 +1388,9 @@ export class TrafficManager {
     // --- speed targets ---------------------------------------------------------------
     const panicking = ai.panic > 0;
     let target = limit * ai.cruise * (panicking ? 1.35 : 1);
+
+    // Off the tarmac: slow down so the recovery arc is one the tyres can actually hold.
+    if (offset > 2.5) target = Math.min(target, 6);
 
     // curvature: sample further ahead and cap the speed for the bend
     this._routePoint(ai, lookahead + 9, _pt2);
@@ -1494,6 +1504,9 @@ export class TrafficManager {
         ai.stuck = 0;
         ai.lastX = x;
         ai.lastZ = z;
+        // Re-acquire from where the car actually ended up, not from the lane it failed on.
+        const near = graph.nearest(x, z, 70);
+        if (near >= 0) { ai.laneId = near; ai.laneDist = graph.nearDist; }
         ai.routeLen = 0;
         this._extendRoute(ai);
       }
