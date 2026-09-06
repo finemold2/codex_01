@@ -6,8 +6,7 @@
  *
  * Run: node tools/test-vehicle.mjs
  */
-import { Vehicle, VEHICLE_TYPES } from '../js/entities/vehicle.js';
-import { mat4 } from '../js/core/math.js';
+import { Vehicle, VEHICLE_TYPES, buildVehicleAssets } from '../js/entities/vehicle.js';
 
 const fails = [];
 const ok = (c, m) => { if (!c) fails.push(m); };
@@ -209,18 +208,43 @@ const tick = (g, world, n, each) => {
 // --- wheels roll forwards, not backwards ------------------------------------------------------
 {
   const { g, world } = worldGame();
-  const v = spawn(g, world, 'sedan');
-  tick(g, world, 120, (x) => { x.input.throttle = 1; });
-  ok(v.forwardSpeed > 1, 'setup: car should be rolling');
+  const realAssets = buildVehicleAssets(null, null, null);
+  const v = new Vehicle(realAssets, 'sedan', { position: [0, 0.5, 0], yaw: 0, game: g });
+  g.vehicles.push(v);
+  const wheelGeo = realAssets.wheel.geometry;
+  const wheelLodGeo = realAssets.wheelLod.geometry;
+  let captured = null;
+  const capture = {
+    submit(mesh, material, matrix) {
+      if (captured === null && (mesh === wheelGeo || mesh === wheelLodGeo)) {
+        captured = Float32Array.from(matrix);
+      }
+    },
+    submitLight() {}, submitSpotLight() {},
+  };
+  // Roll gently so one frame is a fraction of a turn.
+  tick(g, world, 40, (x) => { x.input.throttle = 0.08; });
+  ok(v.forwardSpeed > 0.05, 'setup: car should be rolling forwards');
   ok(Math.sign(v.wheels[0].spinRate) === Math.sign(v.forwardSpeed),
     'wheel spin rate must follow the direction of travel');
-  // The drawn contact patch has to sweep opposite the car's motion.
-  const m = mat4.create();
-  mat4.identity(m);
-  mat4.rotateY(m, m, v.yaw);
-  mat4.rotateX(m, m, -Math.abs(v.wheels[0].spin % 1) || -0.1);
-  const contactZ = m[6] * -1;   // local (0,-1,0) -> world z
-  ok(contactZ > 0, 'wheels are drawn spinning backwards while driving forwards');
+  /** World offset of the tyre contact patch from the wheel centre. */
+  const contact = () => {
+    captured = null;
+    v.submit(capture, 1 / 60);
+    if (!captured) return null;
+    const m = captured;
+    return [m[4] * -1, m[5] * -1, m[6] * -1];   // local (0,-1,0), translation dropped
+  };
+  const c0 = contact();
+  tick(g, world, 1, (x) => { x.input.throttle = 0.08; });
+  const c1 = contact();
+  ok(c0 !== null && c1 !== null, 'wheels were never submitted for drawing');
+  if (c0 && c1) {
+    // The car drives towards -Z, so the material point at the bottom of the tyre must sweep +Z.
+    const sweep = c1[2] - c0[2];
+    console.log(`wheel roll: contact patch swept ${sweep >= 0 ? '+' : ''}${sweep.toFixed(4)} m in z while driving -Z`);
+    ok(sweep > 1e-5, 'wheels are drawn spinning backwards while driving forwards');
+  }
 }
 
 // --- non-solid bodies (water volumes, triggers) must never act as walls -----------------------

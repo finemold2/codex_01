@@ -314,24 +314,35 @@ export class Player {
 
   // ------------------------------------------------------------------ vehicles
   /**
-   * @param {number} range
-   * @returns {object|null} nearest enterable vehicle
+   * Finds the vehicle the player would board.
+   *
+   * An empty car always wins, but an occupied one is still a valid target - taking it is a
+   * carjack, which {@link enterVehicle} handles by throwing the driver out and reporting the
+   * crime. Skipping occupied cars outright would leave the player unable to board anything on a
+   * street where the traffic system has a driver in almost every vehicle.
+   *
+   * @param {number} range Search radius in metres.
+   * @returns {object|null} Nearest enterable vehicle, or null.
    */
   findNearestVehicle(range) {
     let best = null;
     let bestD = range * range;
+    let bestOccupied = null;
+    let bestOccupiedD = range * range;
     const list = this.game.vehicles;
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
-      if (v.isDestroyed || v.driver) continue;
+      if (v.isDestroyed) continue;
       const dx = v.position[0] - this.position[0];
       const dy = v.position[1] - this.position[1];
       const dz = v.position[2] - this.position[2];
       if (Math.abs(dy) > 2.6) continue;
       const d = dx * dx + dz * dz;
-      if (d < bestD) { bestD = d; best = v; }
+      if (v.driver) {
+        if (v.driver !== this && d < bestOccupiedD) { bestOccupiedD = d; bestOccupied = v; }
+      } else if (d < bestD) { bestD = d; best = v; }
     }
-    return best;
+    return best || bestOccupied;
   }
 
   enterVehicle(vehicle, seat = 0) {

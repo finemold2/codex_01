@@ -164,6 +164,9 @@ function makeUnit() {
     stuck: 0,
     lastX: 0,
     lastZ: 0,
+    blocked: 0,
+    bestDist: Infinity,
+    noProgress: 0,
     prevHealth: 1000,
     siren: null,
     armored: false,
@@ -286,6 +289,14 @@ export class PoliceSystem {
     this._heliAssets = null;
     this._assets = (game && game.characterAssets) || null;
     this._station = this._findStation();
+    /** Time of the last shot the *player* fired; used to attribute cruiser damage. @private */
+    this._playerShotTime = -1e9;
+    if (game && typeof game.on === 'function') {
+      game.on('weaponFired', (e) => {
+        if (e && e.player) this._playerShotTime = this._time;
+      });
+      game.on('explosion', () => { this._playerShotTime = this._time; });
+    }
   }
 
   /**
@@ -442,6 +453,9 @@ export class PoliceSystem {
     u.deployTimer = 0;
     u.ramTimer = 0;
     u.stuck = 0;
+    u.blocked = 0;
+    u.bestDist = Infinity;
+    u.noProgress = 0;
     u.siren = null;
     u.armored = false;
     u.lightPhase = this.rng.next() * 6.28;

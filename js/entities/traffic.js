@@ -513,7 +513,7 @@ export function applySpeedControl(v, speed, target) {
   if (!input) return;
   const err = target - speed;
   if (target <= 0.15) {
-    input.throttle = speed > 0.4 ? 0 : 0;
+    input.throttle = 0;
     input.brake = 1;
     return;
   }
@@ -1061,10 +1061,13 @@ export class TrafficManager {
     const px = fin(pos3[0], 0);
     const pz = fin(pos3[2], 0);
     const r2 = radius * radius;
+    const playerVehicle = this.game.player ? this.game.player.vehicle : null;
     let n = 0;
     for (let i = this.vehicles.length - 1; i >= 0; i--) {
       const v = this.vehicles[i];
       if (!v || !v.position) { this._dropIndex(i, true); n++; continue; }
+      // Never pool the car the player is sitting in, whatever radius a caller passes.
+      if (v === playerVehicle || v.driver || v.isPlayer) continue;
       const dx = v.position[0] - px;
       const dz = v.position[2] - pz;
       if (dx * dx + dz * dz > r2) { this._dropIndex(i, false); n++; }
@@ -1104,9 +1107,8 @@ export class TrafficManager {
       vehicle.isTraffic = false;
       // Keep owning the abandoned shell so it streams out instead of piling up in the world.
       if (this.orphans.indexOf(vehicle) < 0) {
-        if (this.orphans.length < 24) this.orphans.push(vehicle);
-        else this._releaseVehicle(this.orphans.shift(), false);
-        if (this.orphans.indexOf(vehicle) < 0) this.orphans.push(vehicle);
+        if (this.orphans.length >= 24) this._releaseVehicle(this.orphans.shift(), false);
+        this.orphans.push(vehicle);
       }
     }
     if (!rec) return;
@@ -1380,10 +1382,12 @@ export class TrafficManager {
 
     // car following
     const lead = this._leadGap(v, x, z, fx, fz);
+    let waiting = false;   // true when the driver is deliberately holding station
     if (lead >= 0) {
       const gap = lead - MIN_GAP;
       if (gap <= 0.2) target = 0;
       else target = Math.min(target, gap / HEADWAY);
+      if (lead < MIN_GAP + 6) waiting = true;
       if (lead < MIN_GAP + 1.2 && Math.abs(speed) < 0.8) {
         ai.blocked += dt;
         if (ai.blocked > BLOCKED_HORN && ai.hornTimer <= 0) {
@@ -1414,15 +1418,18 @@ export class TrafficManager {
             const room = Math.max(0, stopDist - 3.2);
             target = Math.min(target, room * 0.55);
             if (room < 1.2) target = 0;
+            waiting = true;
           }
         } else if (stopDist < 24) {
-          target = Math.min(target, this._yieldLimit(v, lane.toNode, x, z, yaw, stopDist));
+          const yieldTo = this._yieldLimit(v, lane.toNode, x, z, yaw, stopDist);
+          if (yieldTo < target) { target = yieldTo; waiting = true; }
         }
       }
     }
 
     // hazards: pedestrians, the player on foot, wrecks
-    target = Math.min(target, this._hazardLimit(v, ai, x, z, fx, fz, speed));
+    const hazard = this._hazardLimit(v, ai, x, z, fx, fz, speed);
+    if (hazard < target) { target = hazard; if (hazard < 3) waiting = true; }
 
     if (panicking) target = Math.max(target, limit * 0.6);
     if (target < 0) target = 0;
@@ -1430,23 +1437,44 @@ export class TrafficManager {
     input.handbrake = false;
 
     // --- stuck detection --------------------------------------------------------------
+    // "Stuck" means the driver wants to go and physically cannot, which is not at all the
+    // same as waiting its turn. Queueing behind another car, holding at a red light and
+    // yielding at a junction are all correct behaviour, and counting them as stuck used to
+    // drop every signalled car into the reverse-out recovery after six seconds: it would
+    // then back into the queue behind it, scatter both cars off the lane and re-route them,
+    // which progressively gridlocked the whole network around a stationary player.
+    //
+    // Progress is measured against a reference point that only moves once the car has
+    // actually covered a metre. A per-tick displacement test cannot do this: a wedged car
+    // jitters a few centimetres against whatever it is leaning on, which reset the old timer
+    // before it ever reached the recycle threshold, so genuinely stuck cars sat there for
+    // ever while holding their slot in the traffic cap.
     const mdx = x - ai.lastX;
     const mdz = z - ai.lastZ;
-    if (mdx * mdx + mdz * mdz < 0.0016 && target > 1.5) ai.stuck += dt;
-    else ai.stuck = 0;
-    ai.lastX = x;
-    ai.lastZ = z;
-    if (ai.stuck > 6) {
+    if (mdx * mdx + mdz * mdz > 1) {
+      ai.lastX = x;
+      ai.lastZ = z;
+      ai.stuck = 0;
+    } else if (waiting || target <= 0.2) {
+      ai.stuck = 0;
+      ai.lastX = x;
+      ai.lastZ = z;
+    } else {
+      ai.stuck += dt;
+    }
+    if (ai.stuck > 4) {
       // Wedged against geometry with nobody in front: reverse out, then re-route.
       input.throttle = -0.55;
       input.brake = 0;
       input.steer = -steer;
-      if (ai.stuck > 9.5) {
+      if (ai.stuck > 8) {
         const player = this.game.player;
         const dpx = player && player.position ? player.position[0] - x : 1e9;
         const dpz = player && player.position ? player.position[2] - z : 1e9;
+        // Out of sight: recycle. In sight: give the reverse manoeuvre another go rather than
+        // popping the car out of the world in front of the player.
         if (dpx * dpx + dpz * dpz > 3600) this._recycle(v);
-        else ai.stuck = 0;
+        else { ai.stuck = 0; ai.lastX = x; ai.lastZ = z; }
       }
     }
   }

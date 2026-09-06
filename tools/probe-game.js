@@ -220,6 +220,29 @@ export default async function run({ canvas }) {
     }
   } catch (e) { out.notes.push('raycast diag failed: ' + e.message); }
 
+  // --- HUD element geometry (catches panels that are built but never actually visible) --------
+  try {
+    const veh = game.player.findNearestVehicle(60);
+    if (veh) {
+      game.player.enterVehicle(veh, 0);
+      game.input.injectKey('KeyW', true);
+      for (let i = 0; i < 90; i++) game.update(1 / 60);
+      game.input.injectKey('KeyW', false);
+      game.hud.update(1 / 60);
+      const report = [];
+      for (const sel of ['.hud-veh', '.hud-weapon', '.hud-minimap', '.hud-toasts', '.hud-wanted']) {
+        const el = dom.hudRoot.querySelector(sel) || document.querySelector(sel);
+        if (!el) { report.push(`${sel}: MISSING`); continue; }
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        report.push(`${sel}: ${Math.round(r.width)}x${Math.round(r.height)} @${Math.round(r.left)},${Math.round(r.top)} opacity=${cs.opacity} display=${cs.display} class="${el.className}"`);
+      }
+      out.notes.push('HUD elements while driving: ' + report.join(' | '));
+      out.notes.push(`vehicle speed=${(game.player.vehicle && game.player.vehicle.speed || 0).toFixed(2)} m/s`);
+      game.player.exitVehicle();
+    } else out.notes.push('no vehicle found for the HUD driving check');
+  } catch (e) { out.notes.push('HUD driving diag failed: ' + e.message); }
+
   // --- HUD presence ------------------------------------------------------------------------------
   const hudChildren = dom.hudRoot.children.length;
   out.notes.push(`HUD root children: ${hudChildren}, menu root children: ${dom.menuRoot.children.length}`);
@@ -251,6 +274,16 @@ export default async function run({ canvas }) {
       game.weapons.tryFire(game.camera.position, game.camera.forward, true, 1);
     }
     if (mode.includes('dusk')) game.time.hours = 18.3;
+    if (mode.includes('drive')) {
+      // Get into the nearest car and drive for a couple of seconds so the chase camera, wheels,
+      // suspension and speedometer are all in a real state.
+      const v = game.player.findNearestVehicle(60) || game.spawnVehicle('sedan',
+        game.player.position[0] + 3, game.player.position[2] + 2, 0, {});
+      game.player.enterVehicle(v, 0);
+      game.input.injectKey('KeyW', true);
+      for (let i = 0; i < 200; i++) game.update(1 / 60);
+      game.input.injectKey('KeyW', false);
+    }
     if (mode.includes('nopick')) game._submitPickups = () => {};
     if (mode.includes('move')) {
       const p = game.city.spawns.missionPoints[3] || game.city.spawns.missionPoints[0];

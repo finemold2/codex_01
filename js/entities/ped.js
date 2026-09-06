@@ -314,6 +314,8 @@ export class PedManager {
 
     this._pool = [];
     this._charPool = new Map();
+    /** True while a bulk damage pass (an explosion) is running; suppresses per-victim alerts. */
+    this._bulkDamage = false;
     this._nextId = 0;
     this._frame = 0;
     this._time = 0;
@@ -984,11 +986,18 @@ export class PedManager {
    */
   damagePed(ped, amount, dir3, headshot = false, attacker) {
     if (!ped || ped.dead) return 0;
+    // Who fired has to be resolved *before* the call is routed anywhere, because the police
+    // system decides the player's wanted level from it. `weapons.applyHit` calls this with four
+    // arguments, so `attacker` is undefined for every bullet in the game; the shooter is then
+    // whichever AI is mid-`tryFire` (`game.ext.aiShooter`, set by police.js around its own
+    // shots) and only the player when nobody else claims it.
+    const src = attacker !== undefined ? attacker
+      : (this.game.ext && this.game.ext.aiShooter) || (this.game.player || null);
     // `raycastPeds` also reports police officers, so route their damage to the police system.
     if (ped.isCop === true) {
       const police = this.game.police;
       if (police && typeof police.damageCop === 'function') {
-        return police.damageCop(ped, amount, dir3, headshot, attacker);
+        return police.damageCop(ped, amount, dir3, headshot, src);
       }
       return 0;
     }
@@ -998,8 +1007,6 @@ export class PedManager {
     // A clean head hit on an unarmoured civilian is always fatal.
     if (headshot) dmg = Math.max(dmg, ped.maxHealth);
     ped.health -= dmg;
-    const src = attacker !== undefined ? attacker
-      : (this.game.ext && this.game.ext.aiShooter) || (this.game.player || null);
     if (dir3) {
       ped.threatX = ped.position[0] - fin(dir3[0], 0) * 6;
       ped.threatZ = ped.position[2] - fin(dir3[2], 0) * 6;
@@ -1017,8 +1024,9 @@ export class PedManager {
           { power: 1 });
       }
     }
-    // Everyone nearby sees it happen.
-    this.alertGunshot(ped.position, 26);
+    // Everyone nearby sees it happen. A bulk caller (an explosion) alerts the whole street
+    // once at the end instead, so the crowd is not swept N times for N casualties.
+    if (!this._bulkDamage) this.alertGunshot(ped.position, 26);
     return dmg;
   }
 
@@ -1086,6 +1094,9 @@ export class PedManager {
   explosionDamage(x, y, z, radius, damage) {
     const r = radius > 0 ? radius : 8;
     const r2 = r * r;
+    // One crowd-wide alert at the end covers every casualty; without this flag a blast that
+    // catches k peds would sweep the whole crowd k times.
+    this._bulkDamage = true;
     for (let i = this.peds.length - 1; i >= 0; i--) {
       const ped = this.peds[i];
       if (ped.dead) continue;
@@ -1101,6 +1112,7 @@ export class PedManager {
       _dir3[2] = dz / l;
       this.damagePed(ped, fin(damage, 100) * (1 - d / r), _dir3, false, this.game.player);
     }
+    this._bulkDamage = false;
     this.alertGunshot(_hitPointFrom(x, y, z), r * 3.5);
   }
 
@@ -1966,13 +1978,18 @@ export class PedManager {
     ch.yaw = ped.yaw;
 
     if (!ped.dead) {
+      // Every clip has to match how fast the body is actually travelling, otherwise the feet
+      // slide: `aim` and `crouch` are standing poses, so a hostile backing away at 2.5 m/s or
+      // a cowering ped being shoved along must use the gait-locked walking variants instead.
+      const moving = speed > 0.28;
       let state = 'idle';
-      if (ped.state === 'cower') state = 'crouch';
+      if (ped.state === 'cower') state = moving ? 'crouchWalk' : 'crouch';
       else if (ped.state === 'hit') state = 'hit';
-      else if (ped.state === 'hostile') state = speed > 2.9 ? 'run' : 'aim';
-      else if (speed > 5.6) state = 'sprint';
+      else if (ped.state === 'hostile') {
+        state = speed > 2.9 ? 'run' : moving ? 'aimWalk' : 'aim';
+      } else if (speed > 5.6) state = 'sprint';
       else if (speed > 2.9) state = 'run';
-      else if (speed > 0.28) state = 'walk';
+      else if (moving) state = 'walk';
       ch.setState(state);
     }
 
