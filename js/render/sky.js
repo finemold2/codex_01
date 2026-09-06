@@ -8,9 +8,10 @@
  * with a procedurally shaded phase, a hash based star field with twinkle, the Milky Way as
  * a soft noise band and two drifting fBm cloud decks with sun-dependent silver lining.
  *
- * The same scattering integral runs on the CPU at a lower step count so `fogColor`,
- * `ambientSky` and `ambientGround` are guaranteed to match what the shader paints. That is
- * what makes distant geometry dissolve into the horizon instead of ending on a hard line.
+ * The same scattering integral, with the same quadrature and the same step count as the
+ * active quality tier, runs on the CPU so `fogColor`, `ambientSky` and `ambientGround`
+ * really do match what the shader paints. That is what makes distant geometry dissolve into
+ * the horizon instead of ending on a hard line.
  *
  * Conventions other modules must honour:
  *  - `sunDirection` points FROM the world TOWARD the key light. During the day it is the sun;
@@ -20,8 +21,10 @@
  *    the real solar direction and is what the sky shader draws the disc from.
  *  - Every colour is linear HDR radiance in the same scale as the renderer's lighting, sized
  *    for an ACES tonemap at exposure ~1.0 (a sunlit white surface lands near 2.5).
- *  - `render()` draws into whatever framebuffer is bound, never touches the viewport, uses
- *    depth test LEQUAL with depth writes OFF and restores depth mask / face culling after.
+ *  - `render()` draws into whatever framebuffer is bound, never touches the viewport, and
+ *    draws with depth test LEQUAL and depth writes OFF. Every piece of state it touches
+ *    (blend enable, depth func, depth mask, face culling) is restored before it returns, so
+ *    it can be dropped anywhere in the frame graph.
  */
 
 import { clamp, smoothstep, lerp, DEG2RAD, PI, mat4 } from '../core/math.js';
@@ -914,8 +917,9 @@ export class Sky {
 
   /**
    * Draws the sky as a full-screen triangle into the currently bound framebuffer.
-   * Depth test LEQUAL with depth writes disabled, so existing geometry is never overwritten
-   * and the viewport is left untouched.
+   * Depth test LEQUAL with depth writes disabled, so existing geometry is never overwritten.
+   * The viewport, the framebuffer binding and every GL state this touches are left exactly
+   * as they were found.
    * @param {Object} camera Camera with `position`, `invProj`/`invView` (or `proj`/`view`) and `fov`.
    * @returns {void}
    */
@@ -1113,7 +1117,7 @@ export class Sky {
 
   /**
    * Recomputes the solar/lunar positions and every derived lighting colour by running the
-   * same scattering integral the shader uses (at a lower step count).
+   * exact same scattering integral (and step count) the active shader variant uses.
    * @returns {void}
    * @private
    */
@@ -1253,8 +1257,8 @@ export class Sky {
   }
 
   /**
-   * CPU mirror of the shader's scattering integral (plus the night terms), so the fog and
-   * ambient colours are exactly what the sky paints in that direction.
+   * CPU mirror of the shader's scattering integral (plus the night and ground terms), so the
+   * fog and ambient colours are what the sky actually paints in that direction.
    * @param {number} dx Ray direction x (unit).
    * @param {number} dy Ray direction y (unit).
    * @param {number} dz Ray direction z (unit).
@@ -1288,12 +1292,15 @@ export class Sky {
     let sumM0 = 0.0, sumM1 = 0.0, sumM2 = 0.0;
     let sumS0 = 0.0, sumS1 = 0.0, sumS2 = 0.0;
     const kInv = 1.0 / (Math.exp(STEP_K) - 1.0);
+    // Same step count AND same quadrature as the shader variant that is about to draw, which
+    // is the only way `fogColor`/`ambientSky` can genuinely match what the sky paints.
+    const steps = this._steps();
+    const invN = 1.0 / steps;
     let tPrev = 0.0;
-    for (let i = 0; i < CPU_STEPS; i++) {
-      const f = (i + 1) / CPU_STEPS;
-      const tNext = tMax * (Math.exp(STEP_K * f) - 1.0) * kInv;
+    for (let i = 0; i < steps; i++) {
+      const tNext = tMax * (Math.exp(STEP_K * (i + 1) * invN) - 1.0) * kInv;
+      const tm = tMax * (Math.exp(STEP_K * (i + 0.5) * invN) - 1.0) * kInv;
       const dt = tNext - tPrev;
-      const tm = tPrev + dt * 0.5;
       tPrev = tNext;
       const px = dx * tm;
       const py = oy + dy * tm;
@@ -1302,17 +1309,22 @@ export class Sky {
       const alt = Math.max(pr - RG, 0.0);
       const dR = Math.exp(-alt / HR) * dt;
       const dM = Math.exp(-alt / HM) * dt;
+      const dO = Math.max(0.0, 1.0 - Math.abs(alt - O3_PEAK) / O3_HALF) * dt;
+      // Half of the current segment lies between the eye and the sample; see `atmosphere()`.
+      const eR = odR + dR * 0.5;
+      const eM = odM + dM * 0.5;
+      const eO = odO + dO * 0.5;
       odR += dR;
       odM += dM;
-      odO += Math.max(0.0, 1.0 - Math.abs(alt - O3_PEAK) / O3_HALF) * dt;
+      odO += dO;
       const cosZ = (px * sun[0] + py * sun[1] + pz * sun[2]) / pr;
       const airMass = chapman(pr / HR, cosZ);
       const sR = HR * Math.exp(-alt / HR) * airMass;
       const sM = HM * Math.exp(-alt / HM) * chapman(pr / HM, cosZ);
       const sO = O3_COLUMN * clamp(1.0 - 0.5 * Math.max(alt - 10.0, 0.0) / O3_HALF, 0, 1) * airMass;
-      const tv0 = BETA_R[0] * odR + betaMe * odM + BETA_O3[0] * odO;
-      const tv1 = BETA_R[1] * odR + betaMe * odM + BETA_O3[1] * odO;
-      const tv2 = BETA_R[2] * odR + betaMe * odM + BETA_O3[2] * odO;
+      const tv0 = BETA_R[0] * eR + betaMe * eM + BETA_O3[0] * eO;
+      const tv1 = BETA_R[1] * eR + betaMe * eM + BETA_O3[1] * eO;
+      const tv2 = BETA_R[2] * eR + betaMe * eM + BETA_O3[2] * eO;
       const ts0 = BETA_R[0] * sR + betaMe * sM + BETA_O3[0] * sO;
       const ts1 = BETA_R[1] * sR + betaMe * sM + BETA_O3[1] * sO;
       const ts2 = BETA_R[2] * sR + betaMe * sM + BETA_O3[2] * sO;
@@ -1362,11 +1374,14 @@ export class Sky {
       const sO = O3_COLUMN * clamp(1.0 - 0.5 * Math.max(alt - 10.0, 0.0) / O3_HALF, 0, 1) * airMass;
       const ndl = Math.max(cosZ, 0.0);
       const ga = this.params.groundAlbedo;
+      // Mirrors the shader: shade the terrain, then dissolve it into the horizon colour.
+      const aer = 1.0 - Math.exp(-tGround * clamp(this.params.groundFog, 0.02, 40.0));
       for (let i = 0; i < 3; i++) {
         const sunT = Math.exp(-Math.min(BETA_R[i] * sR + betaMe * sM + BETA_O3[i] * sO, 60.0));
         const lit = sunT * this.params.sunIrradiance * ndl * 0.318;
         out[i] += ga[i] * (lit + this.ambientSky[i] * 0.6 +
           NIGHT_SKY_TINT[i] * 12.0 * this.nightFactor) * _trans[i];
+        out[i] = out[i] + (this.fogColor[i] - out[i]) * aer;
       }
     }
 

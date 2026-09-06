@@ -255,6 +255,8 @@ function completeType(key, d) {
     maxSpeedKmh: d.maxSpeed * 3.6,
     brakeForce: d.brakeForce,
     grip: d.grip,
+    launchGrip: d.launchGrip === undefined ? 1 : d.launchGrip,
+    launchSpeed: d.launchSpeed === undefined ? 12 : d.launchSpeed,
     drive: d.drive,
     weightFront: d.weightFront,
     cdA: d.cdA,
@@ -2112,11 +2114,21 @@ export class Vehicle {
     const gripF = muF * loadF;
     const gripR = muR * loadR;
 
+    // Standing-start traction limit: a road tyre (and the clutch behind it) cannot put full
+    // torque down from rest, so the drive axle's longitudinal budget ramps in with speed.
+    const launch = lerp(t.launchGrip, 1, clamp(Math.abs(u) / t.launchSpeed, 0, 1));
+    const maxDriveF = gripF * launch;
+    const maxDriveR = gripR * launch;
+    const wantF = driveF;
+    const wantR = driveR;
+    if (driveF > maxDriveF) driveF = maxDriveF; else if (driveF < -maxDriveF) driveF = -maxDriveF;
+    if (driveR > maxDriveR) driveR = maxDriveR; else if (driveR < -maxDriveR) driveR = -maxDriveR;
+
     // Longitudinal first: the drive axle can overwhelm its grip and light up the tyres.
     let flongF = clamp(driveF + brakeF, -gripF, gripF);
     let flongR = clamp(driveR + brakeR, -gripR, gripR);
-    const slipDriveF = gripF > 1 ? clamp((Math.abs(driveF + brakeF) - gripF) / gripF, 0, 1) : 0;
-    const slipDriveR = gripR > 1 ? clamp((Math.abs(driveR + brakeR) - gripR) / gripR, 0, 1) : 0;
+    const slipDriveF = gripF > 1 ? clamp((Math.abs(wantF + brakeF) - gripF) / gripF, 0, 1) : 0;
+    const slipDriveR = gripR > 1 ? clamp((Math.abs(wantR + brakeR) - gripR) / gripR, 0, 1) : 0;
 
     // Remaining lateral budget (friction circle).
     const latMaxF = Math.sqrt(Math.max(0, gripF * gripF - flongF * flongF));
