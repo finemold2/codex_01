@@ -51,9 +51,7 @@ import { ParticleSystem } from './particles.js';
 
 const _v0 = vec3.create();
 const _v1 = vec3.create();
-const _v2 = vec3.create();
 const _center = vec3.create();
-const _corner = vec3.create();
 const _lightUp = vec3.create();
 const _lightDir = vec3.create();
 const _m0 = mat4.create();
@@ -820,7 +818,7 @@ export class Renderer {
     this._lights = [];
 
     // ---- render state cache ---------------------------------------------------------------
-    this._state = { blend: -1, depthWrite: -1, depthTest: -1, cull: -1, program: null };
+    this._state = { blend: -1, depthWrite: -1, depthTest: -1, cull: -1, program: null, material: null };
 
     /** @type {RenderTarget|null} HDR scene target (rgba16f colour + depth texture). */
     this.hdr = null;
@@ -861,13 +859,13 @@ export class Renderer {
     this._lightDirCone = new Float32Array(4);
     /** @type {number} */
     this._activeLights = 0;
-    /** @type {Int32Array} Scratch for per-draw light indices. */
-    this._drawLights = new Int32Array(MAX_DRAW_LIGHTS);
-
     /** @type {Float32Array} `[renderWidth, renderHeight]` for screen-space lookups. */
     this._resolution = new Float32Array(2);
     /** @type {Float32Array} `[sunColor * intensity]`. */
     this._sunRadiance = vec3.create();
+
+    /** @type {Camera|null} Camera of the frame currently being rendered. */
+    this._camera = null;
 
     /** @type {Object} Fallback material for `submit` calls without one. */
     this.defaultMaterial = createMaterial({ name: 'default' });
@@ -1645,6 +1643,7 @@ export class Renderer {
       this._disposeShaderCache();
     }
 
+    this._camera = camera;
     camera.update(this.width / Math.max(1, this.height));
 
     // 1. lights + draw list
@@ -2023,6 +2022,7 @@ export class Renderer {
 
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(0, 0);
+    gl.enable(gl.CULL_FACE);
     this._resetState();
   }
 
@@ -2155,6 +2155,7 @@ export class Renderer {
   /**
    * Uploads the frame-constant uniforms into a program (once per program per frame).
    * @param {Shader} shader Program in use.
+   * @param {Camera} camera Camera of the current frame.
    * @returns {void}
    * @private
    */

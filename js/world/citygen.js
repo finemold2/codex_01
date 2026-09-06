@@ -36,8 +36,9 @@ const WALK_OFFSET = 1.8;
 const SIDEWALK_H = 0.15;
 /** Carriageway width of a wide avenue. */
 const AVENUE_WIDTH = 24;
-/** Carriageway width of the diagonal boulevard. */
-const BOULEVARD_WIDTH = 30;
+/** Carriageway width of the diagonal boulevard. Kept under 27.7 m so the kerb
+ * corners of the 16 m streets it crosses at 45 degrees stay off the asphalt. */
+const BOULEVARD_WIDTH = 26;
 /** Carriageway width of the curved waterfront road. */
 const WATERFRONT_WIDTH = 20;
 /** Distance from the last grid road centre out to the waterfront road. */
@@ -1109,13 +1110,6 @@ function buildRoads(ctx) {
     ctx.nodes[e.b].roads.push(e.roadIds[e.roadIds.length - 1]);
   }
 
-  // Square asphalt pads so intersection corners also report as "on road".
-  for (const n of ctx.nodes) {
-    let half = 0;
-    for (const eid of n.edges) half = Math.max(half, ctx.edges[eid].width * 0.5);
-    if (half <= 0) continue;
-    insertBox(ctx.roadGrid, { x: n.x, z: n.z, hx: half, hz: half, rot: 0, road: null });
-  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -2832,11 +2826,6 @@ function roadIndexOf(city) {
         hz: r.width * 0.5,
         rot: Math.atan2(dz, dx)
       });
-    }
-    for (const n of city.nodes) {
-      let half = 0;
-      for (const rid of n.roads) half = Math.max(half, city.roads[rid].width * 0.5);
-      if (half > 0) insertBox(idx, { x: n.x, z: n.z, hx: half, hz: half, rot: 0 });
     }
     _roadIndex.set(city, idx);
   }

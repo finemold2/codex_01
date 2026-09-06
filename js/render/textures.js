@@ -3244,19 +3244,20 @@ function splatStar(field, w, h, cx, cy, radius, brightness) {
 function genSkyStars(W, H, seed) {
   const rng = new Rand(seed ^ 0x57a45);
   const noise = new NoiseSource(seed);
-  const cloud = fbmField(W, H, noise, { freqX: 6, freqY: 3, octaves: 5, gain: 0.6 });
+  const cloud = fbmField(W, H, noise, { freqX: 6, freqY: 3, octaves: 4, gain: 0.6 });
   const dust = fbmField(W, H, new NoiseSource(seed + 1), { freqX: 14, freqY: 7, octaves: 3 });
   const bright = new Float32Array(W * H);
   const warm = new Float32Array(W * H);
 
   /* Milky band: a slanted, wrapping ridge of glowing dust. */
+  const bandAt = new Float32Array(W);
+  for (let x = 0; x < W; x++) bandAt[x] = Math.sin((x / W * 2 + 0.35) * TWO_PI) * 0.16 + 0.5;
   for (let y = 0; y < H; y++) {
     const row = y * W;
     const v = y / H;
     for (let x = 0; x < W; x++) {
       const i = row + x;
-      const u = x / W;
-      const band = Math.sin((u * 2 + 0.35) * TWO_PI) * 0.16 + 0.5;
+      const band = bandAt[x];
       const d = Math.abs(v - band);
       const g = (1 - smoothstep(0.02, 0.26, d)) * (0.30 + cloud[i] * 0.85) * (0.4 + dust[i] * 0.9);
       bright[i] += g * 0.28;
@@ -3267,7 +3268,7 @@ function genSkyStars(W, H, seed) {
   for (let i = 0; i < faint; i++) {
     const x = rng.next() * W;
     const y = rng.next() * H;
-    const band = Math.sin((x / W * 2 + 0.35) * TWO_PI) * 0.16 + 0.5;
+    const band = bandAt[Math.min(W - 1, x | 0)];
     const near = 1 - smoothstep(0.02, 0.30, Math.abs(y / H - band));
     if (rng.next() > 0.35 + near * 0.6) continue;
     const b = rng.range(0.15, 0.75);
@@ -3318,7 +3319,12 @@ function genSkyStars(W, H, seed) {
  */
 function genNoiseBlue(S, seed) {
   const a = blueNoiseField(S, S, seed);
-  const b = blueNoiseField(S, S, seed + 977);
+  /* A toroidal shift of a blue-noise mask is still blue noise and is free. */
+  const b = new Float32Array(S * S);
+  const sx = (S >> 1) + 3, sy = (S >> 2) + 7;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) b[y * S + x] = a[((y + sy) % S) * S + ((x + sx) % S)];
+  }
   const canvas = createCanvas(S, S);
   const ctx = ctx2d(canvas);
   const img = newImage(ctx, S, S);
@@ -3549,7 +3555,7 @@ export function buildTextureLibrary(gl, opts) {
   /* --- vegetation and vehicles ------------------------------------------ */
   add('treeBark', genTreeBark(S, seed + 12), TILE, _mark());
   add('leaves', genLeaves(S, seed + 13), CARD, _mark());
-  add('carPaintNoise', genCarPaintNoise(S, seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso }, _mark());
+  add('carPaintNoise', genCarPaintNoise(Math.max(128, S >> 1), seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso }, _mark());
   add('tire', genTire(S, seed + 15), TILE, _mark());
   add('chrome', genChrome(Math.max(128, S >> 1), seed + 16), CARD_OPAQUE, _mark());
 
