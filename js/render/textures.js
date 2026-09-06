@@ -677,15 +677,48 @@ function normalizeField(f) {
 }
 
 /**
+ * Largest divisor of `n` that is at most `cap` (and at least 16 when possible).
+ * Used to pick a blue-noise tile that repeats into `n` without a wrap seam.
+ * @param {number} n Target size.
+ * @param {number} cap Maximum tile size.
+ * @returns {number} Tile size.
+ */
+function tileDivisor(n, cap) {
+  if (n <= cap) return n;
+  for (let d = cap; d >= 16; d--) if (n % d === 0) return d;
+  return cap;
+}
+
+/** Largest void-and-cluster grid we ever solve (the algorithm is O(n^2)). */
+const BLUE_NOISE_TILE = 64;
+
+/**
  * Generates a real blue-noise mask with the void-and-cluster algorithm
  * (Ulichney 1993). The energy field is evaluated toroidally, so the result
  * tiles seamlessly and has no low-frequency clumping.
- * @param {number} w Width (small, e.g. 64).
+ *
+ * Void-and-cluster is O(pixels^2), so the mask is solved on a tile of at most
+ * {@link BLUE_NOISE_TILE} texels per axis and repeated to fill larger requests
+ * (a toroidal mask repeats exactly). Without the cap a 256x256 request would
+ * take hours; 64x64 — the size the library itself asks for — is solved
+ * directly and is bit-for-bit unchanged.
+ * @param {number} w Width.
  * @param {number} h Height.
  * @param {number} seed Deterministic seed.
  * @returns {Float32Array} Dither values in [0,1).
  */
 function blueNoiseField(w, h, seed) {
+  if (w > BLUE_NOISE_TILE || h > BLUE_NOISE_TILE) {
+    const tw = tileDivisor(w, BLUE_NOISE_TILE);
+    const th = tileDivisor(h, BLUE_NOISE_TILE);
+    const tile = blueNoiseField(tw, th, seed);
+    const out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const sr = (y % th) * tw, dr = y * w;
+      for (let x = 0; x < w; x++) out[dr + x] = tile[sr + (x % tw)];
+    }
+    return out;
+  }
   const n = w * h;
   const rng = new Rand(seed || 7);
   const pattern = new Uint8Array(n);

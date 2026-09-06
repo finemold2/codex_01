@@ -1706,6 +1706,11 @@ function promoteLandmarkTowers(ctx, rng) {
     const halfOut = (b.face === 0 || b.face === 2) ? b.w * 0.5 : b.d * 0.5;
     const nx = b.face === 0 ? 1 : b.face === 2 ? -1 : 0;
     const nz = b.face === 1 ? 1 : b.face === 3 ? -1 : 0;
+    // The tower just grew, so any crown sign authored for the old height would
+    // now be stranded halfway up the glass. Drop it and re-crown the building.
+    for (let k = b.signs.length - 1; k >= 0; k--) {
+      if (b.signs[k].kind === 'roof') b.signs.splice(k, 1);
+    }
     b.signs.push({
       kind: 'roof',
       text: names[i],
@@ -1717,6 +1722,7 @@ function promoteLandmarkTowers(ctx, rng) {
       h: 3.4,
       color: rpick(rng, NEON_COLORS)
     });
+    refitSigns(b);
     ctx.landmarkTowers.push(b);
   }
 }
@@ -1877,82 +1883,140 @@ function connectLanes(ctx, node, inLane, outLane, turn) {
 
 
 /**
- * Final safety pass: pushes any building footprint that still overlaps a carriageway back out of
- * the road.
+ * Re-anchors a building's signage onto its current facade.
  *
- * Lot placement keeps a setback from the base grid, but the avenues, the diagonal boulevard and the
- * waterfront road are widened after the lots are laid out, so a handful of footprints end up
- * intruding into the road surface (measured: 11 of 489 roads, by up to 1.42 m). A building sticking
- * into a lane looks wrong and blocks traffic, so nudge it clear, shrinking only when nudging alone
- * cannot resolve it. Building ids stay stable because nothing is removed.
+ * Signs are authored from the footprint the building had when it was created,
+ * so anything that later changes `w`, `d` or `h` (the landmark promotion, the
+ * road-clearance pass) must call this or the panels end up hanging in the air,
+ * sunk into the wall, or wider than the wall they sit on.
+ *
+ * @param {object} b Building record.
+ * @returns {void}
+ */
+function refitSigns(b) {
+  for (let i = 0; i < b.signs.length; i++) {
+    const s = b.signs[i];
+    const halfOut = (s.face === 0 || s.face === 2) ? b.w * 0.5 : b.d * 0.5;
+    const halfAlong = (s.face === 0 || s.face === 2) ? b.d * 0.5 : b.w * 0.5;
+    s.x = b.x + s.nx * (halfOut + 0.12);
+    s.z = b.z + s.nz * (halfOut + 0.12);
+    s.w = clamp(s.w, 0.8, Math.max(0.8, halfAlong * 2 - 0.4));
+    s.h = clamp(s.h, 0.5, Math.max(0.5, b.h - 0.4));
+    s.y = clamp(s.y, s.h * 0.5 + 0.2, b.h - s.h * 0.5);
+  }
+}
+
+/**
+ * Shrinks one footprint clear of a road rectangle along that road's normal.
+ *
+ * The facade furthest from the road is held exactly where it is, so the new
+ * footprint is always a strict subset of the old one: the pass can never push
+ * a wall into a neighbour, and can never move a building across the road into
+ * a different block.
+ *
+ * @param {object} b Building record (mutated on success).
+ * @param {{x:number,z:number,hx:number,hz:number,rot:number}} rc Road keep-out rectangle.
+ * @param {number} margin Clearance to leave between the facade and the kerb line.
+ * @param {number} minSize Smallest footprint dimension this pass may produce.
+ * @returns {boolean} True when the footprint changed.
+ */
+function shrinkOffRoad(b, rc, margin, minSize) {
+  // Road normal (the short axis of the rectangle).
+  const nx = -Math.sin(rc.rot);
+  const nz = Math.cos(rc.rot);
+  const s = (b.x - rc.x) * nx + (b.z - rc.z) * nz;
+  const side = s >= 0 ? 1 : -1;
+  const ux = Math.cos(b.rot);
+  const uz = Math.sin(b.rot);
+  // Components of the building's own axes along the road normal.
+  const du = Math.abs(ux * nx + uz * nz);
+  const dv = Math.abs(-uz * nx + ux * nz);
+  const sup = b.w * 0.5 * du + b.d * 0.5 * dv;
+  const deficit = (rc.hz + margin) - (Math.abs(s) - sup);
+  if (deficit <= 0) return false;
+  // Shrink whichever local axis leans hardest on the road normal.
+  const useW = b.w * du >= b.d * dv;
+  const proj = Math.max(useW ? du : dv, 0.2);
+  const size = useW ? b.w : b.d;
+  const shrink = Math.min(deficit / proj, size - minSize);
+  if (shrink <= 0.001) return false;
+  const axx = useW ? ux : -uz;
+  const axz = useW ? uz : ux;
+  // Step the centre away from the road by half the shrink so the far facade
+  // stays put; the near facade then retreats by the full shrink.
+  const sigma = ((axx * nx + axz * nz) * side >= 0) ? 1 : -1;
+  const half = shrink * 0.5;
+  b.x += axx * sigma * half;
+  b.z += axz * sigma * half;
+  if (useW) b.w = size - shrink;
+  else b.d = size - shrink;
+  return true;
+}
+
+/**
+ * Final safety pass: pulls any building footprint that still touches a
+ * carriageway or its sidewalk back off the asphalt.
+ *
+ * Placement already enforces the keep-out through {@link footprintFree}, so in
+ * practice this pass finds nothing; it exists so that a future change to the
+ * road widths can never ship a facade standing in a traffic lane. It only ever
+ * *shrinks* a footprint (see {@link shrinkOffRoad}), which is why it cannot
+ * introduce building-on-building overlaps the way a nudge-based pass would.
+ * Building ids stay stable because nothing is added or removed.
  *
  * @param {object} ctx Generation context.
  * @returns {void}
  */
 function clipBuildingsToRoads(ctx) {
-  const MARGIN = 0.4;    // clear space to keep between a facade and the kerb line
-  const MIN_SIZE = 4.0;  // never shrink a footprint below this
+  const MARGIN = 0.35;   // clear space to keep between a facade and the kerb line
+  const MIN_SIZE = 5.0;  // never shrink a footprint below this
   const roads = ctx.roads;
-  if (!roads || !roads.length) return;
+  if (!roads || roads.length === 0 || ctx.buildings.length === 0) return;
 
-  /** Road rectangles, precomputed once. */
-  const rects = new Array(roads.length);
+  // Oriented rectangles matching the keep-out used during placement: the
+  // carriageway plus its sidewalk, grown by half a width at each end so the
+  // intersection squares are covered as well.
+  const b0 = ctx.bounds;
+  const grid = new Grid2D(b0.min[0], b0.min[1], b0.max[0], b0.max[1], HASH_CELL);
   for (let i = 0; i < roads.length; i++) {
     const r = roads[i];
-    const hw = r.width * 0.5;
-    const alongX = r.axis === 'x';
-    rects[i] = {
-      alongX,
-      x0: Math.min(r.ax, r.bx) - (alongX ? 0 : hw),
-      x1: Math.max(r.ax, r.bx) + (alongX ? 0 : hw),
-      z0: Math.min(r.az, r.bz) - (alongX ? hw : 0),
-      z1: Math.max(r.az, r.bz) + (alongX ? hw : 0),
-    };
+    const dx = r.bx - r.ax;
+    const dz = r.bz - r.az;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.01) continue;
+    insertBox(grid, {
+      x: (r.ax + r.bx) * 0.5,
+      z: (r.az + r.bz) * 0.5,
+      hx: len * 0.5 + r.width * 0.5,
+      hz: r.width * 0.5 + SIDEWALK_W,
+      rot: Math.atan2(dz, dx)
+    });
   }
 
-  // Three passes: resolving one road can nudge a footprint into another.
-  for (let pass = 0; pass < 3; pass++) {
+  const dirty = new Set();
+  // Several passes: clearing one road can leave the footprint touching another.
+  for (let pass = 0; pass < 4; pass++) {
     let moved = 0;
     for (let i = 0; i < ctx.buildings.length; i++) {
       const b = ctx.buildings[i];
-      for (let r = 0; r < rects.length; r++) {
-        const rc = rects[r];
-        let lo0 = b.x - b.w * 0.5;
-        let hi0 = b.x + b.w * 0.5;
-        let lo1 = b.z - b.d * 0.5;
-        let hi1 = b.z + b.d * 0.5;
-        if (Math.min(hi0, rc.x1) - Math.max(lo0, rc.x0) <= 0) continue;
-        if (Math.min(hi1, rc.z1) - Math.max(lo1, rc.z0) <= 0) continue;
-
-        // Resolve across the road's short axis.
-        const lo = rc.alongX ? lo1 : lo0;
-        const hi = rc.alongX ? hi1 : hi0;
-        const r0 = rc.alongX ? rc.z0 : rc.x0;
-        const r1 = rc.alongX ? rc.z1 : rc.x1;
-        const size = rc.alongX ? b.d : b.w;
-        const centre = rc.alongX ? b.z : b.x;
-
-        // Push to whichever side needs the smaller correction.
-        const towardsLow = (centre <= (r0 + r1) * 0.5);
-        let newCentre;
-        let newSize = size;
-        if (towardsLow) {
-          const edge = r0 - MARGIN;              // the facade must end here
-          const keep = edge - lo;                // size if we hold the far edge still
-          if (keep >= MIN_SIZE) { newSize = keep; newCentre = edge - keep * 0.5; }
-          else { newSize = Math.max(MIN_SIZE, Math.min(size, keep > 0 ? keep : MIN_SIZE)); newCentre = edge - newSize * 0.5; }
-        } else {
-          const edge = r1 + MARGIN;              // the facade must start here
-          const keep = hi - edge;
-          if (keep >= MIN_SIZE) { newSize = keep; newCentre = edge + keep * 0.5; }
-          else { newSize = Math.max(MIN_SIZE, Math.min(size, keep > 0 ? keep : MIN_SIZE)); newCentre = edge + newSize * 0.5; }
+      const c = Math.abs(Math.cos(b.rot));
+      const sn = Math.abs(Math.sin(b.rot));
+      const ex = b.w * 0.5 * c + b.d * 0.5 * sn + 1;
+      const ez = b.w * 0.5 * sn + b.d * 0.5 * c + 1;
+      grid.query(b.x - ex, b.z - ez, b.x + ex, b.z + ez, _hits);
+      for (let k = 0; k < _hits.length; k++) {
+        const rc = _hits[k];
+        if (!obbOverlap(b.x, b.z, b.w * 0.5, b.d * 0.5, b.rot,
+          rc.x, rc.z, rc.hx, rc.hz, rc.rot, 0)) continue;
+        if (shrinkOffRoad(b, rc, MARGIN, MIN_SIZE)) {
+          moved++;
+          dirty.add(b);
         }
-        if (rc.alongX) { b.z = newCentre; b.d = newSize; } else { b.x = newCentre; b.w = newSize; }
-        moved++;
       }
     }
-    if (!moved) break;
+    if (moved === 0) break;
   }
+  for (const b of dirty) refitSigns(b);
 }
 
 /**

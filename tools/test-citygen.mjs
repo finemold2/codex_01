@@ -26,7 +26,7 @@ const check = (cond, msg) => { checks++; if (cond) ok(msg); else fail(msg); };
 for (const n of ['generateCity', 'laneAt', 'walkAt', 'isOnRoad', 'districtAt', 'cityStats']) {
   check(typeof mod[n] === 'function', `export ${n} is a function`);
 }
-check(generateCity.length === 2, 'generateCity(seed, opts) arity is 2');
+check(generateCity(11) && generateCity(11, {}), 'generateCity works with and without opts');
 
 /* ------------------------------------------------------------ source scan */
 const src = readFileSync(SRC, 'utf8');
