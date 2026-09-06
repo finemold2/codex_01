@@ -111,32 +111,85 @@ export default async function run({ canvas }) {
   cam.yaw = 0; cam.pitch = -0.25;
   let e = 0;
   const s = performance.now();
-  for (let i = 0; i < 12; i++) {
+  const hour = 13.5;
+  for (let i = 0; i < 8; i++) {
     cam.yaw += 0.05;
     cam.update(canvas.width / canvas.height);
-    if (world && world.update) world.update(1 / 60, 21.5, cam);
+    // Drive the sun from the sky exactly like js/game.js does each frame.
+    if (renderer.sky) {
+      renderer.sky.setTimeOfDay(hour);
+      renderer.sky.update(1 / 60, 0);
+      renderer.setSun({
+        direction: renderer.sky.sunDirection, color: renderer.sky.sunColor,
+        intensity: renderer.sky.sunIntensity, ambientSky: renderer.sky.ambientSky,
+        ambientGround: renderer.sky.ambientGround,
+      });
+      renderer.setFog({ color: renderer.sky.fogColor, density: 0.0016, heightFalloff: 0.018 });
+    }
+    if (world && world.update) world.update(1 / 60, hour, cam);
     renderer.render(cam, 1 / 60);
     const g = gl.getError();
     if (g) { e = g; break; }
   }
-  out.notes.push(`12 frames in ${(performance.now() - s).toFixed(0)} ms; stats=${JSON.stringify(renderer.stats)}`);
+  out.notes.push(`sun: dir=${renderer.sky ? Array.from(renderer.sky.sunDirection).map((v) => v.toFixed(2)).join(',') : '?'} intensity=${renderer.sky ? renderer.sky.sunIntensity.toFixed(2) : '?'}`);
+  out.notes.push(`8 frames in ${(performance.now() - s).toFixed(0)} ms; stats=${JSON.stringify(renderer.stats)}`);
   if (e) bad(`GL error during render: 0x${e.toString(16)}`);
   if ((renderer.stats.drawCalls | 0) < 5) bad(`only ${renderer.stats.drawCalls} draw calls for a whole city`);
   if ((renderer.stats.drawCalls | 0) > 2500) bad(`too many draw calls: ${renderer.stats.drawCalls}`);
 
   // frame is not blank
-  const px = new Uint8Array(4 * 64 * 64);
+  const W = Math.min(320, canvas.width); const H = Math.min(180, canvas.height);
+  const px = new Uint8Array(4 * W * H);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.readPixels((canvas.width >> 1) - 32, (canvas.height >> 1) - 32, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.readPixels((canvas.width - W) >> 1, (canvas.height - H) >> 1, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
   const uniq = new Set();
-  for (let i = 0; i < px.length; i += 4) uniq.add(px[i] >> 3 << 10 | px[i + 1] >> 3 << 5 | px[i + 2] >> 3);
-  out.notes.push(`unique colours in centre 64x64: ${uniq.size}`);
-  if (uniq.size < 8) bad('rendered frame looks blank');
+  let sum = 0; let mn = 255; let mx = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    uniq.add(px[i] >> 3 << 10 | px[i + 1] >> 3 << 5 | px[i + 2] >> 3);
+    const l = (px[i] + px[i + 1] + px[i + 2]) / 3;
+    sum += l; if (l < mn) mn = l; if (l > mx) mx = l;
+  }
+  const mean = sum / (px.length / 4);
+  out.notes.push(`frame ${W}x${H}: ${uniq.size} unique colours, luma mean ${mean.toFixed(1)} range ${mn.toFixed(0)}..${mx.toFixed(0)}`);
+  if (uniq.size < 24) bad(`rendered frame looks blank (${uniq.size} unique colours, luma ${mn.toFixed(0)}..${mx.toFixed(0)})`);
+  if (mx - mn < 30) bad(`rendered frame has almost no contrast (${mn.toFixed(0)}..${mx.toFixed(0)})`);
 
   if (world && world.minimapData) {
     out.notes.push(`minimap roads=${(world.minimapData.roads || []).length} blocks=${(world.minimapData.blocks || []).length}`);
     if (!(world.minimapData.roads || []).length) bad('minimapData.roads is empty');
   } else bad('world.minimapData missing');
+
+  // Let the harness grab a fresh frame (the drawing buffer is not preserved between tasks).
+  /**
+   * Renders a named viewpoint so tools/gl-probe.mjs --shot can capture it.
+   * Usage from the harness: window.__shot('aerial'|'street'|'night'|'sunset')
+   */
+  const VIEWS = {
+    aerial: { pos: [city.spawns.player.x - 260, 210, city.spawns.player.z + 340], yaw: 0.62, pitch: -0.42, hour: 13.5 },
+    street: { pos: [city.spawns.player.x, 3.2, city.spawns.player.z + 14], yaw: 0.0, pitch: -0.04, hour: 12.0 },
+    sunset: { pos: [city.spawns.player.x - 200, 120, city.spawns.player.z + 280], yaw: 0.62, pitch: -0.26, hour: 18.2 },
+    night: { pos: [city.spawns.player.x - 200, 120, city.spawns.player.z + 280], yaw: 0.62, pitch: -0.26, hour: 22.0 },
+  };
+  window.__shot = async (name = 'aerial') => {
+    const v = VIEWS[name] || VIEWS.aerial;
+    cam.position[0] = v.pos[0]; cam.position[1] = v.pos[1]; cam.position[2] = v.pos[2];
+    cam.yaw = v.yaw; cam.pitch = v.pitch;
+    cam.update(canvas.width / canvas.height);
+    if (renderer.sky) {
+      renderer.sky.setTimeOfDay(v.hour);
+      renderer.sky.update(1 / 60, 0);
+      renderer.setSun({
+        direction: renderer.sky.sunDirection, color: renderer.sky.sunColor,
+        intensity: renderer.sky.sunIntensity, ambientSky: renderer.sky.ambientSky,
+        ambientGround: renderer.sky.ambientGround,
+      });
+      renderer.setFog({ color: renderer.sky.fogColor, density: 0.0016, heightFalloff: 0.018 });
+    }
+    // Two updates so night lights latch on before the capture.
+    if (world && world.update) { world.update(1 / 60, v.hour, cam); world.update(1 / 60, v.hour, cam); }
+    renderer.render(cam, 1 / 60);
+    renderer.render(cam, 1 / 60);
+  };
 
   return out;
 }

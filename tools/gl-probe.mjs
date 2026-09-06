@@ -13,6 +13,10 @@ import { extname, join, normalize, resolve } from 'node:path';
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const target = process.argv[2];
 const HEADED = process.argv.includes('--headed');
+const shotIdx = process.argv.indexOf('--shot');
+const SHOT = shotIdx >= 0 && process.argv[shotIdx + 1] ? process.argv[shotIdx + 1] : null;
+const viewIdx = process.argv.indexOf('--view');
+const VIEW = viewIdx >= 0 && process.argv[viewIdx + 1] ? process.argv[viewIdx + 1] : undefined;
 if (!target) { console.error('usage: node tools/gl-probe.mjs <module path relative to repo root>'); process.exit(2); }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -33,7 +37,7 @@ const server = createServer(async (req, res) => {
     let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (p === '/__probe') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(`<!doctype html><meta charset="utf-8"><canvas id="c" width="640" height="360"></canvas>
+      res.end(`<!doctype html><meta charset="utf-8"><canvas id="c" width="1280" height="720"></canvas>
 <script type="module">
   import probe from '/${target.replace(/^\.?\//, '')}';
   window.__run = () => probe({ canvas: document.getElementById('c') });
@@ -64,12 +68,33 @@ page.on('console', (m) => { logs.push(`${m.type()}: ${m.text()}`); console.log(`
 page.on('pageerror', (e) => { logs.push(`pageerror: ${e.message}`); console.error(`  page! ${e.message}\n${e.stack || ''}`); });
 
 await page.goto(url, { waitUntil: 'domcontentloaded' });
+await page.evaluate((v) => { window.__shotArg = v; }, VIEW).catch(() => {});
 await page.waitForFunction(() => window.__loaded === true, null, { timeout: 30000 })
   .catch(() => { throw new Error('probe module failed to load — see page errors above'); });
 
 let result; let error = null;
 try { result = await page.evaluate(() => window.__run()); }
 catch (e) { error = e.message; }
+
+if (SHOT) {
+  // The canvas is not preserveDrawingBuffer, so ask the probe to re-render then grab it in the
+  // same task via toDataURL, falling back to a page screenshot.
+  try {
+    const dataUrl = await page.evaluate(async () => {
+      if (typeof window.__shot === 'function') await window.__shot(window.__shotArg);
+      const c = document.getElementById('c');
+      try { return c.toDataURL('image/png'); } catch { return null; }
+    });
+    if (dataUrl && dataUrl.startsWith('data:image/png;base64,')) {
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(SHOT, Buffer.from(dataUrl.slice(22), 'base64'));
+      console.log('screenshot ->', SHOT);
+    } else {
+      await page.screenshot({ path: SHOT });
+      console.log('page screenshot ->', SHOT);
+    }
+  } catch (e) { console.error('screenshot failed:', e.message); }
+}
 
 console.log('\n=== probe result ===');
 console.log(JSON.stringify(result ?? null, null, 1));

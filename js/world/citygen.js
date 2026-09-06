@@ -335,7 +335,44 @@ function polyOffset(pts, off) {
     const m = off / cosHalf;
     out[i] = [pts[i][0] + nx * m, pts[i][1] + nz * m];
   }
-  return out;
+  return polyClean(out);
+}
+
+/**
+ * Removes degenerate and folded-back vertices from an offset polyline. Mitred
+ * offsets fold over on the inside of a sharp bend; those folds would otherwise
+ * become tiny reversed lane/sidewalk segments.
+ * @param {number[][]} pts Source points.
+ * @returns {number[][]} Cleaned polyline (at least two points).
+ */
+function polyClean(pts) {
+  if (pts.length < 3) return pts;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i];
+    const q = out[out.length - 1];
+    if (Math.hypot(p[0] - q[0], p[1] - q[1]) >= 0.35) {
+      out.push(p);
+    } else if (i === pts.length - 1 && out.length > 1) {
+      out[out.length - 1] = p;
+    }
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (let i = 1; i < out.length - 1; i++) {
+      const ax = out[i][0] - out[i - 1][0];
+      const az = out[i][1] - out[i - 1][1];
+      const bx = out[i + 1][0] - out[i][0];
+      const bz = out[i + 1][1] - out[i][1];
+      if (ax * bx + az * bz < 0) {
+        out.splice(i, 1);
+        changed = true;
+        i--;
+      }
+    }
+    if (!changed) break;
+  }
+  return out.length >= 2 ? out : [pts[0], pts[pts.length - 1]];
 }
 
 /**
@@ -514,7 +551,8 @@ const _mtv = new Float64Array(3);
  * @param {number} bhx Half extent of B along its local X.
  * @param {number} bhz Half extent of B along its local Z.
  * @param {number} brot Rotation of B in radians.
- * @param {number} margin Extra clearance added to both boxes.
+ * @param {number} margin Extra clearance added to *both* boxes, so the
+ *   effective gap the test enforces is twice this value.
  * @returns {boolean} True when the rectangles overlap.
  */
 function obbOverlap(ax, az, ahx, ahz, arot, bx, bz, bhx, bhz, brot, margin) {
@@ -779,12 +817,24 @@ function buildSuperblocks(ctx) {
     return idx;
   };
 
-  ctx.sbPark = tryAdd(Math.round(blocksX * 0.14), Math.round(blocksZ * 0.57), 2, 2, 'park', '네온 공원');
-  ctx.sbStadium = tryAdd(Math.round(blocksX * 0.64), Math.max(1, Math.round(blocksZ * 0.07)), 2, 2, 'stadium', '스타디움');
-  ctx.sbRail = tryAdd(Math.round(blocksX * 0.71), blocksZ - 2, 2, 2, 'railyard', '차량기지');
-  ctx.sbPlaza = tryAdd(Math.round(blocksX * 0.5), Math.round(blocksZ * 0.43), 1, 1, 'plaza', '중앙 광장');
-  ctx.sbMarket = tryAdd(Math.round(blocksX * 0.21), Math.round(blocksZ * 0.21), 1, 1, 'plaza', '북부 시장');
-  ctx.sbParking = tryAdd(Math.round(blocksX * 0.79), Math.round(blocksZ * 0.5), 1, 1, 'parking', '중앙 주차장');
+  /**
+   * Block column at a fraction of the grid width.
+   * @param {number} f Fraction 0..1.
+   * @returns {number} Block column index.
+   */
+  const bi = (f) => Math.round(blocksX * f);
+  /**
+   * Block row at a fraction of the grid height.
+   * @param {number} f Fraction 0..1.
+   * @returns {number} Block row index.
+   */
+  const bj = (f) => Math.round(blocksZ * f);
+  ctx.sbPark = tryAdd(bi(0.14), bj(0.57), 2, 2, 'park', '네온 공원');
+  ctx.sbStadium = tryAdd(bi(0.64), Math.max(1, bj(0.07)), 2, 2, 'stadium', '스타디움');
+  ctx.sbRail = tryAdd(bi(0.71), blocksZ - 2, 2, 2, 'railyard', '차량기지');
+  ctx.sbPlaza = tryAdd(bi(0.5), bj(0.43), 1, 1, 'plaza', '중앙 광장');
+  ctx.sbMarket = tryAdd(bi(0.21), bj(0.21), 1, 1, 'plaza', '북부 시장');
+  ctx.sbParking = tryAdd(bi(0.79), bj(0.5), 1, 1, 'parking', '중앙 주차장');
 }
 
 /**
@@ -958,9 +1008,13 @@ function buildNodesAndEdges(ctx) {
     const a2 = [p2.x, p2.z];
     const a3 = [p3.x, p3.z];
     const pts = [[p1.x, p1.z]];
-    for (let s = 1; s <= 3; s++) {
-      catmullRom(a0, a1, a2, a3, s / 4, tmp);
-      pts.push([tmp[0], tmp[1]]);
+    // Arms touching the 90 degree bend stay straight: a spline through the
+    // corner would curve tighter than the sidewalk offset and fold over.
+    if (p1.side !== 'corner' && p2.side !== 'corner') {
+      for (let s = 1; s <= 3; s++) {
+        catmullRom(a0, a1, a2, a3, s / 4, tmp);
+        pts.push([tmp[0], tmp[1]]);
+      }
     }
     pts.push([p2.x, p2.z]);
     const e = addEdge(wfIds[k], wfIds[k + 1], pts, 'waterfront',
@@ -968,6 +1022,10 @@ function buildNodesAndEdges(ctx) {
     ctx.waterfrontEdges.push(e.id);
   }
   for (let k = 0; k < wf.length; k++) {
+    // The bend node is left alone: a link arriving there at 45 degrees to both
+    // promenade arms cannot produce clean kerb corners, and the chain stays
+    // connected through its neighbours anyway.
+    if (wf[k].side === 'corner') continue;
     const g = ctx.nodes[wf[k].grid];
     const e = addEdge(wf[k].grid, wfIds[k], [[g.x, g.z], [wf[k].x, wf[k].z]],
       'link', ctx.roadWidth, 1, SPEED_STREET);
@@ -1003,7 +1061,8 @@ function buildDistricts(ctx) {
         kind = 'industrial';
       } else if (i >= indI0 && j >= indJ0) {
         kind = 'industrial';
-      } else if (ctx.seaSide && ((j === blocksZ - 1 && i < indI0) || (i === blocksX - 1 && j < indJ0))) {
+      } else if (ctx.seaSide &&
+          ((j === blocksZ - 1 && i < indI0) || (i === blocksX - 1 && j < indJ0))) {
         kind = 'beach';
       } else {
         const r = Math.max(Math.abs(i - cx), Math.abs(j - cz));
@@ -1311,8 +1370,10 @@ function pickStyle(dk, area, rng) {
   const r = rng.next();
   switch (dk) {
     case 'downtown':
-      if (area > 430) return r < 0.72 ? 'tower' : 'office';
-      if (area > 190) return r < 0.45 ? 'office' : r < 0.75 ? 'tower' : 'apartment';
+      // A little low-rise infill between the towers keeps the skyline reading
+      // as a skyline instead of a uniform slab of glass.
+      if (area > 430) return r < 0.66 ? 'tower' : r < 0.91 ? 'office' : 'shop';
+      if (area > 190) return r < 0.42 ? 'office' : r < 0.7 ? 'tower' : r < 0.86 ? 'apartment' : 'shop';
       return r < 0.7 ? 'shop' : 'office';
     case 'midtown':
       if (area > 380) return r < 0.5 ? 'office' : 'apartment';
@@ -1433,7 +1494,7 @@ function buildBuildings(ctx) {
 
   const targets = {
     downtown: 620, midtown: 360, residential: 200,
-    industrial: 900, beach: 190, park: 260
+    industrial: 640, beach: 190, park: 260
   };
   const heights = {
     downtown: [60, 160], midtown: [25, 70], residential: [8, 20],
@@ -1522,12 +1583,16 @@ function buildBuildings(ctx) {
 
       const range = heights[dk] || [8, 20];
       const dc = clamp(Math.hypot(px, pz) / ctx.maxRadius, 0, 1);
+      // Two octaves of coherent noise keep neighbouring lots in agreement while
+      // still spanning the district's full height range.
       const n1 = noise2(px / 96, pz / 96, ctx.seed);
       const n2 = noise2(px / 31, pz / 31, ctx.seed + 7717);
-      let t = clamp((1 - dc) * 0.55 + n1 * 0.32 + n2 * 0.18, 0, 1);
+      let t = clamp(0.28 + (1 - dc) * 0.42 + (n1 - 0.5) * 0.72 + (n2 - 0.5) * 0.4, 0, 1);
       if (style === 'house') t *= 0.45;
       if (style === 'shop') t = Math.min(t, 0.22);
-      if (style === 'warehouse') t = Math.min(t, 0.4);
+      if (style === 'warehouse') t = Math.min(t, 0.62);
+      if (style === 'office' && dk === 'downtown') t *= 0.72;
+      if (style === 'apartment' && dk === 'downtown') t *= 0.62;
       let h = lerp(range[0], range[1], t);
       if (style === 'tower') h = Math.max(h, range[0] * 1.05);
       if (style === 'shop') h = clamp(h, 6.4, 11.5);
@@ -1659,6 +1724,9 @@ function promoteLandmarkTowers(ctx, rng) {
 /* ------------------------------------------------------------------ *
  * Phase 5 — directed lane graph
  * ------------------------------------------------------------------ */
+
+/** Scratch point used by the kerb-corner clustering. */
+const _corner2 = [0, 0];
 
 /** Scratch direction vectors used while stitching the graphs together. */
 const _d0 = [0, 0];
@@ -1959,14 +2027,13 @@ function snapCorner(ctx, nodeId, x, z) {
   }
   let best = null;
   let bestD = CORNER_MERGE * CORNER_MERGE;
+  _corner2[0] = x;
+  _corner2[1] = z;
   for (let i = 0; i < list.length; i++) {
-    const c = list[i];
-    const dx = c[0] - x;
-    const dz = c[1] - z;
-    const d = dx * dx + dz * dz;
+    const d = vec2.sqrDist(list[i], _corner2);
     if (d < bestD) {
       bestD = d;
-      best = c;
+      best = list[i];
     }
   }
   if (best !== null) return best;
@@ -2029,21 +2096,51 @@ function pointClearOfRoads(ctx, x, z, margin) {
 }
 
 /**
- * Moves every kerb corner off the carriageway. Corners produced by roads that
- * meet at an odd angle (the boulevard, the waterfront bend) can land on the
- * asphalt after clustering, so they are re-placed by a polar search around the
- * intersection that keeps them as close to their original spot as possible.
- * Corners of the regular grid are already clear and never move.
+ * Moves every kerb corner off the carriageway.
+ *
+ * Corners built from perpendicular roads are already 1.8 m clear and never
+ * move. Corners where roads meet at an odd angle (the boulevard, the
+ * waterfront bend) can end up a few centimetres inside the asphalt once two
+ * nearly-coincident sidewalk ends merge, so they are pushed out along the
+ * shallowest separating axis; if that cannot resolve them (a corner boxed in
+ * by three roads) a polar search around the intersection finds the closest
+ * free spot instead.
+ *
  * @param {object} ctx Generation context.
  * @returns {void}
  */
 function resolveCorners(ctx) {
-  const margin = WALK_OFFSET * 0.85;
+  // obbOverlap inflates both boxes, so this enforces a ~1.5 m gap from the
+  // kerb — comfortably less than the 1.8 m the regular grid corners have.
+  const margin = 0.72;
   const STEPS = 48;
   for (const [nodeId, list] of ctx.corners) {
     const node = ctx.nodes[nodeId];
     for (const c of list) {
       if (pointClearOfRoads(ctx, c[0], c[1], margin)) continue;
+      const ox = c[0];
+      const oz = c[1];
+      for (let it = 0; it < 12; it++) {
+        ctx.roadGrid.query(c[0] - 3, c[1] - 3, c[0] + 3, c[1] + 3, _hits);
+        let depth = 0;
+        let px = 0;
+        let pz = 0;
+        for (let i = 0; i < _hits.length; i++) {
+          const o = _hits[i];
+          if (!obbOverlap(c[0], c[1], 0.05, 0.05, 0, o.x, o.z, o.hx, o.hz, o.rot, margin)) continue;
+          if (_mtv[2] > depth) {
+            depth = _mtv[2];
+            px = _mtv[0];
+            pz = _mtv[1];
+          }
+        }
+        if (depth === 0) break;
+        c[0] += px * (depth + 0.02);
+        c[1] += pz * (depth + 0.02);
+      }
+      if (pointClearOfRoads(ctx, c[0], c[1], margin)) continue;
+      c[0] = ox;
+      c[1] = oz;
       const dx = c[0] - node.x;
       const dz = c[1] - node.z;
       const theta = Math.atan2(dz, dx);
@@ -2054,11 +2151,11 @@ function resolveCorners(ctx) {
         for (let k = 0; k < STEPS && !done; k++) {
           const step = ((k + 1) >> 1) * (TAU_LOCAL / STEPS);
           const ang = theta + ((k & 1) === 0 ? step : -step);
-          const px = node.x + Math.cos(ang) * r;
-          const pz = node.z + Math.sin(ang) * r;
-          if (!pointClearOfRoads(ctx, px, pz, margin)) continue;
-          c[0] = px;
-          c[1] = pz;
+          const qx = node.x + Math.cos(ang) * r;
+          const qz = node.z + Math.sin(ang) * r;
+          if (!pointClearOfRoads(ctx, qx, qz, margin)) continue;
+          c[0] = qx;
+          c[1] = qz;
           done = true;
         }
       }
@@ -2129,7 +2226,13 @@ function buildWalks(ctx) {
       if (dist < 1 || dist > 72) continue;
       const mx = (p[0] + q[0]) * 0.5;
       const mz = (p[1] + q[1]) * 0.5;
-      const crossing = pointOnRoadRects(ctx, mx, mz);
+      let crossing = false;
+      for (let k = 1; k < 8 && !crossing; k++) {
+        const f = k / 8;
+        if (pointOnRoadRects(ctx, p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f)) {
+          crossing = true;
+        }
+      }
       addWalkPair(ctx, [[p[0], p[1]], [mx, mz], [q[0], q[1]]], crossing, node.id, -1);
     }
   }
@@ -2288,7 +2391,7 @@ function edgeFurniture(ctx, e, dk, rng) {
     const side = (flip++ % 2 === 0) ? 1 : -1;
     const rx = -_pd[1] * side;
     const rz = _pd[0] * side;
-    addProp(ctx, 'streetlight', _pp[0] + rx * kerb, 0, _pp[1] + rz * kerb,
+    addProp(ctx, 'streetlight', _pp[0] + rx * kerb, SIDEWALK_H, _pp[1] + rz * kerb,
       yawFromDir(-rx, -rz), 1, { arm: e.kind === 'avenue' || e.kind === 'boulevard' ? 2 : 1 });
   }
 
@@ -2304,7 +2407,7 @@ function edgeFurniture(ctx, e, dk, rng) {
         polyAt(e.pts, s, _pp, _pd);
         const rx = -_pd[1] * side;
         const rz = _pd[0] * side;
-        addProp(ctx, treeType, _pp[0] + rx * inner, 0, _pp[1] + rz * inner,
+        addProp(ctx, treeType, _pp[0] + rx * inner, SIDEWALK_H, _pp[1] + rz * inner,
           rr(rng, 0, Math.PI * 2), rr(rng, 0.82, 1.28), null);
       }
     }
@@ -2644,6 +2747,24 @@ function buildLandmarks(ctx) {
 }
 
 /**
+ * True when a candidate spawn keeps its distance from the ones already placed.
+ * @param {Array<{x:number,z:number}>} list Accepted spawns.
+ * @param {number} x Candidate x.
+ * @param {number} z Candidate z.
+ * @param {number} minDist Required separation in metres.
+ * @returns {boolean} True when the candidate is far enough from all of them.
+ */
+function farFrom(list, x, z, minDist) {
+  const m2 = minDist * minDist;
+  for (let i = 0; i < list.length; i++) {
+    const dx = list[i].x - x;
+    const dz = list[i].z - z;
+    if (dx * dx + dz * dz < m2) return false;
+  }
+  return true;
+}
+
+/**
  * Nearest standable sidewalk point: like {@link walkAt} but never returns a
  * position in the middle of a crosswalk.
  * @param {object} city City data.
@@ -2701,14 +2822,19 @@ function buildSpawns(ctx, city) {
   const wantVehicles = Math.min(roadLanes.length, 240);
   for (let i = 0; i < wantVehicles; i++) {
     const lane = city.lanes[roadLanes[i]];
-    const t = rr(rng, 0.22, 0.78);
-    polySample(lane.pts, t, _pp);
-    polyDirAt(lane.pts, t, _pd);
-    spawns.vehicles.push({
-      x: _pp[0], y: 0, z: _pp[1],
-      yaw: yawFromDir(_pd[0], _pd[1]),
-      laneId: lane.id
-    });
+    let placed = false;
+    for (let attempt = 0; attempt < 3 && !placed; attempt++) {
+      const t = rr(rng, 0.22, 0.78);
+      polySample(lane.pts, t, _pp);
+      if (!farFrom(spawns.vehicles, _pp[0], _pp[1], 7)) continue;
+      polyDirAt(lane.pts, t, _pd);
+      spawns.vehicles.push({
+        x: _pp[0], y: 0, z: _pp[1],
+        yaw: yawFromDir(_pd[0], _pd[1]),
+        laneId: lane.id
+      });
+      placed = true;
+    }
   }
 
   // --- pedestrians -------------------------------------------------------
@@ -2724,10 +2850,11 @@ function buildSpawns(ctx, city) {
     walkIds[i] = walkIds[j];
     walkIds[j] = t;
   }
-  const wantPeds = Math.min(walkIds.length, 320);
+  const wantPeds = Math.min(walkIds.length, 340);
   for (let i = 0; i < wantPeds; i++) {
     const w = city.walks[walkIds[i]];
     polySample(w.pts, rr(rng, 0.15, 0.85), _pp);
+    if (!farFrom(spawns.peds, _pp[0], _pp[1], 2.2)) continue;
     spawns.peds.push({ x: _pp[0], y: SIDEWALK_H, z: _pp[1] });
   }
 
@@ -2805,8 +2932,6 @@ function buildSpawns(ctx, city) {
 
 /** Scratch candidate list shared by every index query. */
 const _qhits = [];
-/** Scratch used by the exported query helpers. */
-const _tmp2 = vec2.create();
 
 /**
  * Nearest-point acceleration structure over a list of polylines.
@@ -3006,6 +3131,28 @@ function roadIndexOf(city) {
  * @param {number} [opts.roadWidth] Standard carriageway width (default 16).
  * @param {boolean} [opts.seaSide] Generate the beach / sea margin (default true).
  * @returns {object} The city data.
+ *
+ * Fields beyond the contract that consumers may rely on:
+ *  - `sidewalkWidth` / `sidewalkHeight` / `buildingSetback`: the metrics this
+ *    layout was built with. `worldbuild.js` must use them so kerbs line up.
+ *  - `roads[i]`: `lanes` is the total for both directions, `lanesPerDir`,
+ *    `kind` ('street'|'avenue'|'boulevard'|'waterfront'|'link'), `edgeId`
+ *    (road segments sharing an edge form one logical street), `nodeA`/`nodeB`.
+ *  - `nodes[i]`: `edges` (edge ids), `approaches` (arm count).
+ *  - `lanes[i]`: `edgeId` (-1 for turn lanes), `index` (0 = innermost),
+ *    `offset`, `kind` ('turn' for intersection arcs), `turn`, `fromNode`,
+ *    `toNode`.
+ *  - `walks[i]`: `twin` (same strip, opposite direction), `edgeId`, `nodeId`.
+ *  - `lots[i]`: `x0`/`z0`/`x1`/`z1`, `surface`
+ *    ('concrete'|'grass'|'sand'|'asphalt'|'gravel'|'water'), `superblock`,
+ *    `name`, `blockI`/`blockJ`.
+ *  - `buildings[i]`: `face` (0=+X, 1=+Z, 2=-X, 3=-Z — the side that faces the
+ *    street), `districtId`, `landmark`, `name`. Each entry of `signs` is
+ *    `{kind:'shopfront'|'vertical'|'roof', text, face, nx, nz, x, z, y, w, h,
+ *    color}` with `x`/`z`/`y` the centre of the panel on the wall surface.
+ *  - `districts[i].rect`: `x`/`z` is the min corner, plus `x0,z0,x1,z1,cx,cz`.
+ *  - `props[i].extra`: type specific (`{onWall, text}` for billboards,
+ *    `{kind:'meter'}` for parking meters, `{nodeId, edgeId}` for signals).
  */
 export function generateCity(seed = 1337, opts = {}) {
   const ctx = {
@@ -3041,6 +3188,9 @@ export function generateCity(seed = 1337, opts = {}) {
     roadWidth: ctx.roadWidth,
     blocksX: ctx.blocksX,
     blocksZ: ctx.blocksZ,
+    sidewalkWidth: SIDEWALK_W,
+    sidewalkHeight: SIDEWALK_H,
+    buildingSetback: BUILDING_SETBACK,
     bounds: ctx.bounds,
     districts: ctx.districts,
     roads: ctx.roads,
@@ -3070,8 +3220,7 @@ export function generateCity(seed = 1337, opts = {}) {
 export function laneAt(city, x, z, out) {
   const res = out || { lane: null, walk: null, t: 0, point: [0, 0], x: 0, z: 0, dist: 0 };
   if (!res.point) res.point = [0, 0];
-  vec2.set(_tmp2, x, z);
-  return laneIndexOf(city).nearest(_tmp2[0], _tmp2[1], res);
+  return laneIndexOf(city).nearest(x, z, res);
 }
 
 /**
@@ -3086,8 +3235,7 @@ export function laneAt(city, x, z, out) {
 export function walkAt(city, x, z, out) {
   const res = out || { lane: null, walk: null, t: 0, point: [0, 0], x: 0, z: 0, dist: 0 };
   if (!res.point) res.point = [0, 0];
-  vec2.set(_tmp2, x, z);
-  return walkIndexOf(city).nearest(_tmp2[0], _tmp2[1], res);
+  return walkIndexOf(city).nearest(x, z, res);
 }
 
 /**

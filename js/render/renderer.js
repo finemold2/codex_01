@@ -39,7 +39,8 @@ import {
   buildMaterialDefines,
   buildShadowDefines,
   createMaterial,
-  shadowFlagsOf
+  shadowFlagsOf,
+  updateMaterial
 } from './materials.js';
 import { Sky } from './sky.js';
 import { PostFX } from './postfx.js';
@@ -849,14 +850,22 @@ export class Renderer {
     this._cascadeSplits = new Float32Array(4);
     /** @type {Float32Array} World size of one shadow texel per cascade. */
     this._cascadeTexel = new Float32Array(4);
-    /** @type {Float32Array} World-space cascade sphere centres (xyz per cascade). */
-    this._cascadeCenters = new Float32Array(12);
-    /** @type {Float32Array} World-space cascade sphere radii. */
-    this._cascadeRadius = new Float32Array(4);
-    /** @type {Float32Array} `[strength, normalBias, depthBias, 1/shadowRes]`. */
-    this._shadowParams = new Float32Array([1, 1.4, 0.0012, 1 / 2048]);
-    /** @type {boolean} */
-    this._shadowsEnabled = true;
+    /** @type {Float32Array} Constant depth bias per cascade, in normalized depth units. */
+    this._cascadeBias = new Float32Array(4);
+    /** @type {Float32Array} `[strength, normalBias, depthBiasScale, 1/shadowRes]`. */
+    this._shadowParams = new Float32Array([1, 1.4, 1, 1 / 2048]);
+    /** @type {Float32Array|null} Cached upload views, rebuilt when quality changes. */
+    this._cascadeMatricesView = null;
+    /** @type {Float32Array|null} */
+    this._cascadeSplitsView = null;
+    /** @type {Float32Array|null} */
+    this._cascadeTexelView = null;
+    /** @type {Float32Array|null} */
+    this._cascadeBiasView = null;
+    /** @type {boolean} Master switch for the shadow pass (quality.cascades still applies). */
+    this.shadowsEnabled = true;
+    /** @type {number} Bumped by setQuality so material textures re-apply anisotropy once. */
+    this._anisoStamp = 0;
 
     // ---- light uniform payloads --------------------------------------------------------------
     /** @type {Float32Array} */
@@ -865,6 +874,12 @@ export class Renderer {
     this._lightColor = new Float32Array(4);
     /** @type {Float32Array} */
     this._lightDirCone = new Float32Array(4);
+    /** @type {Float32Array|null} */
+    this._lightPosView = null;
+    /** @type {Float32Array|null} */
+    this._lightColorView = null;
+    /** @type {Float32Array|null} */
+    this._lightDirView = null;
     /** @type {number} */
     this._activeLights = 0;
     /** @type {Float32Array} `[renderWidth, renderHeight]` for screen-space lookups. */
@@ -959,11 +974,17 @@ export class Renderer {
     };
 
     this._resizeLightArrays(this._shaderCtx.pointLights);
+    const cascadeCount = Math.max(1, q.cascades);
+    this._cascadeMatricesView = this._cascadeMatrices.subarray(0, cascadeCount * 16);
+    this._cascadeSplitsView = this._cascadeSplits.subarray(0, cascadeCount);
+    this._cascadeTexelView = this._cascadeTexel.subarray(0, cascadeCount);
+    this._cascadeBiasView = this._cascadeBias.subarray(0, cascadeCount);
+    this._anisoStamp++;
     this._disposeShaderCache();
     this._createShadowTargets();
     this._shadowParams[3] = 1 / q.shadowRes;
     this._shadowParams[1] = q.pcf >= 2 ? 1.7 : 1.35;
-    this._shadowParams[2] = q.shadowRes >= 2048 ? 0.0009 : 0.0016;
+    this._shadowParams[2] = q.pcf >= 2 ? 1.35 : 1;
 
     // Re-create the HDR target at the new render scale.
     this.resize(this.width, this.height);
@@ -1038,6 +1059,9 @@ export class Renderer {
       this._lightColor = new Float32Array(size);
       this._lightDirCone = new Float32Array(size);
     }
+    this._lightPosView = this._lightPosRadius.subarray(0, size);
+    this._lightColorView = this._lightColor.subarray(0, size);
+    this._lightDirView = this._lightDirCone.subarray(0, size);
   }
 
   /* --------------------------------------------------------------- shaders */
@@ -1143,6 +1167,28 @@ export class Renderer {
       for (let i = 0; i < common.length; i++) compile(common[i]);
     }
     return this._programs.size + this._shadowPrograms.size;
+  }
+
+  /* ------------------------------------------------------------- materials */
+
+  /**
+   * Creates a material. Convenience wrapper around `materials.createMaterial` so world and
+   * entity builders only need a renderer reference.
+   * @param {Object} [desc] Material description (see `render/materials.js`).
+   * @returns {Object} The new material.
+   */
+  createMaterial(desc) {
+    return createMaterial(desc);
+  }
+
+  /**
+   * Patches an existing material and repacks its uniform payloads.
+   * @param {Object} mat Material to change.
+   * @param {Object} patch Subset of the material description.
+   * @returns {Object} The material, for chaining.
+   */
+  updateMaterial(mat, patch) {
+    return updateMaterial(mat, patch);
   }
 
   /* -------------------------------------------------------------- geometry */
@@ -1834,7 +1880,7 @@ export class Renderer {
     transparent.length = 0;
     casters.length = 0;
 
-    const shadowsOn = this._shadowsEnabled && this.quality.cascades > 0;
+    const shadowsOn = this.shadowsEnabled && this.quality.cascades > 0;
 
     // --- static batches -------------------------------------------------------------------
     for (const group of this._staticGroups.values()) {
@@ -1951,7 +1997,7 @@ export class Renderer {
    */
   _renderShadows(camera) {
     const gl = this.gl;
-    const n = this.quality.cascades;
+    const n = this.shadowsEnabled ? this.quality.cascades : 0;
     const strength = this.sun.shadowStrength * (this.sun.intensity > 0.001 ? 1 : 0);
     this._shadowParams[0] = n > 0 ? strength : 0;
     if (n === 0 || strength <= 0 || this.shadowTargets.length === 0) {
@@ -2005,18 +2051,18 @@ export class Renderer {
       const lz = _m0[2] * _center[0] + _m0[6] * _center[1] + _m0[10] * _center[2] + _m0[14];
       const sx = Math.floor(lx / texel) * texel;
       const sy = Math.floor(ly / texel) * texel;
-      const depthPad = Math.max(300, radius * 3);
+      // Extend the box generously towards the light so tall towers outside the slice still
+      // cast, and only a little past it, which keeps the depth range (and thus the bias) tight.
+      const padToward = Math.max(200, radius * 2);
+      const padAway = radius * 0.5 + 20;
       mat4.ortho(_m1, sx - radius, sx + radius, sy - radius, sy + radius,
-        -lz - radius - depthPad, -lz + radius + depthPad);
+        -lz - radius - padToward, -lz + radius + padAway);
       mat4.multiply(_m1, _m1, _m0);
       this._cascadeMatrices.set(_m1, i * 16);
       this._cascadeSplits[i] = splitFar;
       this._cascadeTexel[i] = texel;
-      this._cascadeCenters[i * 3] = _center[0];
-      this._cascadeCenters[i * 3 + 1] = _center[1];
-      this._cascadeCenters[i * 3 + 2] = _center[2];
-      this._cascadeRadius[i] = radius;
-
+      const depthRange = 2 * radius + padToward + padAway;
+      this._cascadeBias[i] = (0.03 + texel * 0.6) / depthRange;
       const target = this.shadowTargets[i];
       target.bind(true);
       this._drawShadowCasters(i, _m1, _center, radius);
@@ -2026,6 +2072,7 @@ export class Renderer {
     for (let i = n; i < 4; i++) {
       this._cascadeSplits[i] = this._cascadeSplits[n - 1];
       this._cascadeTexel[i] = this._cascadeTexel[n - 1];
+      this._cascadeBias[i] = this._cascadeBias[n - 1];
     }
 
     gl.disable(gl.POLYGON_OFFSET_FILL);
@@ -2114,7 +2161,8 @@ export class Renderer {
       const pz = dz - _lightDir[2] * along;
       const reach = radius + item.radius;
       if (px * px + py * py + pz * pz > reach * reach) continue;
-      if (along < -(radius + item.radius + Math.max(300, radius * 3))) continue;
+      if (along < -(radius + item.radius + radius * 0.5 + 20)) continue;
+      if (along > radius + item.radius + Math.max(200, radius * 2)) continue;
 
       const mat = item.material;
       const next = this._getShadowProgram(mat, item.instanced);
@@ -2188,19 +2236,19 @@ export class Renderer {
     const n = this.quality.cascades;
     if (n > 0) {
       shader.setVec4v('uShadowParams', this._shadowParams);
-      shader.setMat4Array('uLightViewProj[0]', this._cascadeMatrices.subarray(0, n * 16));
-      shader.setFloatArray('uCascadeSplit[0]', this._cascadeSplits.subarray(0, n));
-      shader.setFloatArray('uCascadeTexel[0]', this._cascadeTexel.subarray(0, n));
+      shader.setMat4Array('uLightViewProj[0]', this._cascadeMatricesView);
+      shader.setFloatArray('uCascadeSplit[0]', this._cascadeSplitsView);
+      shader.setFloatArray('uCascadeTexel[0]', this._cascadeTexelView);
+      shader.setFloatArray('uCascadeBias[0]', this._cascadeBiasView);
       for (let i = 0; i < n && i < this.shadowTargets.length; i++) {
         shader.setTexture('uShadowMap' + i, this.shadowTargets[i].depthTex, TEXTURE_UNITS.SHADOW0 + i);
       }
     }
 
     if (this.quality.maxPointLights > 0) {
-      const count = this._shaderCtx.pointLights * 4;
-      shader.setVec4Array('uLightPosRadius[0]', this._lightPosRadius.subarray(0, count));
-      shader.setVec4Array('uLightColor[0]', this._lightColor.subarray(0, count));
-      shader.setVec4Array('uLightDir[0]', this._lightDirCone.subarray(0, count));
+      shader.setVec4Array('uLightPosRadius[0]', this._lightPosView);
+      shader.setVec4Array('uLightColor[0]', this._lightColorView);
+      shader.setVec4Array('uLightDir[0]', this._lightDirView);
     }
 
     if (this._shaderCtx.ssao && this.postfx && this.postfx.aoTexture) {
@@ -2273,6 +2321,13 @@ export class Renderer {
       if (mat !== material || mat.version !== materialVersion) {
         material = mat;
         materialVersion = mat.version;
+        // Anisotropy follows the quality preset; applied once per material per change
+        // (it rebinds texture unit 0, so it has to run before the sampler uniforms).
+        if (mat._anisoStamp !== this._anisoStamp) {
+          mat._anisoStamp = this._anisoStamp;
+          if (mat.map && mat.map.setAnisotropy) mat.map.setAnisotropy(this.quality.aniso);
+          if (mat.normalMap && mat.normalMap.setAnisotropy) mat.normalMap.setAnisotropy(this.quality.aniso);
+        }
         bindMaterialUniforms(shader, mat);
         this._applyMaterialState(mat);
       }

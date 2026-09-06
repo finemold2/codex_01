@@ -69,6 +69,10 @@ const SLOPE_LIMIT_COS = Math.cos(SLOPE_LIMIT_DEG * DEG2RAD);
 /** Contact skin: the mover is allowed to sit this close to a surface. @type {number} */
 const SKIN = 0.02;
 
+/** Tolerance treating "just below a surface" as resting on it, so contact cannot be lost
+ * to floating point noise and drop the mover through the world. @type {number} */
+const CONTACT_EPS = 1e-3;
+
 /** Extra downward probe used to keep a grounded mover glued to small drops. @type {number} */
 const SNAP_DOWN = 0.18;
 
@@ -1080,6 +1084,13 @@ export class CollisionWorld {
 
   /**
    * Distance a capsule may descend before it lands on body `i`.
+   *
+   * Vertically the mover is treated as a flat disc of radius `r` rather than a rounded cap: every
+   * body top is horizontal, so the disc lands exactly on it and the contact normal is straight up.
+   * Using the rounded cap here instead would make the mover slip off kerb and stair edges (the
+   * normal over a rim is steeper than the slope limit) and stutter between grounded states. The
+   * disc is strictly more conservative than the true capsule, so it can never cause penetration.
+   *
    * @param {number} i Slot index.
    * @param {number} x Capsule X.
    * @param {number} z Capsule Z.
@@ -1090,22 +1101,19 @@ export class CollisionWorld {
    */
   _descentLimit(i, x, z, feetY, r) {
     this._closestXZ(i, x, z);
-    const dh = _cpd;
-    if (dh >= r) return Infinity;
-    const f = this._f;
-    const o = i * BODY_STRIDE;
-    const y0 = feetY + r;
-    // Descending only closes a gap when the capsule sits above the body's top. Beside it (a wall)
-    // the distance does not change with height, so the body must not block the fall - otherwise
-    // the mover sticks to walls instead of sliding down them.
-    if (y0 <= f[o + B_TOP]) return Infinity;
-    const g = Math.sqrt(r * r - dh * dh);
-    const d = y0 - (f[o + B_TOP] + g);
+    if (_cpd >= r) return Infinity;                       // footprint clear of the body
+    const top = this._f[i * BODY_STRIDE + B_TOP];
+    // Descending only closes a gap when the mover is above the top. Beside the body (a wall) the
+    // distance does not change with height, so it must not block the fall - otherwise the mover
+    // sticks to walls instead of sliding down them.
+    if (feetY < top - CONTACT_EPS) return Infinity;
+    const d = feetY - top;
     return d > 0 ? d : 0;
   }
 
   /**
-   * Distance a capsule may rise before its head hits body `i`.
+   * Distance a capsule may rise before its head hits body `i`. Mirror of
+   * {@link CollisionWorld#_descentLimit}, with the head treated as a flat disc.
    * @param {number} i Slot index.
    * @param {number} x Capsule X.
    * @param {number} z Capsule Z.
@@ -1117,15 +1125,11 @@ export class CollisionWorld {
    */
   _ascentLimit(i, x, z, feetY, height, r) {
     this._closestXZ(i, x, z);
-    const dh = _cpd;
-    if (dh >= r) return Infinity;
-    const f = this._f;
-    const o = i * BODY_STRIDE;
-    const y1 = feetY + height - r;
-    // Mirror of `_descentLimit`: rising only closes a gap while the head is below the body.
-    if (y1 >= f[o + B_MINY]) return Infinity;
-    const g = Math.sqrt(r * r - dh * dh);
-    const d = (f[o + B_MINY] - g) - y1;
+    if (_cpd >= r) return Infinity;
+    const bottom = this._f[i * BODY_STRIDE + B_MINY];
+    const headY = feetY + height;
+    if (headY > bottom + CONTACT_EPS) return Infinity;    // already level with or above it
+    const d = bottom - headY;
     return d > 0 ? d : 0;
   }
 
@@ -1228,17 +1232,10 @@ export class CollisionWorld {
     }
     _probeHit = true;
     _probeDist = best > 0 ? best : 0;
-    // Normal of the rounded contact between the capsule cap and the body's top edge.
-    this._closestXZ(bestBody, x, z);
-    const dh = _cpd;
-    if (dh <= 1e-6) {
-      _pnx = 0; _pny = 1; _pnz = 0;
-    } else {
-      const g = Math.sqrt(Math.max(0, r * r - dh * dh));
-      _pnx = (x - _cpx) / r;
-      _pny = g / r;
-      _pnz = (z - _cpz) / r;
-    }
+    // Every body top is horizontal, so a landing on one is always flat ground.
+    _pnx = 0;
+    _pny = 1;
+    _pnz = 0;
   }
 
   /* ------------------------------------------------------------- queries */
@@ -1363,14 +1360,15 @@ export class CollisionWorld {
     // Keep every sub-step at half the radius: scale an over-long delta down instead of stretching
     // the sub-steps, so a single call can never tunnel through thin geometry.
     const maxTravel = MAX_SUBSTEPS * r * 0.5;
-    const hlen0 = Math.sqrt(dx * dx + dz * dz);
-    const vlen0 = dy < 0 ? -dy : dy;
-    const longest0 = hlen0 > vlen0 ? hlen0 : vlen0;
-    if (longest0 > maxTravel) {
-      const k = maxTravel / longest0;
+    let longest = Math.sqrt(dx * dx + dz * dz);
+    const vlen = dy < 0 ? -dy : dy;
+    if (vlen > longest) longest = vlen;
+    if (longest > maxTravel) {
+      const k = maxTravel / longest;
       dx *= k;
       dy *= k;
       dz *= k;
+      longest = maxTravel;
     }
 
     // ---- broadphase over the whole swept volume, once ------------------------------------
@@ -1417,9 +1415,6 @@ export class CollisionWorld {
     if (grounded) { gnx = _pnx; gny = _pny; gnz = _pnz; }
 
     // ---- sub-stepping ------------------------------------------------------------------------
-    const hlen = Math.sqrt(dx * dx + dz * dz);
-    const vlen = dy < 0 ? -dy : dy;
-    const longest = hlen > vlen ? hlen : vlen;
     let steps = Math.ceil(longest / (r * 0.5));
     if (!(steps >= 1)) steps = 1;
     if (steps > MAX_SUBSTEPS) steps = MAX_SUBSTEPS;
@@ -1439,11 +1434,11 @@ export class CollisionWorld {
       slideZ = 0;
 
       // ------------------------------------------------------------------ horizontal
-      const saveX = px;
-      const saveZ = pz;
-      const saveY = py;
-      const startDepth = this._deepestCapsule(px, py, pz, r, h);
       if (mx !== 0 || mz !== 0) {
+        const saveX = px;
+        const saveZ = pz;
+        const saveY = py;
+        const startDepth = this._deepestCapsule(px, py, pz, r, h);
         px += mx;
         pz += mz;
         const bandLo = grounded ? py + STEP_HEIGHT : py;

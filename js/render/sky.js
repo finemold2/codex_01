@@ -14,8 +14,10 @@
  *
  * Conventions other modules must honour:
  *  - `sunDirection` points FROM the world TOWARD the key light. During the day it is the sun;
- *    once the sun is below the horizon it blends into `moonDirection` so night shading never
- *    comes from below the ground. `sunDirectionTrue` is always the real solar direction.
+ *    once the sun is below the horizon it becomes `moonDirection` (lifted clear of the ground
+ *    so nothing is ever lit from underneath). The handover happens at the instant
+ *    `sunIntensity` passes through zero, so shadows never swing. `sunDirectionTrue` is always
+ *    the real solar direction and is what the sky shader draws the disc from.
  *  - Every colour is linear HDR radiance in the same scale as the renderer's lighting, sized
  *    for an ACES tonemap at exposure ~1.0 (a sunlit white surface lands near 2.5).
  *  - `render()` draws into whatever framebuffer is bound, never touches the viewport, uses
@@ -79,7 +81,7 @@ const NIGHT_SKY_TINT = [0.0060, 0.0082, 0.0165];
 const _rgb = new Float32Array(3);
 const _rgb2 = new Float32Array(3);
 const _trans = new Float32Array(3);
-const _dir = new Float32Array(3);
+const _origin = new Float32Array(3);
 const _invProj = new Float32Array(16);
 const _invView = new Float32Array(16);
 
@@ -223,14 +225,14 @@ const float RA = 6420.0;
 const float HR = 8.0;
 const float HM = 1.2;
 const vec3 BETA_R = vec3(5.8e-3, 13.5e-3, 33.1e-3);
-// Desaturated Rayleigh coefficients driving the isotropic multiple-scattering term: real
-// skies keep plenty of blue at low sun because light bounces more than once.
 // Ozone absorbs in the Chappuis band (green/red). Without it twilight skies come out grey
 // instead of the deep blue everybody recognises.
 const vec3 BETA_O3 = vec3(0.650e-3, 1.881e-3, 0.085e-3);
 const float O3_PEAK = 25.0;
 const float O3_HALF = 15.0;
 const float O3_COLUMN = 15.0;
+// Slightly desaturated Rayleigh coefficients driving the isotropic multiple-scattering
+// term: real skies keep plenty of blue at low sun because light bounces more than once.
 const vec3 BETA_MS = vec3(0.0072, 0.0152, 0.0310);
 const float MS_SOFT = 0.40;
 const float STEP_K = 6.0;
@@ -431,8 +433,10 @@ float fbmStars(vec3 p) {
 
 /** Cumulus deck: coverage-shaped fBm with a self-shadowed, sun-facing silver lining. */
 vec4 cloudsLow(vec3 rd, vec3 sunDir, float mu) {
+  if (rd.y < 0.012) return vec4(0.0);
   float dy = max(rd.y, 0.014);
   float t = (CLOUD_ALT_A - uCameraPos.y) / dy;
+  if (t <= 0.0) return vec4(0.0);
   vec2 p = (uCameraPos.xz + rd.xz * t) * 0.00042 + uWindA;
   float d = fbmA(p);
   float cover = uCloudCoverA;
@@ -447,8 +451,10 @@ vec4 cloudsLow(vec3 rd, vec3 sunDir, float mu) {
   float silver = clamp(density - toward, 0.0, 1.0);
 
   float hg = phaseHG(mu, 0.62) * 1.6 + 0.2;
+  // Facing the sun a cloud glows; with the sun behind the viewer it is a dull grey lump.
+  float facing = 0.45 + 0.75 * hg;
   vec3 col = uAmbientSky * (0.5 + 0.5 * density)
-    + uKeyLight * (lit * 0.62 + silver * hg * 0.9)
+    + uKeyLight * (lit * facing * 0.6 + silver * hg * 0.9)
     + uMoonLight * 0.6;
 
   float fade = smoothstep(0.012, 0.085, rd.y);
@@ -459,16 +465,19 @@ vec4 cloudsLow(vec3 rd, vec3 sunDir, float mu) {
 
 /** Cirrus deck: stretched, thin, high and slower. */
 vec4 cloudsHigh(vec3 rd, vec3 sunDir, float mu) {
+  if (rd.y < 0.02) return vec4(0.0);
   float dy = max(rd.y, 0.02);
   float t = (CLOUD_ALT_B - uCameraPos.y) / dy;
-  vec2 p = (uCameraPos.xz + rd.xz * t) * 0.00013 + uWindB;
+  if (t <= 0.0) return vec4(0.0);
+  vec2 p = (uCameraPos.xz + rd.xz * t) * 0.00013;
   p.x *= 0.42;
+  p += uWindB;
   float d = fbmB(p);
   float density = smoothstep(uCloudCoverB, uCloudCoverB + 0.30, d);
   if (density <= 0.001) return vec4(0.0);
 
   float hg = phaseHG(mu, 0.5) * 1.1 + 0.25;
-  vec3 col = uAmbientSky * 0.7 + uKeyLight * (0.35 + 0.35 * hg) + uMoonLight * 0.4;
+  vec3 col = uAmbientSky * 0.7 + uKeyLight * (0.22 + 0.55 * hg) + uMoonLight * 0.4;
   float fade = smoothstep(0.02, 0.11, rd.y);
   float aerial = 1.0 - smoothstep(0.05, 0.34, rd.y);
   col = mix(col, uHorizonColor, aerial * 0.7);
@@ -497,12 +506,12 @@ vec2 cubeFaceUV(vec3 rd, out float face) {
  * never crosses the border; the radius grows with the pixel angle so stars stay visible at
  * any resolution instead of aliasing away.
  */
-vec3 starLayer(vec2 uv, float face, float density, float seed, float twinkle) {
+vec3 starLayer(vec2 uv, float face, float density, float seed, float keep, float twinkle) {
   vec2 g = uv * density + seed;
   vec2 cell = floor(g);
   vec2 f = g - cell;
   vec3 h = hash32(cell + vec2(face * 17.13, seed * 3.77));
-  if (h.z > 0.55) return vec3(0.0);
+  if (h.z > keep) return vec3(0.0);
 
   float mag = fract(h.z * 57.31);
   float base = 0.020 + 0.038 * mag;
@@ -589,15 +598,16 @@ void main() {
     if (uStarIntensity > 0.002) {
       float face;
       vec2 uv = cubeFaceUV(rd, face);
-      vec3 stars = starLayer(uv, face, uStarDensity, 0.0, 1.0)
-        + starLayer(uv, face, uStarDensity * 2.13, 7.0, 0.7) * 0.55;
+      vec3 stars = starLayer(uv, face, uStarDensity, 0.0, 0.45, 1.0)
+        + starLayer(uv, face, uStarDensity * 2.2, 7.0, 0.10, 0.7) * 0.45;
       // Milky Way: a soft band about a fixed galactic pole, broken up by dust lanes.
       vec3 pole = normalize(vec3(0.36, 0.58, -0.73));
       float b = dot(rd, pole);
-      float band = exp(-b * b * 15.0);
-      float dust = fbmStars(rd * 3.4);
-      float mw = band * (0.35 + 0.9 * dust * dust) * uMilkyWay;
-      stars += vec3(0.62, 0.66, 0.92) * mw * 0.016;
+      float band = exp(-b * b * 22.0) + 0.45 * exp(-b * b * 5.0);
+      float dust = fbmStars(rd * 3.2);
+      float lanes = smoothstep(0.28, 0.62, fbmStars(rd * 1.7 + 11.0));
+      float mw = band * (0.12 + 1.3 * dust * dust) * mix(0.35, 1.0, lanes) * uMilkyWay;
+      stars += vec3(0.74, 0.72, 0.86) * mw * 0.075;
       col += stars * uStarIntensity * viewT;
     }
 
@@ -616,23 +626,28 @@ void main() {
       float rr = clamp(sang / uSunAngular, 0.0, 1.0);
       float cosPsi = sqrt(max(1.0 - rr * rr, 0.0));
       float limb = 1.0 - 0.62 * (1.0 - pow(max(cosPsi, 1e-3), 0.45));
-      col += vec3(1.0, 0.97, 0.93) * (uSunIrradiance * 1.7 * limb * disc) * viewT;
+      col += vec3(1.0, 0.97, 0.93) * (uSunIrradiance * 1.05 * limb * disc) * viewT;
     }
-    col += vec3(1.0, 0.82, 0.58) * (uSunIrradiance * 0.10 * exp(-sang * 55.0)) * viewT;
-    col += vec3(1.0, 0.88, 0.72) * (uSunIrradiance * 0.020 * exp(-sang * 9.0)) * viewT;
+    // The wide halo only exists while the sun is actually up; at night it would be a
+    // phantom glow sitting on the wrong side of the sky.
+    float sunUp = smoothstep(-0.16, -0.02, uSunDir.y);
+    col += vec3(1.0, 0.82, 0.58) * (uSunIrradiance * 0.10 * sunUp * exp(-sang * 55.0)) * viewT;
+    col += vec3(1.0, 0.88, 0.72) * (uSunIrradiance * 0.020 * sunUp * exp(-sang * 9.0)) * viewT;
   }
 
 #if CLOUDS
-  vec4 hi = cloudsHigh(rd, uKeyDir, dot(rd, uKeyDir));
+  // Cirrus first, cumulus over it: both occlude everything behind them.
+  float muK = dot(rd, uKeyDir);
+  vec4 hi = cloudsHigh(rd, uKeyDir, muK);
   col = mix(col, hi.rgb, clamp(hi.a, 0.0, 1.0));
-  vec4 lo = cloudsLow(rd, uKeyDir, dot(rd, uKeyDir));
+  vec4 lo = cloudsLow(rd, uKeyDir, muK);
   col = mix(col, lo.rgb, clamp(lo.a, 0.0, 1.0));
 #endif
 
   // Horizon haze: forces the sky to meet the renderer's fog colour exactly at y = 0 so
   // distant geometry dissolves instead of ending on a visible line.
-  float hz = exp(-max(rd.y, 0.0) * 24.0) * uHaze;
-  col = mix(col, uHorizonColor, clamp(hz * 0.4, 0.0, 1.0));
+  float hz = exp(-abs(rd.y) * 20.0) * uHaze;
+  col = mix(col, uHorizonColor, clamp(hz * 0.28, 0.0, 1.0));
 
   // Guard against any NaN/Inf leaking into the HDR target.
   if (any(isnan(col)) || any(isinf(col))) col = uHorizonColor;
@@ -701,7 +716,7 @@ export class Sky {
       moonAngularRadius: 0.026,
       moonElongation: 118.0,
       moonBrightness: 1.35,
-      starDensity: 46.0,
+      starDensity: 27.0,
       milkyWay: 1.0,
       haze: 1.0,
       lightPollution: 1.0,
@@ -730,7 +745,7 @@ export class Sky {
     this.zenithColor = new Float32Array([0.2, 0.3, 0.5]);
     /** @type {number} 0 = full day, 1 = full night. */
     this.nightFactor = 0.0;
-    /** @type {number} 0..1 star visibility, follows astronomical twilight. */
+    /** @type {number} 0..1 star visibility; fades in through civil and nautical twilight. */
     this.starIntensity = 0.0;
     /** @type {number} Sun elevation, radians (negative below the horizon). */
     this.sunElevation = 0.0;
@@ -746,12 +761,12 @@ export class Sky {
     this._shaders = new Map();
     /** @type {string} */
     this._qualityName = this._readQualityName();
+    /** @type {string} Last quality tier observed on the renderer. */
+    this._rendererQuality = this._qualityName;
     /** @type {number} Viewport height override for the pixel-angle estimate. */
     this._viewportHeight = 0;
-    /** @type {Float32Array} Cloud scroll offsets (metres of texture space). */
+    /** @type {Float32Array} Cloud scroll offsets in noise space: [lowU, lowV, highU, highV]. */
     this._wind = new Float32Array(4);
-    /** @type {number} Cached time the derived values were computed for. */
-    this._computedTime = NaN;
     /** @type {boolean} */
     this._dirty = true;
     /** @type {number} Effective Mie scattering coefficient, per km. */
@@ -862,8 +877,7 @@ export class Sky {
     if (this._dirty) this._recompute();
     const gl = this.gl;
 
-    const qualityName = this._readQualityName();
-    if (QUALITY_PRESETS[qualityName]) this._qualityName = qualityName;
+    this._syncQuality();
     const shader = this._shader(this._qualityName);
     shader.use();
 
@@ -875,7 +889,7 @@ export class Sky {
     shader.setMat4('uInvProj', invProj);
     shader.setMat4('uInvView', invView);
 
-    const pos = camera.position || _dir;
+    const pos = camera.position || _origin;
     const camY = pos[1] || 0;
     shader.setVec3('uCameraPos', pos[0] || 0, camY, pos[2] || 0);
     shader.setFloat('uCameraAlt', 0.02 + Math.max(camY, 0) * 0.001);
@@ -956,6 +970,20 @@ export class Sky {
   }
 
   /**
+   * Adopts the renderer's quality tier, but only when the renderer actually switched tiers,
+   * so an explicit {@link Sky#setQuality} call is not clobbered every frame.
+   * @returns {void}
+   * @private
+   */
+  _syncQuality() {
+    const name = this._readQualityName();
+    if (name !== this._rendererQuality) {
+      this._rendererQuality = name;
+      this._qualityName = name;
+    }
+  }
+
+  /**
    * Returns (compiling on first use) the shader variant for a quality tier.
    * @param {string} name Tier name.
    * @returns {Shader} Compiled program.
@@ -993,7 +1021,6 @@ export class Sky {
    */
   _recompute() {
     this._dirty = false;
-    this._computedTime = this.timeOfDay;
     this._betaM = BETA_M_BASE * clamp(this.params.turbidity, 0.05, 8.0);
 
     // ---- solar position (hour angle / declination / observer latitude) ----
@@ -1011,16 +1038,27 @@ export class Sky {
 
     // ---- day / night blends ----
     this.nightFactor = 1.0 - smoothstep(-0.18, 0.06, sunY);
-    this.starIntensity = smoothstep(-0.02, -0.14, sunY);
+    // Stars only come out once the sun is well past civil twilight, like the real thing.
+    this.starIntensity = smoothstep(-0.06, -0.20, sunY);
     const moonUp = smoothstep(-0.05, 0.12, moonY);
     const moonAmount = moonUp * this.nightFactor;
 
-    // ---- key light direction: sun by day, moon once the sun is gone ----
-    const toMoon = smoothstep(-0.02, -0.12, sunY) * moonUp;
-    for (let i = 0; i < 3; i++) {
-      this.sunDirection[i] = lerp(this.sunDirectionTrue[i], this.moonDirection[i], toMoon);
+    // ---- key light direction ----
+    // The handover happens exactly where the solar term has already faded to zero, so the
+    // direction switches while nothing is lit: no swinging shadows, no degenerate lerp
+    // through the middle of two opposite vectors. The moon is lifted clear of the horizon
+    // so a setting moon never lights the world from underneath.
+    if (sunY < -0.07) {
+      this.sunDirection[0] = this.moonDirection[0];
+      this.sunDirection[1] = Math.max(this.moonDirection[1], 0.10);
+      this.sunDirection[2] = this.moonDirection[2];
+    } else {
+      this.sunDirection[0] = this.sunDirectionTrue[0];
+      this.sunDirection[1] = this.sunDirectionTrue[1];
+      this.sunDirection[2] = this.sunDirectionTrue[2];
     }
     normalize3(this.sunDirection);
+    const toMoon = sunY < -0.07 ? 1.0 : 0.0;   // 1 once the moon is the key light
 
     // ---- sun colour from the transmittance along the solar ray ----
     const camAlt = 0.02;
@@ -1037,8 +1075,9 @@ export class Sky {
       _rgb[i] = t;
       if (t > peak) peak = t;
     }
-    const dayIntensity = this.params.dayLightIntensity * smoothstep(-0.06, 0.14, sunY);
-    const moonIntensity = this.params.moonLightIntensity * moonAmount;
+    const dayIntensity = this.params.dayLightIntensity * smoothstep(-0.055, 0.14, sunY);
+    // Moonlight only ramps in after the solar term is already off.
+    const moonIntensity = this.params.moonLightIntensity * moonAmount * smoothstep(-0.08, -0.20, sunY);
     for (let i = 0; i < 3; i++) {
       const warm = Math.pow(clamp(_rgb[i] / peak, 0.0, 1.0), 0.62);
       this.sunColor[i] = lerp(Math.max(warm, 0.02), MOON_TINT[i], toMoon);

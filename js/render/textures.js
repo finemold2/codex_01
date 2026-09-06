@@ -224,9 +224,10 @@ function fade(t) {
 }
 
 /**
- * Permutation-table noise source. Every generator is *periodic*: lattice
- * coordinates are wrapped to the requested cell period so the resulting field
- * tiles seamlessly on a torus.
+ * Permutation-table noise source shared by every noise routine in this module
+ * (per-sample {@link NoiseSource#perlin2} and the bulk octave rasterisers).
+ * Everything it feeds is *periodic*: lattice coordinates are wrapped to the
+ * requested cell period, so fields tile seamlessly on a torus.
  */
 class NoiseSource {
   /**
@@ -245,17 +246,6 @@ class NoiseSource {
     for (let i = 0; i < 512; i++) this.perm[i] = p[i & 255];
     /** @type {Rand} Companion RNG (feature points, jitter). */
     this.rng = rng;
-  }
-
-  /**
-   * Hashes an integer lattice coordinate pair to 0..255.
-   * @param {number} ix Lattice x.
-   * @param {number} iy Lattice y.
-   * @returns {number} Hash value.
-   */
-  hash(ix, iy) {
-    const p = this.perm;
-    return p[(p[ix & 255] + (iy & 255)) & 255];
   }
 
   /**
@@ -287,108 +277,7 @@ class NoiseSource {
     const b = n01 + u * (n11 - n01);
     return (a + v * (b - a)) * SQRT2;
   }
-
-  /**
-   * Periodic 2D value noise (smoother, cheaper, slightly blockier than Perlin).
-   * @param {number} x Sample x in lattice units.
-   * @param {number} y Sample y in lattice units.
-   * @param {number} px Period along x.
-   * @param {number} py Period along y.
-   * @returns {number} Noise in [-1, 1].
-   */
-  value2(x, y, px, py) {
-    const pxi = px > 0 ? px | 0 : 256;
-    const pyi = py > 0 ? py | 0 : 256;
-    const xi = Math.floor(x), yi = Math.floor(y);
-    const fx = x - xi, fy = y - yi;
-    let x0 = xi % pxi; if (x0 < 0) x0 += pxi;
-    let y0 = yi % pyi; if (y0 < 0) y0 += pyi;
-    const x1 = (x0 + 1) % pxi, y1 = (y0 + 1) % pyi;
-    const u = fade(fx), v = fade(fy);
-    const v00 = this.hash(x0, y0) / 127.5 - 1;
-    const v10 = this.hash(x1, y0) / 127.5 - 1;
-    const v01 = this.hash(x0, y1) / 127.5 - 1;
-    const v11 = this.hash(x1, y1) / 127.5 - 1;
-    const a = v00 + u * (v10 - v00);
-    const b = v01 + u * (v11 - v01);
-    return a + v * (b - a);
-  }
-
-  /**
-   * Periodic fractal Brownian motion built from {@link NoiseSource#perlin2}.
-   * @param {number} x Sample x in 0..1 tile space.
-   * @param {number} y Sample y in 0..1 tile space.
-   * @param {{freq?:number, octaves?:number, lacunarity?:number, gain?:number, ridged?:boolean}} [opts] Options.
-   * @returns {number} Value in about [-1, 1] (0..1 when ridged).
-   */
-  fbm2(x, y, opts) {
-    const o = opts || {};
-    const octaves = o.octaves || 4;
-    const lac = o.lacunarity || 2;
-    const gain = o.gain === undefined ? 0.5 : o.gain;
-    const ridged = !!o.ridged;
-    let freq = o.freq || 4;
-    let amp = 1, sum = 0, norm = 0;
-    for (let i = 0; i < octaves; i++) {
-      const cells = Math.max(1, Math.round(freq));
-      let n = this.perlin2(x * cells + i * 7, y * cells + i * 13, cells, cells);
-      if (ridged) { n = 1 - Math.abs(n); n *= n; }
-      sum += n * amp;
-      norm += amp;
-      amp *= gain;
-      freq *= lac;
-    }
-    return sum / norm;
-  }
-
-  /**
-   * Deterministic feature point for a Worley cell, in 0..1 cell space.
-   * @param {number} ix Cell x.
-   * @param {number} iy Cell y.
-   * @param {Float32Array} out Receives [x, y].
-   * @returns {Float32Array} out
-   */
-  cellPoint(ix, iy, out) {
-    const p = this.perm;
-    const a = p[(p[ix & 255] + (iy & 255)) & 255];
-    const b = p[(p[(ix + 41) & 255] + ((iy + 97) & 255)) & 255];
-    out[0] = a / 255;
-    out[1] = b / 255;
-    return out;
-  }
-
-  /**
-   * Periodic Worley / cellular noise.
-   * @param {number} x Sample x in 0..1 tile space.
-   * @param {number} y Sample y in 0..1 tile space.
-   * @param {number} cells Cells across the tile.
-   * @param {string} [mode] 'f1' nearest distance, 'f2f1' cell edges.
-   * @returns {number} Value in about [0, 1].
-   */
-  worley2(x, y, cells, mode) {
-    const cx = Math.floor(x * cells), cy = Math.floor(y * cells);
-    const pxs = x * cells, pys = y * cells;
-    let f1 = 1e9, f2 = 1e9;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const nx = cx + dx, ny = cy + dy;
-        let wx = nx % cells; if (wx < 0) wx += cells;
-        let wy = ny % cells; if (wy < 0) wy += cells;
-        this.cellPoint(wx, wy, SCRATCH_PT);
-        const fxp = nx + SCRATCH_PT[0] - pxs;
-        const fyp = ny + SCRATCH_PT[1] - pys;
-        const d = fxp * fxp + fyp * fyp;
-        if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
-      }
-    }
-    f1 = Math.sqrt(f1); f2 = Math.sqrt(f2);
-    if (mode === 'f2f1') return sat(f2 - f1);
-    return sat(f1);
-  }
 }
-
-/** Scratch pair reused by cell point lookups. */
-const SCRATCH_PT = new Float32Array(2);
 
 /* Column scratch buffers reused by the octave rasterisers. */
 let SC_H0 = new Int32Array(0);
@@ -425,6 +314,8 @@ function ensureScratch(n) {
 function addPerlinOctave(dst, w, h, cellsX, cellsY, noise, amp, mode, phase) {
   ensureScratch(w);
   const perm = noise.perm;
+  const H0 = SC_H0, H1 = SC_H1, FX = SC_FX, UU = SC_U;
+  const gx0 = GRAD_X, gy0 = GRAD_Y;
   const px = cellsX, py = cellsY;
   const sx = cellsX / w, sy = cellsY / h;
   const ph = phase | 0;
@@ -433,10 +324,10 @@ function addPerlinOctave(dst, w, h, cellsX, cellsY, noise, amp, mode, phase) {
     const xi = Math.floor(fx);
     let x0 = xi % px; if (x0 < 0) x0 += px;
     const x1 = (x0 + 1) % px;
-    SC_H0[x] = perm[x0 & 255];
-    SC_H1[x] = perm[x1 & 255];
-    SC_FX[x] = fx - xi;
-    SC_U[x] = fade(fx - xi);
+    H0[x] = perm[x0 & 255];
+    H1[x] = perm[x1 & 255];
+    FX[x] = fx - xi;
+    UU[x] = fade(fx - xi);
   }
   for (let y = 0; y < h; y++) {
     const fy = y * sy + ph * 2;
@@ -449,14 +340,14 @@ function addPerlinOctave(dst, w, h, cellsX, cellsY, noise, amp, mode, phase) {
     const row = y * w;
     const b0 = y0 & 255, b1 = y1 & 255;
     for (let x = 0; x < w; x++) {
-      const c0 = SC_H0[x], c1 = SC_H1[x];
+      const c0 = H0[x], c1 = H1[x];
       const h00 = perm[(c0 + b0) & 255] & 7, h10 = perm[(c1 + b0) & 255] & 7;
       const h01 = perm[(c0 + b1) & 255] & 7, h11 = perm[(c1 + b1) & 255] & 7;
-      const gx = SC_FX[x], gx1 = gx - 1, u = SC_U[x];
-      const n00 = GRAD_X[h00] * gx + GRAD_Y[h00] * gy;
-      const n10 = GRAD_X[h10] * gx1 + GRAD_Y[h10] * gy;
-      const n01 = GRAD_X[h01] * gx + GRAD_Y[h01] * gy1;
-      const n11 = GRAD_X[h11] * gx1 + GRAD_Y[h11] * gy1;
+      const gx = FX[x], gx1 = gx - 1, u = UU[x];
+      const n00 = gx0[h00] * gx + gy0[h00] * gy;
+      const n10 = gx0[h10] * gx1 + gy0[h10] * gy;
+      const n01 = gx0[h01] * gx + gy0[h01] * gy1;
+      const n11 = gx0[h11] * gx1 + gy0[h11] * gy1;
       const a = n00 + u * (n10 - n00);
       const b = n01 + u * (n11 - n01);
       let n = (a + v * (b - a)) * SQRT2;
@@ -481,6 +372,7 @@ function addPerlinOctave(dst, w, h, cellsX, cellsY, noise, amp, mode, phase) {
 function addValueOctave(dst, w, h, cellsX, cellsY, noise, amp, phase) {
   ensureScratch(w);
   const perm = noise.perm;
+  const H0 = SC_H0, H1 = SC_H1, UU = SC_U;
   const px = cellsX, py = cellsY;
   const sx = cellsX / w, sy = cellsY / h;
   const ph = phase | 0;
@@ -489,9 +381,9 @@ function addValueOctave(dst, w, h, cellsX, cellsY, noise, amp, phase) {
     const xi = Math.floor(fx);
     let x0 = xi % px; if (x0 < 0) x0 += px;
     const x1 = (x0 + 1) % px;
-    SC_H0[x] = perm[x0 & 255];
-    SC_H1[x] = perm[x1 & 255];
-    SC_U[x] = fade(fx - xi);
+    H0[x] = perm[x0 & 255];
+    H1[x] = perm[x1 & 255];
+    UU[x] = fade(fx - xi);
   }
   for (let y = 0; y < h; y++) {
     const fy = y * sy + ph * 3;
@@ -502,12 +394,12 @@ function addValueOctave(dst, w, h, cellsX, cellsY, noise, amp, phase) {
     const row = y * w;
     const b0 = y0 & 255, b1 = y1 & 255;
     for (let x = 0; x < w; x++) {
-      const c0 = SC_H0[x], c1 = SC_H1[x];
+      const c0 = H0[x], c1 = H1[x];
       const v00 = perm[(c0 + b0) & 255] * 0.00784314 - 1;
       const v10 = perm[(c1 + b0) & 255] * 0.00784314 - 1;
       const v01 = perm[(c0 + b1) & 255] * 0.00784314 - 1;
       const v11 = perm[(c1 + b1) & 255] * 0.00784314 - 1;
-      const u = SC_U[x];
+      const u = UU[x];
       const a = v00 + u * (v10 - v00);
       const b = v01 + u * (v11 - v01);
       dst[row + x] += (a + v * (b - a)) * amp;
@@ -701,28 +593,6 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
     }
   }
   return upsampleField(out, gw, gh, w, h);
-}
-
-/**
- * Bilinear field sample with toroidal wrapping.
- * @param {Float32Array} f Source field.
- * @param {number} w Width.
- * @param {number} h Height.
- * @param {number} x Sample x in pixels (may be out of range).
- * @param {number} y Sample y in pixels.
- * @returns {number} Interpolated value.
- */
-function sampleField(f, w, h, x, y) {
-  let x0 = Math.floor(x), y0 = Math.floor(y);
-  const tx = x - x0, ty = y - y0;
-  x0 = ((x0 % w) + w) % w;
-  y0 = ((y0 % h) + h) % h;
-  const x1 = x0 + 1 === w ? 0 : x0 + 1;
-  const y1 = y0 + 1 === h ? 0 : y0 + 1;
-  const r0 = y0 * w, r1 = y1 * w;
-  const a = f[r0 + x0] + tx * (f[r0 + x1] - f[r0 + x0]);
-  const b = f[r1 + x0] + tx * (f[r1 + x1] - f[r1 + x0]);
-  return a + ty * (b - a);
 }
 
 /**
@@ -994,7 +864,6 @@ export function makeNoiseCanvas(w, h, opts) {
       lacunarity: o.lacunarity, gain: o.gain,
       mode: mode, value: type === 'value'
     });
-    if (type === 'value') for (let i = 0; i < field.length; i++) field[i] = field[i] * 0.5 + 0.5;
   }
   if (o.normalize) normalizeField(field);
   const contrast = o.contrast === undefined ? 1 : o.contrast;
@@ -1081,7 +950,8 @@ function halveField(field, w, h) {
 function materialNormal(height, S, strength) {
   const half = S >= 256 ? halveField(height, S, S) : height;
   const hs = S >= 256 ? S >> 1 : S;
-  return { canvas: normalCanvasFromField(half, hs, hs, strength) };
+  /* One box-blur step keeps grain-driven normals from turning into sparkle. */
+  return { canvas: normalCanvasFromField(blurField(half, hs, hs, 1), hs, hs, strength) };
 }
 
 /**
@@ -1184,30 +1054,36 @@ function genAsphalt(S, seed) {
   }
 
   const height = new Float32Array(S * S);
+  const invS = 1 / S;
+  /* Lane polish depends only on the column: hoist it out of the pixel loop. */
+  const laneCol = new Float32Array(S);
+  for (let x = 0; x < S; x++) {
+    const u = x * invS;
+    laneCol[x] = Math.max(1 - ss(0.02, 0.13, Math.abs(u - 0.27)), 1 - ss(0.02, 0.13, Math.abs(u - 0.73)));
+  }
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const v = y / S;
+    const v = y * invS;
+    const su = seamU[y];
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const u = x / S;
+      const u = x * invS;
 
-      let tone = 30 + blotch[i] * 20;
+      let tone = 33 + blotch[i] * 22;
       /* Aggregate: bright stone chips with per-stone tint. */
-      const chip = ss(0.62, 0.16, agg[i]);
+      const chip = ss(0.58, 0.12, agg[i]);
       const chipTone = 0.55 + aggId[i] * 0.9;
-      tone += chip * 26 * chipTone;
+      tone += chip * 34 * chipTone;
       /* Fine grain. */
       const g = grain[i] - 0.5;
       tone += g * 15;
 
       /* Wheel-polished lanes running along +V. */
-      const laneA = 1 - ss(0.02, 0.13, Math.abs(u - 0.27));
-      const laneB = 1 - ss(0.02, 0.13, Math.abs(u - 0.73));
-      const lane = Math.max(laneA, laneB) * (0.55 + blotch[i] * 0.45);
+      const lane = laneCol[x] * (0.55 + blotch[i] * 0.45);
       tone = mix(tone, tone * 0.86 + 4, lane * 0.75);
 
       /* Tar seams. */
-      let du = Math.abs(u - seamU[y]); du = Math.min(du, 1 - du);
+      let du = Math.abs(u - su); du = Math.min(du, 1 - du);
       let dv = Math.abs(v - seamV[x]); dv = Math.min(dv, 1 - dv);
       const seam = Math.max(1 - ss(0.002, 0.012, du), 1 - ss(0.002, 0.010, dv));
       tone = mix(tone, 22 + grain[i] * 8, seam * 0.9);
@@ -1226,7 +1102,7 @@ function genAsphalt(S, seed) {
       px[p + 2] = tone * 1.07 + 1;
       px[p + 3] = 255;
 
-      height[i] = sat(0.45 + chip * 0.35 + g * 0.25 - cr * 0.55 - seam * 0.3 - lane * 0.06);
+      height[i] = sat(0.45 + chip * 0.30 + g * 0.08 - cr * 0.55 - seam * 0.3 - lane * 0.06);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1234,10 +1110,16 @@ function genAsphalt(S, seed) {
 }
 
 /**
- * UV rectangles of the `roadLines` atlas, in **canvas space**: `u` runs left to
- * right, `v` runs top to bottom of `library.canvases.roadLines`. If the texture
- * uploader flips Y (`UNPACK_FLIP_Y_WEBGL`), use `1 - v`. Arrows point towards
- * `v = 0` (the direction of travel).
+ * UV rectangles of the `roadLines` atlas, in **GL texture space** — the same
+ * space every texture in this library is uploaded in (`flipY`, so `v = 0` is
+ * the bottom of the source canvas and `v = 1` the top). Each entry is the
+ * sub-rectangle `{u0, v0, u1, v1}` to map onto a road quad.
+ *
+ * Layout (bottom to top): arrows + parking marks, then the crosswalk band,
+ * then the line primitives. Arrows point towards **increasing v**, so a lane
+ * quad whose v axis runs along the direction of travel gets them right.
+ * `dash` is a single dash-and-gap cell: tile it along v to make a dashed line.
+ *
  * @type {{dash:{u0:number,v0:number,u1:number,v1:number},
  *         solid:{u0:number,v0:number,u1:number,v1:number},
  *         doubleYellow:{u0:number,v0:number,u1:number,v1:number},
@@ -1249,15 +1131,15 @@ function genAsphalt(S, seed) {
  *         parking:{u0:number,v0:number,u1:number,v1:number}}}
  */
 export const ROAD_MARKING_UV = {
-  dash: { u0: 0.00, v0: 0.00, u1: 0.25, v1: 0.25 },
-  solid: { u0: 0.25, v0: 0.00, u1: 0.50, v1: 0.25 },
-  doubleYellow: { u0: 0.50, v0: 0.00, u1: 0.75, v1: 0.25 },
-  stopBar: { u0: 0.75, v0: 0.00, u1: 1.00, v1: 0.25 },
+  dash: { u0: 0.00, v0: 0.75, u1: 0.25, v1: 1.00 },
+  solid: { u0: 0.25, v0: 0.75, u1: 0.50, v1: 1.00 },
+  doubleYellow: { u0: 0.50, v0: 0.75, u1: 0.75, v1: 1.00 },
+  stopBar: { u0: 0.75, v0: 0.75, u1: 1.00, v1: 1.00 },
   crosswalk: { u0: 0.00, v0: 0.25, u1: 1.00, v1: 0.75 },
-  arrowStraight: { u0: 0.00, v0: 0.75, u1: 0.25, v1: 1.00 },
-  arrowLeft: { u0: 0.25, v0: 0.75, u1: 0.50, v1: 1.00 },
-  arrowRight: { u0: 0.50, v0: 0.75, u1: 0.75, v1: 1.00 },
-  parking: { u0: 0.75, v0: 0.75, u1: 1.00, v1: 1.00 }
+  arrowStraight: { u0: 0.00, v0: 0.00, u1: 0.25, v1: 0.25 },
+  arrowLeft: { u0: 0.25, v0: 0.00, u1: 0.50, v1: 0.25 },
+  arrowRight: { u0: 0.50, v0: 0.00, u1: 0.75, v1: 0.25 },
+  parking: { u0: 0.75, v0: 0.00, u1: 1.00, v1: 0.25 }
 };
 
 /**
@@ -1399,13 +1281,14 @@ function genSidewalk(S, seed) {
 
   const height = new Float32Array(S * S);
   const g = 0.030;   // grout half-width in cell units
+  const cellScale = SLABS / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * SLABS;
+    const fy = y * cellScale;
     const cy = Math.floor(fy), ly = fy - cy;
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * SLABS;
+      const fx = x * cellScale;
       const cx = Math.floor(fx), lx = fx - cx;
 
       /* Distance to the nearest slab border, perturbed for chipped edges. */
@@ -1425,7 +1308,7 @@ function genSidewalk(S, seed) {
       px[p + 1] = c;
       px[p + 2] = c * 0.95;
       px[p + 3] = 255;
-      height[i] = sat3(0.72 - groove * 0.62 + (speck[i] - 0.5) * 0.12 + ss(0.5, 0.05, grit[i]) * 0.06, 0, 1);
+      height[i] = sat(0.72 - groove * 0.62 + (speck[i] - 0.5) * 0.06 + ss(0.5, 0.05, grit[i]) * 0.05);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1454,9 +1337,10 @@ function genConcrete(S, seed) {
   const streak = fbmField(S, S, new NoiseSource(seed + 25), { freqX: 6, freqY: 32, octaves: 2 });
 
   const height = new Float32Array(S * S);
+  const invS = 1 / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const v = y / S;
+    const v = y * invS;
     /* Two horizontal form-board seams per tile. */
     const seam = Math.max(
       1 - ss(0.0, 0.006, Math.abs(v - 0.5)),
@@ -1464,8 +1348,8 @@ function genConcrete(S, seed) {
     );
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      let c = 150 + (mottle[i] - 0.5) * 46 + (grain[i] - 0.5) * 16;
-      c -= ss(0.5, 1.0, streak[i]) * 10;
+      let c = 150 + (mottle[i] - 0.5) * 62 + (grain[i] - 0.5) * 18;
+      c -= ss(0.42, 1.0, streak[i]) * 16;
       const pit = ss(0.30, 0.0, pits[i]);
       c -= pit * 30;
       c = mix(c, c * 0.82, seam);
@@ -1474,7 +1358,7 @@ function genConcrete(S, seed) {
       px[p + 1] = c * 0.99;
       px[p + 2] = c * 0.96;
       px[p + 3] = 255;
-      height[i] = sat3(0.6 + (mottle[i] - 0.5) * 0.3 + (grain[i] - 0.5) * 0.18 - pit * 0.5 - seam * 0.35, 0, 1);
+      height[i] = sat(0.6 + (mottle[i] - 0.5) * 0.22 + (grain[i] - 0.5) * 0.08 - pit * 0.5 - seam * 0.35);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1509,15 +1393,16 @@ function genBrick(S, seed) {
 
   const height = new Float32Array(S * S);
   const mortarX = 0.035, mortarY = 0.09;
+  const rowScale = ROWS / S, colScale = COLS / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * ROWS;
+    const fy = y * rowScale;
     const ry = Math.floor(fy);
     const ly = fy - ry;
     const offset = (ry & 1) ? 0.5 : 0;
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * COLS + offset;
+      const fx = x * colScale + offset;
       const rx = Math.floor(fx);
       const lx = fx - rx;
 
@@ -1545,7 +1430,7 @@ function genBrick(S, seed) {
 
       const p = i * 4;
       px[p] = r; px[p + 1] = gch; px[p + 2] = b; px[p + 3] = 255;
-      height[i] = sat(0.78 - mortar * 0.6 + (grain[i] - 0.5) * 0.14);
+      height[i] = sat(0.78 - mortar * 0.6 + (grain[i] - 0.5) * 0.08);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1573,17 +1458,19 @@ function genMetal(S, seed) {
   const PANELS = 2;
   const rivetR = S * 0.008;
   const height = new Float32Array(S * S);
+  const pScale = PANELS / S, rScale = PANELS * 16 / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * PANELS, ly = fy - Math.floor(fy);
+    const fy = y * pScale, ly = fy - Math.floor(fy);
+    const nry = (y * rScale) % 1;
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * PANELS, lx = fx - Math.floor(fx);
+      const fx = x * pScale, lx = fx - Math.floor(fx);
       const ex = Math.min(lx, 1 - lx), ey = Math.min(ly, 1 - ly);
       const seam = Math.max(1 - ss(0.004, 0.012, ex), 1 - ss(0.004, 0.012, ey));
 
       /* Rivets march along the seams. */
-      const nrx = (x / S * PANELS * 16) % 1, nry = (y / S * PANELS * 16) % 1;
+      const nrx = (x * rScale) % 1;
       const nearSeamX = ex < 0.028, nearSeamY = ey < 0.028;
       let rivet = 0;
       if (nearSeamX || nearSeamY) {
@@ -1607,7 +1494,7 @@ function genMetal(S, seed) {
 
       const p = i * 4;
       px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
-      height[i] = sat3(0.6 - seam * 0.45 + rivet * 0.35 + (brush[i] - 0.5) * 0.08 + (dents[i] - 0.5) * 0.12 - rz * 0.1, 0, 1);
+      height[i] = sat(0.6 - seam * 0.45 + rivet * 0.35 + (brush[i] - 0.5) * 0.05 + (dents[i] - 0.5) * 0.10 - rz * 0.1);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1622,7 +1509,7 @@ function genMetal(S, seed) {
  */
 function genRoofGravel(S, seed) {
   const noise = new NoiseSource(seed);
-  const cells = Math.max(24, Math.round(S / 6));
+  const cells = Math.max(18, Math.round(S / 10));
   const id = new Float32Array(S * S);
   const stones = worleyField(S, S, noise, cells, cells, { mode: 'f1', jitter: 1, outId: id });
   const small = worleyField(S, S, new NoiseSource(seed + 51), Math.round(cells * 1.25), Math.round(cells * 1.25), { mode: 'f1', jitter: 1 });
@@ -1635,11 +1522,11 @@ function genRoofGravel(S, seed) {
   const px = img.data;
   const height = new Float32Array(S * S);
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
-    const st = ss(0.72, 0.10, stones[i]);
+    const st = ss(0.66, 0.06, stones[i]);
     const sm = ss(0.62, 0.12, small[i]) * 0.6;
     const tint = id[i];
-    let c = 46 + tar[i] * 22 + (grain[i] - 0.5) * 12;
-    const stoneC = 92 + tint * 78;
+    let c = 38 + tar[i] * 20 + (grain[i] - 0.5) * 14;
+    const stoneC = 78 + tint * 104;
     c = mix(c, stoneC * (0.8 + (grain[i] - 0.5) * 0.3), Math.max(st, sm));
     px[p] = c * (0.96 + tint * 0.1);
     px[p + 1] = c * (0.97 + tint * 0.04);
@@ -1677,19 +1564,20 @@ function genTileFloor(S, seed) {
   const px = img.data;
   const height = new Float32Array(S * S);
   const g = 0.026;
+  const tScale = TILES / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * TILES, ty = Math.floor(fy), ly = fy - ty;
+    const fy = y * tScale, ty = Math.floor(fy), ly = fy - ty;
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * TILES, tx = Math.floor(fx), lx = fx - tx;
+      const fx = x * tScale, tx = Math.floor(fx), lx = fx - tx;
       const edge = Math.min(Math.min(lx, 1 - lx), Math.min(ly, 1 - ly));
       const grout = 1 - ss(g, g + 0.014, edge);
       const t = tone[(ty % TILES) * TILES + (tx % TILES)];
 
       let c = 206 + t * 10 + (grain[i] - 0.5) * 10;
-      const vein = ss(0.72, 0.98, veins[i]);
-      c = mix(c, 150 + t * 8, vein * 0.85);
+      const vein = ss(0.62, 0.97, veins[i]);
+      c = mix(c, 150 + t * 10, vein * 0.6);
       c -= ss(0.55, 0.95, wear[i]) * 10;
       const gc = 128 + (grain[i] - 0.5) * 16;
       c = mix(c, gc, grout);
@@ -1799,12 +1687,14 @@ function genSand(S, seed) {
   const px = img.data;
   const height = new Float32Array(S * S);
   const RIPPLES = 14;
+  const invS = 1 / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
+    const vy = y * invS;
     for (let x = 0; x < S; x++) {
       const i = row + x;
       /* Ripples: an integer number of periods keeps the tile seamless. */
-      const phase = (y / S + (rippleWarp[i] - 0.5) * 0.12 + (dunes[i] - 0.5) * 0.05) * TWO_PI * RIPPLES;
+      const phase = (vy + (rippleWarp[i] - 0.5) * 0.12 + (dunes[i] - 0.5) * 0.05) * TWO_PI * RIPPLES;
       const rip = Math.sin(phase) * 0.5 + 0.5;
       const t = dunes[i] * 0.5 + grain[i] * 0.5;
       let c = 196 + t * 34 + (rip - 0.5) * 16;
@@ -1815,7 +1705,7 @@ function genSand(S, seed) {
       px[p + 1] = c * 0.955;
       px[p + 2] = c * 0.79;
       px[p + 3] = 255;
-      height[i] = sat3(0.5 + (rip - 0.5) * 0.5 + (grain[i] - 0.5) * 0.3 + (dunes[i] - 0.5) * 0.3 + sh * 0.3, 0, 1);
+      height[i] = sat(0.5 + (rip - 0.5) * 0.5 + (grain[i] - 0.5) * 0.25 + (dunes[i] - 0.5) * 0.3 + sh * 0.3);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -2040,22 +1930,23 @@ function genTire(S, seed) {
   const img = newImage(ctx, S, S);
   const px = img.data;
   const height = new Float32Array(S * S);
-  const BLOCKS = 16;         // tread blocks around the circumference
+  const BLOCKS = 12;         // tread blocks around the circumference
+  const invS = 1 / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const v = y / S;                      // across the tread
+    const v = y * invS;                   // across the tread
     const across = Math.abs(v - 0.5) * 2; // 0 centre, 1 sidewall
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const u = x / S;
+      const u = x * invS;
       let tread = 0;
       if (across < 0.62) {
         /* Chevron blocks: shift the block phase with the distance from centre. */
         const skew = (v - 0.5) * 2.2;
         const bu = (u * BLOCKS + skew * 1.4) % 1;
         const bv = (v * 6) % 1;
-        const gx = 1 - ss(0.06, 0.14, Math.min(bu, 1 - bu));
-        const gy = 1 - ss(0.08, 0.18, Math.min(bv, 1 - bv));
+        const gx = 1 - ss(0.09, 0.19, Math.min(bu, 1 - bu));
+        const gy = 1 - ss(0.10, 0.22, Math.min(bv, 1 - bv));
         const groove = Math.max(gx, gy * 0.9);
         /* Two continuous circumferential grooves. */
         const circ = Math.max(
@@ -2065,8 +1956,8 @@ function genTire(S, seed) {
         tread = Math.max(groove, circ);
       }
       const shoulder = ss(0.62, 0.80, across);
-      let c = 30 + (grain[i] - 0.5) * 14 + wear[i] * 8;
-      c *= 1 - tread * 0.55;
+      let c = 34 + (grain[i] - 0.5) * 14 + wear[i] * 10;
+      c *= 1 - tread * 0.78;
       c *= 1 - shoulder * 0.12;
       const p = i * 4;
       px[p] = c; px[p + 1] = c * 1.0; px[p + 2] = c * 1.03; px[p + 3] = 255;
@@ -2150,9 +2041,10 @@ function genChrome(S, seed) {
 
 /**
  * Writes an emissive mask into the alpha channel of an RGBA buffer.
- * Called *after* the opaque colour has been committed to the canvas, so
- * `canvases.*Facade` stays a fully visible image for UI use while the uploaded
- * pixel buffer carries the mask in alpha.
+ * The buffer is what gets uploaded (exact RGB + exact mask); the same buffer is
+ * also written back to the canvas so `canvases.*Facade` shows the mask, at the
+ * cost of the canvas losing RGB under fully transparent texels (canvas
+ * back-buffers are premultiplied).
  * @param {Uint8ClampedArray} px RGBA pixels.
  * @param {Float32Array} mask Mask in 0..1.
  * @returns {void}
@@ -2192,18 +2084,21 @@ function genGlassFacade(S, seed) {
   const mask = new Float32Array(S * S);
 
   const mullionW = 0.030, centreW = 0.014, spandrelTop = 0.74, glassTop = 0.07;
+  const fScale = FLOORS / S, cScale = COLS / S;
+  const invGlass = 1 / (spandrelTop - glassTop);
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * FLOORS, fl = Math.floor(fy), ly = fy - fl;
+    const fy = y * fScale, fl = Math.floor(fy), ly = fy - fl;
+    const inSpandrel = ly >= spandrelTop;
+    const inTransom = ly < glassTop;
+    const tRow = sat((ly - glassTop) * invGlass);
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * COLS, cl = Math.floor(fx), lx = fx - cl;
+      const fx = x * cScale, cl = Math.floor(fx), lx = fx - cl;
       const id = fl * COLS + cl;
 
       const edgeX = Math.min(lx, 1 - lx);
       const inMullion = edgeX < mullionW || Math.abs(lx - 0.5) < centreW;
-      const inSpandrel = ly >= spandrelTop;
-      const inTransom = ly < glassTop;
       let r, g, b, m = 0;
 
       if (inSpandrel) {
@@ -2211,7 +2106,6 @@ function genGlassFacade(S, seed) {
         const t = ss(spandrelTop, spandrelTop + 0.04, ly);
         const shade = 0.55 + t * 0.35 + (dust[i] - 0.5) * 0.12;
         r = 44 * shade + 8; g = 50 * shade + 9; b = 56 * shade + 11;
-        if (ly > 0.965) { r *= 0.5; g *= 0.5; b *= 0.55; }
       } else if (inMullion || inTransom) {
         const shade = 0.8 + (dust[i] - 0.5) * 0.25 + (edgeX < 0.008 ? -0.25 : 0);
         r = 92 * shade; g = 98 * shade; b = 104 * shade;
@@ -2235,6 +2129,9 @@ function genGlassFacade(S, seed) {
         /* Some panes show a dark interior instead of a reflection. */
         const dk = paneDark[id];
         r *= dk; g *= dk; b *= dk;
+        /* Slab shadow cast onto the top of the pane. */
+        const shadow = 1 - ss(glassTop, glassTop + 0.09, ly);
+        r = mix(r, r * 0.42, shadow); g = mix(g, g * 0.44, shadow); b = mix(b, b * 0.48, shadow);
         /* Rain streak grime running down the glass. */
         const gm = ss(0.55, 0.95, grime[i]) * t * 0.35;
         r = mix(r, r * 0.7 + 12, gm); g = mix(g, g * 0.72 + 12, gm); b = mix(b, b * 0.75 + 12, gm);
@@ -2245,8 +2142,8 @@ function genGlassFacade(S, seed) {
       mask[i] = m;
     }
   }
-  ctx.putImageData(img, 0, 0);
   applyMask(px, mask);
+  ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
 
@@ -2283,16 +2180,19 @@ function genOfficeFacade(S, seed) {
 
   const WX0 = 0.17, WX1 = 0.83, WY0 = 0.20, WY1 = 0.74;
   const FRAME = 0.030;
+  const fScale = FLOORS / S, cScale = COLS / S, invWin = 1 / (WY1 - WY0);
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * FLOORS, fl = Math.floor(fy), ly = fy - fl;
+    const fy = y * fScale, fl = Math.floor(fy), ly = fy - fl;
+    const tRow = sat((ly - WY0) * invWin);
+    const yInWin = ly > WY0 && ly < WY1;
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * COLS, cl = Math.floor(fx), lx = fx - cl;
+      const fx = x * cScale, cl = Math.floor(fx), lx = fx - cl;
       const id = fl * COLS + cl;
       let r, g, b, m = 0;
 
-      const inWin = lx > WX0 && lx < WX1 && ly > WY0 && ly < WY1;
+      const inWin = yInWin && lx > WX0 && lx < WX1;
       const inFrame = inWin && (lx < WX0 + FRAME || lx > WX1 - FRAME || ly < WY0 + FRAME || ly > WY1 - FRAME
         || Math.abs(lx - 0.5) < 0.012 || Math.abs(ly - 0.42) < 0.010);
 
@@ -2337,8 +2237,8 @@ function genOfficeFacade(S, seed) {
       mask[i] = m;
     }
   }
-  ctx.putImageData(img, 0, 0);
   applyMask(px, mask);
+  ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
 
@@ -2377,16 +2277,21 @@ function genApartmentFacade(S, seed) {
 
   const WX0 = 0.13, WX1 = 0.87, WY0 = 0.13, WY1 = 0.70;
   const RAIL_TOP = 0.44, RAIL_BOT = 0.74, SLAB_BOT = 0.82;
+  const fScale = FLOORS / S, cScale = COLS / S, invWin = 1 / (WY1 - WY0);
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const fy = y / S * FLOORS, fl = Math.floor(fy), ly = fy - fl;
+    const fy = y * fScale, fl = Math.floor(fy), ly = fy - fl;
+    const tRow = sat((ly - WY0) * invWin);
+    const yInWin = ly > WY0 && ly < WY1;
+    const inRail = ly > RAIL_TOP && ly < RAIL_BOT;
+    const inSlab = ly >= RAIL_BOT && ly < SLAB_BOT;
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * COLS, cl = Math.floor(fx), lx = fx - cl;
+      const fx = x * cScale, cl = Math.floor(fx), lx = fx - cl;
       const id = fl * COLS + cl;
       let r, g, b, m = 0;
 
-      const inWin = lx > WX0 && lx < WX1 && ly > WY0 && ly < WY1;
+      const inWin = yInWin && lx > WX0 && lx < WX1;
       const frame = inWin && (lx < WX0 + 0.028 || lx > WX1 - 0.028 || ly < WY0 + 0.028 || ly > WY1 - 0.028
         || Math.abs(lx - 0.5) < 0.014);
       const acBox = hasAC[id] && lx > 0.62 && lx < 0.84 && ly > 0.20 && ly < 0.33;
@@ -2425,7 +2330,7 @@ function genApartmentFacade(S, seed) {
 
       /* Balcony railing and slab drawn over everything in this bay. */
       if (hasBalcony[id]) {
-        if (ly > RAIL_TOP && ly < RAIL_BOT && lx > 0.04 && lx < 0.96) {
+        if (inRail && lx > 0.04 && lx < 0.96) {
           const bar = ((lx - 0.04) * 26) % 1;
           const isBar = bar < 0.42 || ly < RAIL_TOP + 0.045;
           if (isBar) {
@@ -2437,7 +2342,7 @@ function genApartmentFacade(S, seed) {
             r *= 0.86; g *= 0.86; b *= 0.88;
           }
         }
-        if (ly >= RAIL_BOT && ly < SLAB_BOT) {
+        if (inSlab) {
           const t = (ly - RAIL_BOT) / (SLAB_BOT - RAIL_BOT);
           const c = (200 - t * 66) + (fine[i] - 0.5) * 14;
           r = c; g = c * 0.99; b = c * 0.96;
@@ -2450,8 +2355,8 @@ function genApartmentFacade(S, seed) {
       mask[i] = m;
     }
   }
-  ctx.putImageData(img, 0, 0);
   applyMask(px, mask);
+  ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
 
@@ -2484,12 +2389,14 @@ function genGroundFloorShops(S, seed) {
   const mask = new Float32Array(S * S);
 
   const CORNICE = 0.06, SIGN0 = 0.06, SIGN1 = 0.26, GLASS0 = 0.32, GLASS1 = 0.88;
+  const invS = 1 / S, shopScale = SHOPS / S, invGlass = 1 / (GLASS1 - GLASS0);
   for (let y = 0; y < S; y++) {
     const row = y * S;
-    const v = y / S;
+    const v = y * invS;
+    const tRow = sat((v - GLASS0) * invGlass);
     for (let x = 0; x < S; x++) {
       const i = row + x;
-      const fx = x / S * SHOPS, sh = Math.floor(fx), lx = fx - sh;
+      const fx = x * shopScale, sh = Math.floor(fx), lx = fx - sh;
       let r, g, b, m = 0;
       const pier = Math.min(lx, 1 - lx) < 0.045;
 
@@ -2529,10 +2436,14 @@ function genGroundFloorShops(S, seed) {
         } else {
           /* Shop interior seen through glass: warm, uneven, emissive. */
           const t = sat3((v - GLASS0) / (GLASS1 - GLASS0), 0, 1);
-          const glow = 0.45 + interior[i] * 0.8;
-          r = (150 + interior[i] * 90) * glow * (1.1 - t * 0.35);
-          g = (128 + interior[i] * 78) * glow * (1.1 - t * 0.35);
-          b = (96 + interior[i] * 60) * glow * (1.1 - t * 0.35);
+          const glow = 0.34 + interior[i] * 0.5;
+          /* Shelving and back-wall silhouettes seen through the glass. */
+          const shelf = ((v * 9) % 1) < 0.22 ? 0.62 : 1;
+          const rack = ((lx * 14) % 1) < 0.14 ? 0.72 : 1;
+          const depth = (1.15 - t * 0.4) * shelf * rack;
+          r = (196 + interior[i] * 54) * glow * depth;
+          g = (176 + interior[i] * 52) * glow * depth;
+          b = (146 + interior[i] * 60) * glow * depth;
           /* Reflection of the street on the lower glass. */
           const refl = ss(0.35, 1.0, t) * 0.4;
           r = mix(r, 60, refl); g = mix(g, 72, refl); b = mix(b, 88, refl);
@@ -2579,6 +2490,7 @@ function genGroundFloorShops(S, seed) {
     if (d > 24) mask[i] = 1;
   }
   applyMask(outPx, mask);
+  ctx.putImageData(after, 0, 0);
   return { canvas: canvas, pixels: outPx };
 }
 
@@ -3183,8 +3095,11 @@ function genRaindrop(W, H) {
     for (let x = 0; x < W; x++) {
       const dx = Math.abs(x - cx) / (W * 0.5 * widthAt);
       const a = sat3((1 - ss(0.35, 1.0, dx)) * Math.pow(along, 0.6), 0, 1);
+      const head = t * t;
       const p = (y * W + x) * 4;
-      px[p] = 196; px[p + 1] = 216; px[p + 2] = 236;
+      px[p] = 150 + head * 96 - dx * 26;
+      px[p + 1] = 178 + head * 70 - dx * 20;
+      px[p + 2] = 208 + head * 44 - dx * 12;
       px[p + 3] = a * 235;
     }
   }
@@ -3277,7 +3192,7 @@ function genBulletHole(S, seed) {
       /* Radial cracks. */
       const sa = Math.abs(Math.sin(ang * 5.5 + dust[i] * 3.2));
       const sb = sa * sa; const sd = sb * sb; const sh = sd * sd;
-      const cr = sh * sh * sd * sb * (1 - ss(0.16, 0.62, d));
+      const cr = sh * sd * (1 - ss(0.16, 0.52, d)) * 0.85;
       const ring = (1 - ss(0.30, 0.86, d)) * (0.20 + dust[i] * 0.5);
       const a = sat(hole + rim * 0.92 + cr * 0.8 + ring * 0.42);
       const lum = mix(150, 8, sat(hole + rim * 0.8 + cr * 0.6));
@@ -3414,26 +3329,26 @@ function genSkyStars(W, H, seed) {
   /* Milky band: a slanted, wrapping ridge of glowing dust. */
   const bandAt = new Float32Array(W);
   for (let x = 0; x < W; x++) bandAt[x] = Math.sin((x / W * 2 + 0.35) * TWO_PI) * 0.16 + 0.5;
+  const invH = 1 / H;
   for (let y = 0; y < H; y++) {
     const row = y * W;
-    const v = y / H;
+    const v = y * invH;
     for (let x = 0; x < W; x++) {
       const i = row + x;
-      const band = bandAt[x];
-      const d = Math.abs(v - band);
-      const g = (1 - ss(0.02, 0.26, d)) * (0.30 + cloud[i] * 0.85) * (0.4 + dust[i] * 0.9);
-      bright[i] += g * 0.28;
+      const d = Math.abs(v - bandAt[x]);
+      if (d > 0.26) continue;
+      bright[i] = (1 - ss(0.02, 0.26, d)) * (0.30 + cloud[i] * 0.85) * (0.4 + dust[i] * 0.9) * 0.62;
     }
   }
   /* Field stars. */
-  const faint = Math.round(W * H * 0.0022);
+  const faint = Math.round(W * H * 0.0055);
   for (let i = 0; i < faint; i++) {
     const x = rng.next() * W;
     const y = rng.next() * H;
     const band = bandAt[Math.min(W - 1, x | 0)];
     const near = 1 - ss(0.02, 0.30, Math.abs(y / H - band));
-    if (rng.next() > 0.35 + near * 0.6) continue;
-    const b = rng.range(0.15, 0.75);
+    if (rng.next() > 0.45 + near * 0.55) continue;
+    const b = rng.range(0.18, 0.85);
     splatStar(bright, W, H, x, y, rng.range(0.55, 1.1), b);
     if (rng.chance(0.3)) splatStar(warm, W, H, x, y, rng.range(0.6, 1.2), b * rng.range(0.3, 1.0));
   }
@@ -3502,20 +3417,21 @@ function genNoiseBlue(S, seed) {
 }
 
 /**
- * Row centres (texture V coordinate, canvas space) of each ramp inside the
- * `gradientRamp` LUT texture. Sample with `texture2D(gradientRamp, vec2(t, v))`.
+ * Row centres of each ramp inside the `gradientRamp` LUT texture, in GL texture
+ * space (`v = 0` is the bottom of the source canvas, matching how the library
+ * uploads it). Sample with `texture(gradientRamp, vec2(t, GRADIENT_RAMP_ROWS.fire))`.
  * @type {{fog:number, fire:number, smoke:number, water:number,
  *         health:number, heat:number, neon:number, sunset:number}}
  */
 export const GRADIENT_RAMP_ROWS = {
-  fog: 0.0625,
-  fire: 0.1875,
-  smoke: 0.3125,
-  water: 0.4375,
-  health: 0.5625,
-  heat: 0.6875,
-  neon: 0.8125,
-  sunset: 0.9375
+  fog: 0.9375,
+  fire: 0.8125,
+  smoke: 0.6875,
+  water: 0.5625,
+  health: 0.4375,
+  heat: 0.3125,
+  neon: 0.1875,
+  sunset: 0.0625
 };
 
 /** Stop tables for {@link genGradientRamp}: `[t, r, g, b, a]`. */
@@ -3583,8 +3499,9 @@ function nowMs() {
  * Uploads a generated canvas as a GPU texture.
  * Textures whose alpha carries data (emissive masks, cut-outs, LUT alpha) are
  * uploaded from the raw pixel buffer instead of the canvas, because canvas
- * back-buffers store premultiplied colour and would destroy RGB wherever
- * alpha is zero.
+ * back-buffers store premultiplied colour and would destroy RGB wherever alpha
+ * is zero. The raw path is uploaded with `flipY: true` so it matches the
+ * orientation `Texture2D.fromCanvas` gives every other texture.
  * @param {WebGL2RenderingContext} gl GL context.
  * @param {HTMLCanvasElement|OffscreenCanvas} canvas Source canvas.
  * @param {Uint8ClampedArray|null} pixels Raw RGBA pixels (used when `opts.alphaMask`).
@@ -3608,7 +3525,9 @@ function makeTexture(gl, canvas, pixels, opts) {
         filter: filter,
         mipmaps: mipmaps,
         anisotropy: anisotropy,
-        srgb: srgb
+        srgb: srgb,
+        /* Match Texture2D.fromCanvas: the canvas top row maps to v = 1. */
+        flipY: true
       });
     } catch (err) {
       /* Fall back to the canvas path if the data path is unavailable. */
@@ -3635,8 +3554,8 @@ function makeTexture(gl, canvas, pixels, opts) {
  * @param {number} [opts.seed] Deterministic seed (default 1337).
  * @param {number} [opts.anisotropy] Anisotropic filtering level for tiling maps (default 8).
  * @returns {object} The texture library: one {@link Texture2D} per documented key plus
- *   `canvases` (raw canvases for the minimap / UI), `stats` `{count, bytes, ms}`
- *   and `dispose()`.
+ *   `canvases` (the raw canvases, so the minimap and UI can reuse them),
+ *   `stats` `{count, bytes, ms, perTexture}`, `size`, `seed` and `dispose()`.
  */
 export function buildTextureLibrary(gl, opts) {
   const o = opts || {};
@@ -3652,6 +3571,7 @@ export function buildTextureLibrary(gl, opts) {
   const textures = {};
   const timings = {};
   let bytes = 0;
+  let mark = t0;
 
   /**
    * Registers one generated canvas as a texture.
@@ -3660,20 +3580,14 @@ export function buildTextureLibrary(gl, opts) {
    * @param {object} texOpts Upload options (see {@link makeTexture}).
    * @returns {void}
    */
-  const add = (name, res, texOpts, startedAt) => {
+  const add = (name, res, texOpts) => {
     canvases[name] = res.canvas;
     textures[name] = makeTexture(gl, res.canvas, res.pixels || null, texOpts);
     const area = res.canvas.width * res.canvas.height * 4;
     bytes += texOpts.mipmaps === false ? area : Math.round(area * 4 / 3);
-    if (startedAt !== undefined) timings[name] = Math.round((nowMs() - startedAt) * 10) / 10;
+    timings[name] = Math.round((nowMs() - mark) * 10) / 10;
+    mark = nowMs();
   };
-
-  let _markT = nowMs();
-  /**
-   * Returns the timestamp of the previous mark and restarts the clock.
-   * @returns {number} Start time of the texture just generated.
-   */
-  const _mark = () => { const v = _markT; _markT = nowMs(); return v; };
 
   /** Common option sets. */
   const TILE = { srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso };
@@ -3684,77 +3598,77 @@ export function buildTextureLibrary(gl, opts) {
 
   /* --- roads and ground ------------------------------------------------- */
   const asphalt = genAsphalt(S, seed);
-  add('asphalt', asphalt, TILE, _mark());
-  add('asphalt_n', materialNormal(asphalt.height, S, 2.4), NORMAL, _mark());
-  add('roadLines', genRoadLines(S, seed + 1), TILE_MASK, _mark());
+  add('asphalt', asphalt, TILE);
+  add('asphalt_n', materialNormal(asphalt.height, S, 2.0), NORMAL);
+  add('roadLines', genRoadLines(S, seed + 1), TILE_MASK);
 
   const sidewalk = genSidewalk(S, seed + 2);
-  add('sidewalk', sidewalk, TILE, _mark());
-  add('sidewalk_n', materialNormal(sidewalk.height, S, 3.0), NORMAL, _mark());
+  add('sidewalk', sidewalk, TILE);
+  add('sidewalk_n', materialNormal(sidewalk.height, S, 4.0), NORMAL);
 
   const concrete = genConcrete(S, seed + 3);
-  add('concrete', concrete, TILE, _mark());
-  add('concrete_n', materialNormal(concrete.height, S, 2.0), NORMAL, _mark());
+  add('concrete', concrete, TILE);
+  add('concrete_n', materialNormal(concrete.height, S, 2.8), NORMAL);
 
   const brick = genBrick(S, seed + 4);
-  add('brick', brick, TILE, _mark());
-  add('brick_n', materialNormal(brick.height, S, 3.4), NORMAL, _mark());
+  add('brick', brick, TILE);
+  add('brick_n', materialNormal(brick.height, S, 4.5), NORMAL);
 
   const metal = genMetal(S, seed + 5);
-  add('metal', metal, TILE, _mark());
-  add('metal_n', materialNormal(metal.height, S, 2.6), NORMAL, _mark());
+  add('metal', metal, TILE);
+  add('metal_n', materialNormal(metal.height, S, 3.4), NORMAL);
 
-  add('roofGravel', genRoofGravel(S, seed + 6), TILE, _mark());
-  add('tileFloor', genTileFloor(S, seed + 7), TILE, _mark());
-  add('grass', genGrass(S, seed + 8), TILE, _mark());
-  add('dirt', genDirt(S, seed + 9), TILE, _mark());
-  add('sand', genSand(S, seed + 10), TILE, _mark());
+  add('roofGravel', genRoofGravel(S, seed + 6), TILE);
+  add('tileFloor', genTileFloor(S, seed + 7), TILE);
+  add('grass', genGrass(S, seed + 8), TILE);
+  add('dirt', genDirt(S, seed + 9), TILE);
+  add('sand', genSand(S, seed + 10), TILE);
 
   const water = genWater(S, seed + 11);
-  add('water', water, TILE, _mark());
-  add('waterNormal', materialNormal(water.height, S, 3.2), NORMAL, _mark());
+  add('water', water, TILE);
+  add('waterNormal', materialNormal(water.height, S, 4.0), NORMAL);
 
   /* --- vegetation and vehicles ------------------------------------------ */
-  add('treeBark', genTreeBark(S, seed + 12), TILE, _mark());
-  add('leaves', genLeaves(S, seed + 13), CARD, _mark());
-  add('carPaintNoise', genCarPaintNoise(Math.max(128, S >> 1), seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso }, _mark());
-  add('tire', genTire(S, seed + 15), TILE, _mark());
-  add('chrome', genChrome(Math.max(128, S >> 1), seed + 16), CARD_OPAQUE, _mark());
+  add('treeBark', genTreeBark(S, seed + 12), TILE);
+  add('leaves', genLeaves(S, seed + 13), CARD);
+  add('carPaintNoise', genCarPaintNoise(Math.max(128, S >> 1), seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso });
+  add('tire', genTire(S, seed + 15), TILE);
+  add('chrome', genChrome(Math.max(128, S >> 1), seed + 16), CARD_OPAQUE);
 
   /* --- facades (alpha = emissive window mask) --------------------------- */
-  add('glassFacade', genGlassFacade(S, seed + 20), TILE_MASK, _mark());
-  add('officeFacade', genOfficeFacade(S, seed + 21), TILE_MASK, _mark());
-  add('apartmentFacade', genApartmentFacade(S, seed + 22), TILE_MASK, _mark());
-  add('groundFloorShops', genGroundFloorShops(S, seed + 23), TILE_MASK, _mark());
+  add('glassFacade', genGlassFacade(S, seed + 20), TILE_MASK);
+  add('officeFacade', genOfficeFacade(S, seed + 21), TILE_MASK);
+  add('apartmentFacade', genApartmentFacade(S, seed + 22), TILE_MASK);
+  add('groundFloorShops', genGroundFloorShops(S, seed + 23), TILE_MASK);
 
   /* --- signage ---------------------------------------------------------- */
-  for (let i = 1; i <= 3; i++) add('neonSign' + i, genNeonSign(i, S, seed + 30 + i), CARD, _mark());
-  for (let i = 1; i <= 4; i++) add('billboard' + i, genBillboard(i, S, seed + 40 + i), CARD_OPAQUE, _mark());
-  for (let i = 1; i <= 2; i++) add('graffiti' + i, genGraffiti(i, S, seed + 50 + i), CARD, _mark());
+  for (let i = 1; i <= 3; i++) add('neonSign' + i, genNeonSign(i, S, seed + 30 + i), CARD);
+  for (let i = 1; i <= 4; i++) add('billboard' + i, genBillboard(i, S, seed + 40 + i), CARD_OPAQUE);
+  for (let i = 1; i <= 2; i++) add('graffiti' + i, genGraffiti(i, S, seed + 50 + i), CARD);
 
   /* --- particles -------------------------------------------------------- */
-  add('smoke', genSmoke(P, seed + 60), CARD, _mark());
-  add('spark', genSpark(P), CARD, _mark());
-  add('flash', genFlash(P), CARD, _mark());
-  add('blood', genBlood(P, seed + 61), CARD, _mark());
-  add('glassShard', genGlassShard(P), CARD, _mark());
-  add('raindrop', genRaindrop(Math.max(16, P >> 2), P), CARD, _mark());
-  add('muzzle', genMuzzle(P, seed + 62), CARD, _mark());
+  add('smoke', genSmoke(P, seed + 60), CARD);
+  add('spark', genSpark(P), CARD);
+  add('flash', genFlash(P), CARD);
+  add('blood', genBlood(P, seed + 61), CARD);
+  add('glassShard', genGlassShard(P), CARD);
+  add('raindrop', genRaindrop(Math.max(16, P >> 2), P), CARD);
+  add('muzzle', genMuzzle(P, seed + 62), CARD);
 
   /* --- decals ----------------------------------------------------------- */
-  add('decalBulletHole', genBulletHole(D, seed + 70), CARD, _mark());
-  add('decalCrack', genCrackDecal(D, seed + 71), CARD, _mark());
+  add('decalBulletHole', genBulletHole(D, seed + 70), CARD);
+  add('decalCrack', genCrackDecal(D, seed + 71), CARD);
 
   /* --- sky and lookup tables -------------------------------------------- */
   add('skyStars', genSkyStars(S * 2, S, seed + 80), {
     srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso, alphaMask: true
-  }, _mark());
+  });
   add('noiseBlue', genNoiseBlue(64, seed + 81), {
     srgb: false, wrap: 'repeat', mipmaps: false, filter: 'nearest', anisotropy: 1
-  }, _mark());
+  });
   add('gradientRamp', genGradientRamp(256, 64), {
     srgb: false, wrap: 'clamp', mipmaps: false, filter: 'linear', anisotropy: 1, alphaMask: true
-  }, _mark());
+  });
 
   const keys = Object.keys(textures);
   const library = textures;

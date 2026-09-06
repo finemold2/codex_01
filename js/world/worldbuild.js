@@ -20,18 +20,18 @@
  * @module world/worldbuild
  */
 
-import {
-  box as boxGeo, cylinder as cylinderGeo, cone as coneGeo, sphere as sphereGeo,
-  torus as torusGeo, capsule as capsuleGeo
-} from '../core/geometry.js';
+import { cylinder as cylinderGeo, cone as coneGeo, sphere as sphereGeo } from '../core/geometry.js';
 import { Rand, clamp, lerp, smoothstep } from '../core/math.js';
+import { createMaterial as makeMaterial, updateMaterial as patchMaterialDesc } from '../render/materials.js';
 import * as TEXLIB from '../render/textures.js';
 import * as COLLISION from './collision.js';
 
 /* ------------------------------------------------------------------ tuning */
 
-/** Height of the sidewalk slab above the road surface (m). */
-const SIDEWALK_H = 0.15;
+/** Height of the sidewalk slab above the road surface (m); overridden by `city.sidewalkHeight`. */
+let SIDEWALK_H = 0.15;
+/** Width of the paved strip along a block edge (m); overridden by `city.sidewalkWidth`. */
+let WALK_W = 3.0;
 /** Road surface height (m). Terrain is pushed slightly below it. */
 const ROAD_Y = 0.0;
 /** Painted markings sit this far above the asphalt to avoid z-fighting (m). */
@@ -54,8 +54,10 @@ const LIGHT_RADIUS = 90;
 const MAX_WORLD_LIGHTS = 12;
 /** Traffic light timings (s): green, amber, all-red. */
 const TL_GREEN = 9.5, TL_AMBER = 3.0, TL_RED = 1.7;
+/** One half of the cycle: one axis green, amber, then all-red (s). */
+const TL_SEG = TL_GREEN + TL_AMBER + TL_RED;
 /** Full traffic light cycle length (s). */
-const TL_CYCLE = (TL_GREEN + TL_AMBER + TL_RED) * 2;
+const TL_CYCLE = TL_SEG * 2;
 
 /** Face bit flags for {@link MeshBuilder#addBox}. */
 const FX = 1, NX = 2, PY = 4, NY = 8, PZ = 16, NZ = 32;
@@ -587,6 +589,10 @@ class MeshBuilder {
 /** Neutral vertex colour. */
 const WHITE = [1, 1, 1];
 
+/** Reusable material patches so the per-frame update never allocates. */
+const _patchGlow = { emissiveStrength: 1, albedo: [1, 1, 1] };
+const _patchUv = { uvOffset: null };
+
 /* ----------------------------------------------------------------- terrain */
 
 /**
@@ -647,7 +653,8 @@ class Terrain {
         if (len > bestD) { bestD = len; bx = dx; bz = dz; }
       }
       if (bestD > 1) {
-        if (Math.abs(bx) >= Math.abs(bz)) { sx = Math.sign(bx) || 1; sz = 0; } else { sx = 0; sz = Math.sign(bz) || 1; }
+        if (Math.abs(bx) >= Math.abs(bz)) { sx = Math.sign(bx) || 1; sz = 0; }
+        else { sx = 0; sz = Math.sign(bz) || 1; }
       }
     }
     this.seaDirX = sx;
@@ -911,11 +918,7 @@ class LotIndex {
 function buildMaterials(renderer, textures) {
   const make = (desc) => (typeof renderer.createMaterial === 'function'
     ? renderer.createMaterial(desc)
-    : Object.assign({
-      albedo: [1, 1, 1], roughness: 0.85, metallic: 0, emissive: [0, 0, 0], emissiveStrength: 1,
-      uvScale: [1, 1], uvOffset: [0, 0], alpha: 1, blend: 'opaque', doubleSided: false,
-      castShadow: true, receiveShadow: true, vertexColors: false, windowGlow: 0
-    }, desc));
+    : makeMaterial(desc));
   const T = (...n) => pickTex(textures, ...n);
 
   const mats = {};
@@ -932,7 +935,7 @@ function buildMaterials(renderer, textures) {
   });
   mats.water = make({
     name: 'water', map: T('water'), normalMap: T('waterNormal', 'water_n'),
-    uvScale: [0.02, 0.02], roughness: 0.09, metallic: 0.0, reflectivity: 0.22,
+    uvScale: [0.02, 0.02], roughness: 0.09, metallic: 0.0, reflectance: 0.85,
     albedo: [0.09, 0.19, 0.24], alpha: 0.86, blend: 'alpha', doubleSided: true,
     castShadow: false, vertexColors: false, wetness: 1
   });
@@ -942,7 +945,7 @@ function buildMaterials(renderer, textures) {
   });
   mats.mark = make({
     name: 'roadMark', map: T('roadLines'), blend: 'alpha', depthWrite: false, sortBias: -4,
-    roughness: 0.62, vertexColors: true, castShadow: false, receiveShadow: true
+    alphaTest: 0.06, roughness: 0.62, vertexColors: true, castShadow: false, receiveShadow: true
   });
   mats.sidewalk = make({
     name: 'sidewalk', map: T('sidewalk', 'concrete'), normalMap: T('sidewalk_n', 'concrete_n'),
@@ -958,7 +961,7 @@ function buildMaterials(renderer, textures) {
   });
   mats.facadeGlass = make({
     name: 'facadeGlass', map: T('glassFacade', 'officeFacade'), uvScale: [1, 1],
-    roughness: 0.22, metallic: 0.08, reflectivity: 0.09, vertexColors: true, windowGlow: 1
+    roughness: 0.22, metallic: 0.08, reflectance: 0.62, vertexColors: true, windowGlow: 1
   });
   mats.facadeOffice = make({
     name: 'facadeOffice', map: T('officeFacade', 'glassFacade'), uvScale: [1, 1],
@@ -977,8 +980,8 @@ function buildMaterials(renderer, textures) {
     uvScale: [1, 1], roughness: 0.9, vertexColors: true
   });
   mats.shop = make({
-    name: 'shopfront', map: T('shopFacade', 'shopfront', 'storefront', 'groundFloor', 'tileFloor', 'glassFacade'),
-    uvScale: [1, 1], roughness: 0.35, reflectivity: 0.07, vertexColors: true, windowGlow: 0.55
+    name: 'shopfront', map: T('groundFloorShops', 'shopFacade', 'storefront', 'tileFloor', 'glassFacade'),
+    uvScale: [1, 1], roughness: 0.35, reflectance: 0.6, vertexColors: true, windowGlow: 0.55
   });
   mats.roof = make({
     name: 'roof', map: T('roofGravel', 'concrete'), uvScale: [1, 1], roughness: 0.96,
@@ -990,14 +993,14 @@ function buildMaterials(renderer, textures) {
   });
   mats.glassPanel = make({
     name: 'glassPanel', albedo: [0.42, 0.55, 0.62], roughness: 0.08, metallic: 0.0,
-    reflectivity: 0.2, alpha: 0.32, blend: 'alpha', doubleSided: true, castShadow: false,
+    reflectance: 0.75, alpha: 0.32, blend: 'alpha', doubleSided: true, castShadow: false,
     vertexColors: true
   });
   for (let i = 0; i < 3; i++) {
     mats['neon' + i] = make({
       name: 'neon' + i, map: T('neonSign' + (i + 1), 'neonSign1'), unlit: true,
-      vertexColors: true, emissive: [1, 1, 1], emissiveStrength: 1.7, roughness: 0.4,
-      castShadow: false, doubleSided: false
+      vertexColors: true, emissive: [0.5, 0.5, 0.5], emissiveStrength: 0.6, roughness: 0.4,
+      alphaTest: 0.4, castShadow: false, doubleSided: false
     });
   }
   for (let i = 0; i < 2; i++) {
@@ -1018,10 +1021,10 @@ function buildMaterials(renderer, textures) {
   });
   mats.propLeaf = make({
     name: 'foliage', map: T('leaves', 'grass'), uvScale: [1, 1], roughness: 0.86,
-    vertexColors: true, doubleSided: true
+    alphaTest: 0.35, vertexColors: true, doubleSided: true
   });
   mats.propGlass = make({
-    name: 'propGlass', albedo: [0.5, 0.62, 0.68], roughness: 0.07, reflectivity: 0.2,
+    name: 'propGlass', albedo: [0.5, 0.62, 0.68], roughness: 0.07, reflectance: 0.75,
     alpha: 0.3, blend: 'alpha', doubleSided: true, castShadow: false, vertexColors: true
   });
   mats.propLamp = make({
@@ -1053,10 +1056,7 @@ function buildMaterials(renderer, textures) {
 function patchMaterial(renderer, mat, patch) {
   if (!mat) return;
   if (typeof renderer.updateMaterial === 'function') { renderer.updateMaterial(mat, patch); return; }
-  const keys = Object.keys(patch);
-  for (let i = 0; i < keys.length; i++) mat[keys[i]] = patch[keys[i]];
-  if (typeof mat.version === 'number') mat.version++;
-  mat.dirty = true;
+  patchMaterialDesc(mat, patch);
 }
 
 /* --------------------------------------------------------- ground & water */
@@ -1081,7 +1081,7 @@ function glRect(r) {
  * @returns {number[]} out
  */
 function groundTint(bc, x, z, h, out) {
-  const d = districtAtPoint(bc, x, z);
+  const d = districtFast(bc, x, z);
   const base = (d && DISTRICT_GROUND[d.kind]) || DISTRICT_GROUND.residential;
   const n = fbm(x * 0.035, z * 0.035, bc.seed + 991, 3);
   const k = 0.72 + n * 0.55;
@@ -1106,6 +1106,44 @@ function groundTint(bc, x, z, h, out) {
     }
   }
   return out;
+}
+
+/**
+ * Builds a coarse lookup grid of district ids so the terrain mesh does not rescan every
+ * district rectangle for each of its tens of thousands of vertices.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildDistrictGrid(bc) {
+  const t = bc.terrain;
+  const cell = 24;
+  const nx = Math.ceil((t.maxX - t.minX) / cell) + 1;
+  const nz = Math.ceil((t.maxZ - t.minZ) / cell) + 1;
+  const ids = new Int16Array(nx * nz);
+  for (let j = 0; j < nz; j++) {
+    const z = t.minZ + j * cell;
+    for (let i = 0; i < nx; i++) {
+      const d = districtAtPoint(bc, t.minX + i * cell, z);
+      ids[j * nx + i] = d ? d.id : -1;
+    }
+  }
+  bc.districtGrid = { minX: t.minX, minZ: t.minZ, cell, nx, nz, ids };
+}
+
+/**
+ * Looks a district up through the coarse grid, falling back to the rectangle scan.
+ * @param {object} bc Build context.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @returns {object|null} District or null.
+ */
+function districtFast(bc, x, z) {
+  const g = bc.districtGrid;
+  if (!g) return districtAtPoint(bc, x, z);
+  const i = clamp(Math.round((x - g.minX) / g.cell), 0, g.nx - 1);
+  const j = clamp(Math.round((z - g.minZ) / g.cell), 0, g.nz - 1);
+  const id = g.ids[j * g.nx + i];
+  return id < 0 ? null : bc.city.districts[id];
 }
 
 /**
@@ -1157,25 +1195,35 @@ function buildTerrainMesh(bc) {
       const i0 = px * perX, i1 = Math.min(nx, i0 + perX);
       const j0 = pz * perZ, j1 = Math.min(nz, j0 + perZ);
       if (i0 >= i1 || j0 >= j1) continue;
-      const mb = new MeshBuilder((i1 - i0 + 1) * (j1 - j0 + 1));
       const w = i1 - i0 + 1;
-      for (let j = j0; j <= j1; j++) {
-        const z = t.minZ + j * cell;
-        for (let i = i0; i <= i1; i++) {
-          const x = t.minX + i * cell;
-          const h = t.height(x, z);
+      const hgt = j1 - j0 + 1;
+      const mb = new MeshBuilder(w * hgt);
+      // Sample the height field once per point (plus a one cell border) and take the
+      // normals from that cache instead of four extra samples per vertex.
+      const hs = new Float32Array((w + 2) * (hgt + 2));
+      for (let j = -1; j <= hgt; j++) {
+        const z = t.minZ + (j0 + j) * cell;
+        for (let i = -1; i <= w; i++) {
+          hs[(j + 1) * (w + 2) + (i + 1)] = t.height(t.minX + (i0 + i) * cell, z);
+        }
+      }
+      for (let j = 0; j < hgt; j++) {
+        const z = t.minZ + (j0 + j) * cell;
+        for (let i = 0; i < w; i++) {
+          const x = t.minX + (i0 + i) * cell;
+          const k = (j + 1) * (w + 2) + (i + 1);
+          const h = hs[k];
           groundTint(bc, x, z, h, col);
-          // Normal from central differences on the height field.
-          const hx = t.height(x + cell, z) - t.height(x - cell, z);
-          const hz = t.height(x, z + cell) - t.height(x, z - cell);
-          const nxv = -hx, nyv = 2 * cell, nzv = -hz;
+          const nxv = hs[k - 1] - hs[k + 1];
+          const nzv = hs[k - (w + 2)] - hs[k + (w + 2)];
+          const nyv = 2 * cell;
           const len = Math.hypot(nxv, nyv, nzv) || 1;
           mb.vert(x, h - GROUND_DROP, z, nxv / len, nyv / len, nzv / len,
             x * 0.08, z * 0.08, col[0], col[1], col[2]);
         }
       }
-      for (let j = 0; j < j1 - j0; j++) {
-        for (let i = 0; i < i1 - i0; i++) {
+      for (let j = 0; j + 1 < hgt; j++) {
+        for (let i = 0; i + 1 < w; i++) {
           const a = j * w + i;
           mb.quad(a, a + w, a + w + 1, a + 1);
         }
@@ -1225,6 +1273,38 @@ function buildWaterMesh(bc) {
   if (typeof bc.renderer.addStatic === 'function') {
     const id = bc.renderer.addStatic(geo, bc.mats.water);
     if (id !== undefined && id !== null) bc.staticIds.push(id);
+  }
+}
+
+/**
+ * Adds non-solid `water` volumes over every water lot so gameplay code can ask "am I in the
+ * sea" with a sphere query. `collision.js` treats the `water` tag as non-solid, so these never
+ * affect movement or `groundHeight` — the sea bed comes from the terrain function.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildWaterBodies(bc) {
+  const wl = bc.terrain.waterLevel;
+  if (wl === null || !bc.collision) return;
+  const lots = bc.city.lots || [];
+  const tile = 128;
+  for (let i = 0; i < lots.length; i++) {
+    const l = lots[i];
+    if (l.kind !== 'water' && l.surface !== 'water') continue;
+    const x0 = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
+    const z0 = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
+    const x1 = l.x1 !== undefined ? l.x1 : l.x + l.w * 0.5;
+    const z1 = l.z1 !== undefined ? l.z1 : l.z + l.d * 0.5;
+    const nx = Math.max(1, Math.ceil((x1 - x0) / tile));
+    const nz = Math.max(1, Math.ceil((z1 - z0) / tile));
+    const sx = (x1 - x0) / nx, sz = (z1 - z0) / nz;
+    for (let j = 0; j < nz; j++) {
+      for (let k = 0; k < nx; k++) {
+        const cx = x0 + (k + 0.5) * sx, cz = z0 + (j + 0.5) * sz;
+        bc.bodies.push(bc.collision.addBox(cx, wl - 6, cz, sx * 0.5, 6, sz * 0.5, 0,
+          'water', { lotId: l.id, waterLevel: wl }));
+      }
+    }
   }
 }
 
@@ -1329,8 +1409,8 @@ function buildRoadMarkings(bc) {
     if (nb && Math.hypot(nb.x - r.bx, nb.z - r.bz) < 1.2) t1 = len - (bc.nodeHalf[r.nodeB] + 3.2);
     if (t1 - t0 < 4) continue;
 
-    // Centre line: double yellow when the road carries opposing traffic, otherwise nothing.
-    if (lanesPerDir >= 1 && r.kind !== 'turn') {
+    // Centre line: double yellow wherever opposing traffic meets, wider on avenues.
+    if (lanesPerDir >= 1 && r.kind !== 'turn' && r.kind !== 'link') {
       const segLen = t1 - t0;
       const cx = r.ax + ux * (t0 + segLen * 0.5);
       const cz = r.az + uz * (t0 + segLen * 0.5);
@@ -1340,7 +1420,8 @@ function buildRoadMarkings(bc) {
       const cl = segLen / chunks;
       for (let c = 0; c < chunks; c++) {
         const s = t0 + cl * (c + 0.5);
-        mb.addOrientedQuad(r.ax + ux * s, r.az + uz * s, MARK_Y, 0.7, cl * 0.5, ux, uz, R.doubleYellow, white);
+        mb.addOrientedQuad(r.ax + ux * s, r.az + uz * s, MARK_Y, r.width >= 18 ? 0.72 : 0.46,
+          cl * 0.5, ux, uz, R.doubleYellow, white);
       }
     }
 
@@ -1394,21 +1475,25 @@ function buildRoadMarkings(bc) {
       const px = n.x + outX * cw, pz = n.z + outZ * cw;
       const mb = bc.coarse.at(px, pz, 'mark');
       mb.addOrientedQuad(px, pz, MARK_Y, w * 0.5, 1.9, outX, outZ, R.crosswalk, white);
-      // Stop bar for the traffic coming towards the node: right half of the carriageway.
+      // Stop bar for the traffic coming towards the node. With right-hand traffic those lanes
+      // are on the -r side of the centreline, where r is the right vector of the outward
+      // direction (right(d) = (-d.z, d.x), so right of the incoming direction is -r).
       const sx = n.x + outX * (cw + 2.6), sz = n.z + outZ * (cw + 2.6);
       const rx = -outZ, rz = outX;
-      const bx = sx + rx * w * 0.25, bz = sz + rz * w * 0.25;
+      const bx = sx - rx * w * 0.25, bz = sz - rz * w * 0.25;
       bc.coarse.at(bx, bz, 'mark')
         .addOrientedQuad(bx, bz, MARK_Y, w * 0.25, 0.5, outX, outZ, R.stopBar, white);
       if (signalled && w >= 11) {
-        // Lane arrows pointing into the junction (so drawn facing -out).
+        // Lane arrows pointing into the junction: left turn nearest the centreline, right
+        // turn nearest the kerb.
         const lanes = Math.max(1, Math.round(w / 7));
         for (let l = 0; l < lanes; l++) {
           const t = (l + 0.5) / lanes;
-          const off = w * 0.25 * (t * 2 - 1) + w * 0.25;
+          const off = -(w * 0.25 * (t * 2 - 1) + w * 0.25);
           const ax2 = sx + rx * off + outX * 6.5;
           const az2 = sz + rz * off + outZ * 6.5;
-          const rect = l === 0 ? R.arrowRight : (l === lanes - 1 && lanes > 2 ? R.arrowLeft : R.arrowStraight);
+          const rect = lanes > 1 && l === 0 ? R.arrowLeft
+            : (lanes > 2 && l === lanes - 1 ? R.arrowRight : R.arrowStraight);
           bc.coarse.at(ax2, az2, 'mark')
             .addOrientedQuad(ax2, az2, MARK_Y, 1.25, 1.7, -outX, -outZ, rect, white);
         }
@@ -1442,8 +1527,37 @@ function pushPoly(mb, pts, color, uvScale) {
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
     let u, v;
-    if (ay >= ax && ay >= az) { u = p[0]; v = p[2]; } else if (ax >= az) { u = p[2]; v = p[1]; } else { u = p[0]; v = p[1]; }
+    if (ay >= ax && ay >= az) { u = p[0]; v = p[2]; }
+    else if (ax >= az) { u = p[2]; v = p[1]; }
+    else { u = p[0]; v = p[1]; }
     mb.vert(p[0], p[1], p[2], nx, ny, nz, u * uvScale, v * uvScale, color[0], color[1], color[2]);
+  }
+  for (let i = 2; i < pts.length; i++) mb.tri(base, base + i - 1, base + i);
+}
+
+/**
+ * Emits a convex polygon with explicit UVs (used where a clamped card texture must be mapped
+ * exactly, e.g. palm fronds).
+ * @param {MeshBuilder} mb Target builder.
+ * @param {number[][]} pts World-space points in CCW order.
+ * @param {number[][]} uvs One `[u, v]` per point.
+ * @param {number[]} color Vertex colour.
+ * @returns {void}
+ */
+function pushPolyUV(mb, pts, uvs, color) {
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    nx += (a[1] - b[1]) * (a[2] + b[2]);
+    ny += (a[2] - b[2]) * (a[0] + b[0]);
+    nz += (a[0] - b[0]) * (a[1] + b[1]);
+  }
+  const len = Math.hypot(nx, ny, nz) || 1;
+  nx /= len; ny /= len; nz /= len;
+  const base = mb.vcount;
+  for (let i = 0; i < pts.length; i++) {
+    mb.vert(pts[i][0], pts[i][1], pts[i][2], nx, ny, nz, uvs[i][0], uvs[i][1],
+      color[0], color[1], color[2]);
   }
   for (let i = 2; i < pts.length; i++) mb.tri(base, base + i - 1, base + i);
 }
@@ -1474,7 +1588,7 @@ function buildLotSurfaces(bc) {
     if (x0 < rb[0] - 6 || z0 < rb[1] - 6 || x1 > rb[2] + 6 || z1 > rb[3] + 6) continue;
     const w = x1 - x0, d = z1 - z0;
     if (w < 4 || d < 4) continue;
-    bc.raised[i] = 1;
+    bc.raised[l.id] = 1;
 
     const cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
     const kerb = bc.coarse.at(cx, cz, 'kerb');
@@ -1482,15 +1596,16 @@ function buildLotSurfaces(bc) {
     const kc = [kerbCol[0] * shade, kerbCol[1] * shade, kerbCol[2] * shade];
     // Kerb ring: four boxes so the vertical face reads as a real kerb from the road.
     const kh = (SIDEWALK_H + 0.02) * 0.5;
-    kerb.addBox(cx, kh, z0 + KERB_W * 0.5, w * 0.5, kh, KERB_W * 0.5, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
-    kerb.addBox(cx, kh, z1 - KERB_W * 0.5, w * 0.5, kh, KERB_W * 0.5, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
-    kerb.addBox(x0 + KERB_W * 0.5, kh, cz, KERB_W * 0.5, kh, d * 0.5 - KERB_W, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
-    kerb.addBox(x1 - KERB_W * 0.5, kh, cz, KERB_W * 0.5, kh, d * 0.5 - KERB_W, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
+    const kopt = { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY };
+    kerb.addBox(cx, kh, z0 + KERB_W * 0.5, w * 0.5, kh, KERB_W * 0.5, 0, kopt);
+    kerb.addBox(cx, kh, z1 - KERB_W * 0.5, w * 0.5, kh, KERB_W * 0.5, 0, kopt);
+    kerb.addBox(x0 + KERB_W * 0.5, kh, cz, KERB_W * 0.5, kh, d * 0.5 - KERB_W, 0, kopt);
+    kerb.addBox(x1 - KERB_W * 0.5, kh, cz, KERB_W * 0.5, kh, d * 0.5 - KERB_W, 0, kopt);
 
     const ix0 = x0 + KERB_W, iz0 = z0 + KERB_W, ix1 = x1 - KERB_W, iz1 = z1 - KERB_W;
-    const walkW = Math.min(3.0 - KERB_W, Math.min(w, d) * 0.24);
+    const walkW = Math.min(Math.max(0.8, WALK_W - KERB_W), Math.min(w, d) * 0.24);
     const surf = l.surface || 'concrete';
-    const interiorKey = l.kind === 'park' ? (surf === 'grass' ? 'grass' : 'terrain')
+    const interiorKey = l.kind === 'park' ? 'grass'
       : l.kind === 'parking' ? 'asphalt'
         : l.kind === 'plaza' ? 'plaza' : null;
     const uvWalk = 1 / 3.6;
@@ -1507,7 +1622,9 @@ function buildLotSurfaces(bc) {
       sw.addFlatQuad(ix0, jz1, ix1, iz1, SIDEWALK_H, ix0 * uvWalk, jz1 * uvWalk, ix1 * uvWalk, iz1 * uvWalk, walkCol);
       sw.addFlatQuad(ix0, jz0, jx0, jz1, SIDEWALK_H, ix0 * uvWalk, jz0 * uvWalk, jx0 * uvWalk, jz1 * uvWalk, walkCol);
       sw.addFlatQuad(jx1, jz0, ix1, jz1, SIDEWALK_H, jx1 * uvWalk, jz0 * uvWalk, ix1 * uvWalk, jz1 * uvWalk, walkCol);
-      const col = interiorKey === 'grass' ? grassCol : interiorKey === 'asphalt' ? asphaltCol : plazaCol;
+      let col = interiorKey === 'grass' ? grassCol : interiorKey === 'asphalt' ? asphaltCol : plazaCol;
+      if (surf === 'gravel') col = [0.78, 0.74, 0.66];
+      else if (surf === 'sand') col = [1.05, 0.95, 0.72];
       const uv = interiorKey === 'grass' ? 1 / 7 : interiorKey === 'asphalt' ? 1 / 9 : 1 / 3;
       bc.coarse.at(cx, cz, interiorKey)
         .addFlatQuad(jx0, jz0, jx1, jz1, SIDEWALK_H, jx0 * uv, jz0 * uv, jx1 * uv, jz1 * uv, col);
@@ -1590,21 +1707,24 @@ function addHipRoof(bc, b, y0, rise, ov, color) {
   const P = (lx, ly, lz) => { localXZ(b, lx, lz, p); return [p[0], ly, p[1]]; };
   const y1 = y0 + rise;
   const c0 = P(-W, y0, -D), c1 = P(W, y0, -D), c2 = P(W, y0, D), c3 = P(-W, y0, D);
+  // Winding is clockwise in the authored order, so every face is emitted reversed to put the
+  // Newell normal on the outside.
   if (along) {
     const r0 = P(-ridge, y1, 0), r1 = P(ridge, y1, 0);
-    pushPoly(mb, [c0, c1, r1, r0], color, 0.5);
-    pushPoly(mb, [c2, c3, r0, r1], color, 0.5);
-    pushPoly(mb, [c1, c2, r1], color, 0.5);
-    pushPoly(mb, [c3, c0, r0], color, 0.5);
+    pushPoly(mb, [r0, r1, c1, c0], color, 0.5);
+    pushPoly(mb, [r1, r0, c3, c2], color, 0.5);
+    pushPoly(mb, [r1, c2, c1], color, 0.5);
+    pushPoly(mb, [r0, c0, c3], color, 0.5);
   } else {
     const r0 = P(0, y1, -ridge), r1 = P(0, y1, ridge);
-    pushPoly(mb, [c1, c2, r1, r0], color, 0.5);
-    pushPoly(mb, [c3, c0, r0, r1], color, 0.5);
-    pushPoly(mb, [c0, c1, r0], color, 0.5);
-    pushPoly(mb, [c2, c3, r1], color, 0.5);
+    pushPoly(mb, [r0, r1, c2, c1], color, 0.5);
+    pushPoly(mb, [r1, r0, c0, c3], color, 0.5);
+    pushPoly(mb, [r0, c1, c0], color, 0.5);
+    pushPoly(mb, [r1, c3, c2], color, 0.5);
   }
   // Fascia board so the roof does not look paper thin from below.
-  localBox(mb, b, 0, y0 - 0.12, 0, W, 0.12, D, { color: [color[0] * 0.7, color[1] * 0.7, color[2] * 0.7], uScale: 0.6 });
+  const fascia = [color[0] * 0.7, color[1] * 0.7, color[2] * 0.7];
+  localBox(mb, b, 0, y0 - 0.12, 0, W, 0.12, D, { color: fascia, uScale: 0.6 });
 }
 
 /**
@@ -1627,10 +1747,11 @@ function addSawtoothRoof(bc, b, y0, color, glassColor) {
   const P = (lx, ly, lz) => { localXZ(b, lx, lz, p); return [p[0], ly, p[1]]; };
   for (let k = 0; k < teeth; k++) {
     const xa = -W + k * step, xb = xa + step;
-    // Sloped pane rising towards +x, then a vertical glazed face dropping back.
-    pushPoly(mb, [P(xa, y0, -D), P(xb, y0 + rise, -D), P(xb, y0 + rise, D), P(xa, y0, D)], color, 0.4);
-    pushPoly(gl, [P(xb, y0 + rise, -D), P(xb, y0, -D), P(xb, y0, D), P(xb, y0 + rise, D)], glassColor, 0.16);
-    pushPoly(mb, [P(xa, y0, -D), P(xa, y0, -D + 0.01), P(xb, y0 + rise, -D)], color, 0.4);
+    // Sloped pane rising towards +x, a vertical glazed face dropping back, and both gables.
+    pushPoly(mb, [P(xa, y0, D), P(xb, y0 + rise, D), P(xb, y0 + rise, -D), P(xa, y0, -D)], color, 0.4);
+    pushPoly(gl, [P(xb, y0 + rise, D), P(xb, y0, D), P(xb, y0, -D), P(xb, y0 + rise, -D)], glassColor, 0.16);
+    pushPoly(mb, [P(xa, y0, -D), P(xb, y0 + rise, -D), P(xb, y0, -D)], color, 0.4);
+    pushPoly(mb, [P(xa, y0, D), P(xb, y0, D), P(xb, y0 + rise, D)], color, 0.4);
   }
 }
 
@@ -1665,7 +1786,7 @@ function addRoofClutter(bc, b, roofY, hw, hd, rng, wallCol) {
   }
 
   // Air conditioning units with fan cowls.
-  const acs = rng.int(1, hw > 8 ? 5 : 3);
+  const acs = (hw < 1.8 || hd < 1.8) ? 0 : rng.int(1, hw > 8 ? 3 : 2);
   for (let i = 0; i < acs; i++) {
     const w = rng.range(0.7, 1.15), d = rng.range(0.55, 0.95), h = rng.range(0.55, 0.95);
     const x = rng.range(-ix + w, ix - w), z = rng.range(-iz + d, iz - d);
@@ -1676,7 +1797,7 @@ function addRoofClutter(bc, b, roofY, hw, hd, rng, wallCol) {
   }
 
   // Water tank on legs.
-  if (hw > 4 && hd > 4 && rng.chance(0.55)) {
+  if (hw > 4 && hd > 4 && rng.chance(0.45)) {
     const r = rng.range(1.0, 1.7);
     const x = rng.range(-ix + r, ix - r), z = rng.range(-iz + r, iz - r);
     const p = localXZ(b, x, z, [0, 0]);
@@ -1693,7 +1814,7 @@ function addRoofClutter(bc, b, roofY, hw, hd, rng, wallCol) {
   }
 
   // Vent pipes.
-  const vents = rng.int(1, 4);
+  const vents = rng.int(1, hw > 4 ? 3 : 2);
   for (let i = 0; i < vents; i++) {
     const x = rng.range(-ix, ix), z = rng.range(-iz, iz);
     const h = rng.range(0.5, 1.3);
@@ -1711,7 +1832,10 @@ function addRoofClutter(bc, b, roofY, hw, hd, rng, wallCol) {
       const yy = roofY + h * (0.55 + a * 0.14);
       localBox(det, b, x, yy, z, 0.62 - a * 0.14, 0.03, 0.03, { color: dark, uScale: 2 });
     }
-    bc.lights.push({ x: p[0], y: roofY + h, z: p[1], r: 1.4, g: 0.12, b: 0.12, radius: 9, intensity: 1.2, night: true, blink: true });
+    bc.lights.push({
+      x: p[0], y: roofY + h, z: p[1], r: 1.4, g: 0.12, b: 0.12,
+      radius: 9, intensity: 1.2, night: true, blink: true
+    });
   }
 }
 
@@ -1740,7 +1864,8 @@ function addBuildingSigns(bc, b) {
     const hx = alongX ? w * 0.5 : 0.13;
     const hz = alongX ? 0.13 : w * 0.5;
     const col = sg.color || [2.4, 1.6, 3.0];
-    const key = 'neon' + (Math.abs(b.id + i) % 3);
+    // Pick the neon artwork per chunk (not per sign) so one chunk needs a single batch.
+    const key = 'neon' + (((Math.floor(wx / 160) + Math.floor(wz / 160)) % 3) + 3) % 3;
     const mb = bc.chunks.at(wx, wz, key);
     mb.addBox(wx, y, wz, hx, h * 0.5, hz, rot, { color: col, uv: 'fit', tileW: w, tileH: h });
     // Dark mounting frame just behind the neon face.
@@ -1901,10 +2026,12 @@ function buildBuilding(bc, b) {
     localBox(roofMb, b, 0, capY + 0.09, 0, kw + 0.2, 0.09, kd + 0.2, { color: trimCol, uScale: 0.5 });
     const ph = t === tiers.length - 1 ? 0.95 : 0.7;
     const pt = 0.22;
-    localBox(roofMb, b, 0, capY + 0.18 + ph * 0.5, kd + 0.2 - pt, kw + 0.2, ph * 0.5, pt, { color: trimCol, uScale: 0.6 });
-    localBox(roofMb, b, 0, capY + 0.18 + ph * 0.5, -(kd + 0.2 - pt), kw + 0.2, ph * 0.5, pt, { color: trimCol, uScale: 0.6 });
-    localBox(roofMb, b, kw + 0.2 - pt, capY + 0.18 + ph * 0.5, 0, pt, ph * 0.5, kd + 0.2 - pt * 2, { color: trimCol, uScale: 0.6 });
-    localBox(roofMb, b, -(kw + 0.2 - pt), capY + 0.18 + ph * 0.5, 0, pt, ph * 0.5, kd + 0.2 - pt * 2, { color: trimCol, uScale: 0.6 });
+    const py = capY + 0.18 + ph * 0.5;
+    const popt = { color: trimCol, uScale: 0.6 };
+    localBox(roofMb, b, 0, py, kd + 0.2 - pt, kw + 0.2, ph * 0.5, pt, popt);
+    localBox(roofMb, b, 0, py, -(kd + 0.2 - pt), kw + 0.2, ph * 0.5, pt, popt);
+    localBox(roofMb, b, kw + 0.2 - pt, py, 0, pt, ph * 0.5, kd + 0.2 - pt * 2, popt);
+    localBox(roofMb, b, -(kw + 0.2 - pt), py, 0, pt, ph * 0.5, kd + 0.2 - pt * 2, popt);
     // Roof deck.
     const deckCol = [0.28, 0.28, 0.29];
     localBox(roofMb, b, 0, capY + 0.22, 0, kw + 0.18, 0.04, kd + 0.18, { color: deckCol, uScale: 0.4, faces: PY });
@@ -1937,7 +2064,7 @@ function buildBuilding(bc, b) {
 
   // Rooftop billboard on tall commercial blocks.
   if (H > 22 && (style === 'tower' || style === 'office' || style === 'warehouse') && rng.chance(0.22)) {
-    const key = 'billboard' + (b.id % 2);
+    const key = 'billboard' + ((Math.floor(b.x / 160) + Math.floor(b.z / 160)) & 1);
     const mb = bc.chunks.at(b.x, b.z, key);
     const det = bc.chunks.at(b.x, b.z, 'detail');
     const bw = Math.min(topHw * 1.6, 7.5);
@@ -1954,7 +2081,10 @@ function buildBuilding(bc, b) {
     localBox(det, b, lx + (face === 0 ? bw * 0.6 : 0), roofY + 0.7 + bh * 0.5, lz + (face === 0 ? 0 : bw * 0.6),
       0.12, bh * 0.5 + 0.7, 0.12, { color: [0.2, 0.2, 0.22], uScale: 2 });
     const p = localXZ(b, lx, lz, [0, 0]);
-    bc.lights.push({ x: p[0], y: y + bh * 0.6, z: p[1], r: 0.9, g: 0.85, b: 0.7, radius: 12, intensity: 1.1, night: true });
+    bc.lights.push({
+      x: p[0], y: y + bh * 0.6, z: p[1], r: 0.9, g: 0.85, b: 0.7,
+      radius: 12, intensity: 1.1, night: true
+    });
     bc.billboardMaterials.add(key);
   }
 
@@ -1989,6 +2119,8 @@ class PropParts {
     this.collide = [];
     /** @type {object|null} */
     this.light = null;
+    /** @type {number[][]|null} */
+    this.bulbLocal = null;
   }
 
   /**
@@ -2068,7 +2200,7 @@ function buildPropPrototypes(proto) {
    * @returns {void}
    */
   const reg = (name, p) => {
-    out[name] = { parts: p.finish(), collide: p.collide, light: p.light };
+    out[name] = { parts: p.finish(), collide: p.collide, light: p.light, bulbLocal: p.bulbLocal || null };
   };
 
   // --- streetlight --------------------------------------------------------
@@ -2105,21 +2237,24 @@ function buildPropPrototypes(proto) {
   // --- traffic light ------------------------------------------------------
   {
     const p = new PropParts();
+    // The prop's local -Z points at the junction (citygen yaws it towards the node), so the
+    // mast arm reaches out along -Z and the lenses face +Z, into the oncoming traffic.
     p.geo('propPaint', proto.cyl12, trs(M, 0, 0.2, 0, 0, 0.22, 0.2, 0.22), dark);
     p.geo('propPaint', proto.cyl8, trs(M, 0, 3.0, 0, 0, 0.1, 2.8, 0.1), dark);
-    p.box('propPaint', 0, 5.68, 1.5, 0.06, 0.07, 1.55, dark);
-    p.box('propPaint', 0, 5.3, 0.42, 0.05, 0.36, 0.05, dark, 0.7);
+    p.box('propPaint', 0, 5.68, -1.5, 0.06, 0.07, 1.55, dark);
+    p.box('propPaint', 0, 5.3, -0.42, 0.05, 0.36, 0.05, dark, -0.7);
     // Main head over the carriageway.
-    p.box('propPaint', 0, 4.86, 2.95, 0.21, 0.62, 0.18, [0.12, 0.13, 0.13]);
+    p.box('propPaint', 0, 4.86, -2.95, 0.21, 0.62, 0.18, [0.12, 0.13, 0.13]);
     for (let i = 0; i < 3; i++) {
       const y = 5.32 - i * 0.42;
-      p.geo('propPaint', proto.ring, trs(M, 0, y, 3.14, 0, 0.15, 0.15, 0.06), [0.08, 0.08, 0.09]);
-      p.box('propPaint', 0, y + 0.16, 3.2, 0.17, 0.03, 0.11, [0.1, 0.1, 0.11]);
+      p.geo('propPaint', proto.discZ, trs(M, 0, y, -2.76, 0, 0.15, 0.15, 0.03), [0.07, 0.07, 0.08]);
+      p.box('propPaint', 0, y + 0.17, -2.68, 0.17, 0.02, 0.11, [0.1, 0.1, 0.11]);
     }
     // Pedestrian head on the post.
     p.box('propPaint', 0, 2.62, 0.28, 0.17, 0.28, 0.14, [0.12, 0.13, 0.13]);
     p.box('propLamp', 0, 2.62, 0.44, 0.12, 0.2, 0.02, [1.6, 0.5, 0.18]);
     p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.18, h: 5.8 });
+    p.bulbLocal = [[0, 5.32, -2.72], [0, 4.90, -2.72], [0, 4.48, -2.72]];
     reg('trafficlight', p);
   }
 
@@ -2144,15 +2279,13 @@ function buildPropPrototypes(proto) {
       const h = 0.72;
       lean += 0.035;
       x += Math.sin(lean * 3) * 0.12;
-      p.geo('propBark', proto.cyl8, trsPitch(M, x, y + h * 0.5, 0, 0, lean * 0.5, 1),
-        [0.36, 0.3, 0.22]);
       const s = 0.19 - i * 0.012;
       p.geo('propBark', proto.cyl8, trs(M, x, y + h * 0.5, 0, 0, s, h * 0.5, s), [0.36 - i * 0.01, 0.3, 0.22]);
       y += h;
     }
     for (let i = 0; i < 9; i++) {
       const a = (i / 9) * Math.PI * 2;
-      const droop = -0.55 - (i % 3) * 0.12;
+      const droop = 0.28 + (i % 3) * 0.12;
       const m = trsPitch(M, x + Math.cos(a) * 0.7, y + 0.35, Math.sin(a) * 0.7, -a + Math.PI * 0.5, droop, 1);
       p.geo('propLeaf', proto.frond, m, [0.22, 0.44, 0.18]);
     }
@@ -2182,7 +2315,7 @@ function buildPropPrototypes(proto) {
   {
     const p = new PropParts();
     p.geo('propPaint', proto.cyl12, trs(M, 0, 0.46, 0, 0, 0.3, 0.44, 0.3), [0.2, 0.26, 0.22]);
-    p.geo('propPaint', proto.ring, trs(M, 0, 0.9, 0, 0, 0.32, 0.32, 0.06), [0.34, 0.36, 0.34]);
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.9, 0, 0, 0.33, 0.03, 0.33), [0.34, 0.36, 0.34]);
     p.geo('propPaint', proto.cyl12, trs(M, 0, 0.96, 0, 0, 0.31, 0.05, 0.31), [0.26, 0.3, 0.27]);
     p.box('propPaint', 0, 0.96, 0.16, 0.16, 0.06, 0.14, [0.05, 0.05, 0.06]);
     p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.32, h: 1.0 });
@@ -2198,7 +2331,7 @@ function buildPropPrototypes(proto) {
     p.geo('propPaint', proto.sphere8, trs(M, 0, 0.74, 0, 0, 0.16, 0.14, 0.16), red);
     p.geo('propPaint', proto.cyl8, trs(M, 0, 0.86, 0, 0, 0.05, 0.06, 0.05), [0.7, 0.68, 0.2]);
     for (let s = -1; s <= 1; s += 2) {
-      p.geo('propPaint', proto.cyl8, trsPitch(M, s * 0.17, 0.5, 0, s * Math.PI * 0.5, Math.PI * 0.5, 0.9),
+      p.geo('propPaint', proto.nozzle, trsPitch(M, s * 0.17, 0.5, 0, s * Math.PI * 0.5, Math.PI * 0.5, 1),
         [0.66, 0.12, 0.1]);
     }
     p.box('propPaint', 0, 0.5, 0.17, 0.08, 0.08, 0.05, [0.7, 0.68, 0.2]);
@@ -2211,7 +2344,7 @@ function buildPropPrototypes(proto) {
     const p = new PropParts();
     p.geo('propPaint', proto.cyl8, trs(M, 0, 0.44, 0, 0, 0.09, 0.44, 0.09), [0.16, 0.17, 0.2]);
     p.geo('propPaint', proto.sphere8, trs(M, 0, 0.9, 0, 0, 0.09, 0.08, 0.09), [0.16, 0.17, 0.2]);
-    p.geo('propPaint', proto.ring, trs(M, 0, 0.74, 0, 0, 0.1, 0.1, 0.03), [1.1, 1.05, 0.9]);
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 0.74, 0, 0, 0.105, 0.035, 0.105), [1.1, 1.05, 0.9]);
     p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.13, h: 1.0 });
     reg('bollard', p);
   }
@@ -2265,6 +2398,19 @@ function buildPropPrototypes(proto) {
     reg('billboard', p);
   }
 
+  // --- wall mounted billboard --------------------------------------------
+  {
+    const p = new PropParts();
+    p.box('propSign', 0, 0, 0.07, 2.6, 1.2, 0.05, [1, 1, 1]);
+    p.box('propPaint', 0, 0, -0.02, 2.72, 1.32, 0.07, [0.16, 0.17, 0.19]);
+    p.box('propPaint', 0, 1.42, 0.34, 2.3, 0.04, 0.04, steel);
+    for (let i = -1; i <= 1; i++) {
+      p.box('propLamp', i * 1.3, 1.36, 0.44, 0.14, 0.05, 0.05, [2.2, 2.1, 1.8]);
+    }
+    p.light = { x: 0, y: 1.3, z: 0.7, r: 0.9, g: 0.88, b: 0.8, radius: 9, intensity: 1.2 };
+    reg('billboardwall', p);
+  }
+
   // --- bus stop -----------------------------------------------------------
   {
     const p = new PropParts();
@@ -2293,7 +2439,7 @@ function buildPropPrototypes(proto) {
     p.box('propPaint', 0, 1.14, 0.3, 0.97, 0.05, 0.32, [0.2, 0.38, 0.28], 0, 0.8);
     for (let sx = -1; sx <= 1; sx += 2) {
       for (let sz = -1; sz <= 1; sz += 2) {
-        p.geo('propPaint', proto.cyl8, trsPitch(M, sx * 0.82, 0.12, sz * 0.5, Math.PI * 0.5, Math.PI * 0.5, 1),
+        p.geo('propPaint', proto.wheelSm, trsPitch(M, sx * 0.82, 0.12, sz * 0.5, Math.PI * 0.5, Math.PI * 0.5, 1),
           [0.08, 0.08, 0.09]);
       }
     }
@@ -2306,7 +2452,7 @@ function buildPropPrototypes(proto) {
     const p = new PropParts();
     p.box('propPaint', 0, 0.03, 0, 0.24, 0.03, 0.24, [0.5, 0.16, 0.05]);
     p.geo('propPaint', proto.cone8, trs(M, 0, 0.36, 0, 0, 0.17, 0.36, 0.17), [0.78, 0.24, 0.06]);
-    p.geo('propPaint', proto.ring, trs(M, 0, 0.42, 0, 0, 0.13, 0.13, 0.05), [1.2, 1.2, 1.15]);
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 0.4, 0, 0, 0.135, 0.035, 0.135), [1.2, 1.2, 1.15]);
     reg('cone', p);
   }
 
@@ -2363,7 +2509,7 @@ function buildPropPrototypes(proto) {
     p.box('propPaint', 0, 0.72, 0, 0.9, 0.34, 0.55, [0.62, 0.58, 0.5], 0, 1.0);
     p.box('propPaint', 0, 1.1, 0, 0.96, 0.05, 0.6, [0.3, 0.32, 0.34]);
     for (let s = -1; s <= 1; s += 2) {
-      p.geo('propPaint', proto.cyl8, trsPitch(M, s * 0.7, 0.26, 0, Math.PI * 0.5, Math.PI * 0.5, 1.3), dark);
+      p.geo('propPaint', proto.wheelMd, trsPitch(M, s * 0.7, 0.26, 0, Math.PI * 0.5, Math.PI * 0.5, 1.3), dark);
       p.box('propPaint', s * 0.85, 1.7, 0, 0.04, 0.6, 0.04, [0.4, 0.42, 0.45]);
     }
     p.box('propPaint', 0, 2.32, 0, 1.05, 0.05, 0.7, [0.72, 0.14, 0.12]);
@@ -2376,3 +2522,1015 @@ function buildPropPrototypes(proto) {
 
   return out;
 }
+
+/**
+ * Bakes a transform into a geometry so prototypes can be authored in a convenient frame.
+ * @param {object} geo Source geometry.
+ * @param {ArrayLike<number>} m Transform.
+ * @returns {object} New geometry.
+ */
+function bakeGeometry(geo, m) {
+  const mb = new MeshBuilder(geo.positions.length / 3);
+  mb.addGeometry(geo, m, null);
+  return mb.toGeometry();
+}
+
+/**
+ * Builds the shared primitive cache used by props, roof clutter and domes. Everything is
+ * unit sized so a single TRS matrix can scale it into place.
+ * @returns {Object<string, object>} Primitive geometries.
+ */
+function buildPrimitiveCache() {
+  const c = {};
+  c.cyl8 = cylinderGeo(1, 1, 2, 8);
+  c.cyl12 = cylinderGeo(1, 1, 2, 12);
+  c.cone8 = coneGeo(1, 2, 8);
+  c.sphere8 = sphereGeo(1, 8, 6);
+  c.sphere10 = sphereGeo(1, 10, 8);
+  c.dome = sphereGeo(1, 16, 10);
+  c.nozzle = cylinderGeo(0.07, 0.07, 0.34, 8);
+  c.wheelSm = cylinderGeo(0.09, 0.09, 0.1, 8);
+  c.wheelMd = cylinderGeo(0.2, 0.2, 0.08, 10);
+  c.vent = cylinderGeo(0.16, 0.2, 2, 8);
+  c.mast = cylinderGeo(0.05, 0.09, 2, 6);
+  c.tank = cylinderGeo(1, 1, 2, 12);
+  c.tankTop = coneGeo(1, 0.9, 12);
+  // Disc lying in the XY plane (axis along +Z) for traffic light lenses and bulbs.
+  const rotX90 = [1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1];
+  c.discZ = bakeGeometry(cylinderGeo(1, 1, 1, 10), rotX90);
+  // Air conditioning fan cowl.
+  {
+    const mb = new MeshBuilder(64);
+    const m = new Float32Array(16);
+    mb.addGeometry(c.cyl8, trs(m, 0, 0, 0, 0, 0.45, 0.045, 0.45), [0.42, 0.43, 0.45]);
+    mb.addGeometry(c.cyl8, trs(m, 0, 0.06, 0, 0, 0.09, 0.05, 0.09), [0.2, 0.2, 0.22]);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      mb.addBox(Math.cos(a) * 0.2, 0.07, Math.sin(a) * 0.2, 0.19, 0.012, 0.06, -a,
+        { color: [0.3, 0.31, 0.33], uScale: 2 });
+    }
+    c.fan = mb.toGeometry();
+  }
+  // Palm frond: an arched, folded blade extending along +Z.
+  {
+    const mb = new MeshBuilder(48);
+    const zs = [0, 0.45, 1.0, 1.55, 2.05, 2.45];
+    const hw = [0.04, 0.17, 0.21, 0.18, 0.11, 0.015];
+    const ys = [0, -0.02, -0.08, -0.2, -0.4, -0.66];
+    const col = [1, 1, 1];
+    const L = zs[zs.length - 1];
+    for (let i = 0; i + 1 < zs.length; i++) {
+      const va = zs[i] / L, vb = zs[i + 1] / L;
+      const a = [0, ys[i], zs[i]], b = [0, ys[i + 1], zs[i + 1]];
+      const la = [-hw[i], ys[i] - hw[i] * 0.35, zs[i]], lb = [-hw[i + 1], ys[i + 1] - hw[i + 1] * 0.35, zs[i + 1]];
+      const ra = [hw[i], ys[i] - hw[i] * 0.35, zs[i]], rb = [hw[i + 1], ys[i + 1] - hw[i + 1] * 0.35, zs[i + 1]];
+      pushPolyUV(mb, [a, b, lb, la], [[0.5, va], [0.5, vb], [0.03, vb], [0.03, va]], col);
+      pushPolyUV(mb, [a, ra, rb, b], [[0.5, va], [0.97, va], [0.97, vb], [0.5, vb]], col);
+    }
+    c.frond = mb.toGeometry();
+  }
+  return c;
+}
+
+/* ---------------------------------------------------------- traffic lights */
+
+/**
+ * One signalled junction. Both axes run a correct 4-way cycle:
+ * green -> amber -> all-red -> (other axis) green -> amber -> all-red.
+ */
+class TrafficLight {
+  /**
+   * @param {number} nodeId Node id in `city.nodes`.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {number} offset Cycle offset in seconds.
+   */
+  constructor(nodeId, x, z, offset) {
+    this.nodeId = nodeId;
+    this.x = x;
+    this.z = z;
+    this.offset = offset;
+    this.phase = 'x-green';
+    this.xState = 'green';
+    this.zState = 'red';
+    /** North-south traffic runs along Z, east-west along X (aliases for traffic AI). */
+    this.nsState = 'red';
+    this.ewState = 'green';
+    this.greenAxis = 'x';
+    this.timer = TL_GREEN;
+    /** @type {object[]} */
+    this.heads = [];
+  }
+
+  /**
+   * Advances the phase from the shared world clock.
+   * @param {number} clock World time in seconds.
+   * @returns {boolean} True when the phase changed this call.
+   */
+  tick(clock) {
+    // Written without string building or dynamic property names: this runs for every
+    // signalled junction, every frame.
+    let t = (clock + this.offset) % TL_CYCLE;
+    if (t < 0) t += TL_CYCLE;
+    const first = t < TL_SEG;
+    const lt = first ? t : t - TL_SEG;
+    let stateA, phase, timer;
+    if (lt < TL_GREEN) {
+      stateA = 'green'; timer = TL_GREEN - lt;
+      phase = first ? 'x-green' : 'z-green';
+    } else if (lt < TL_GREEN + TL_AMBER) {
+      stateA = 'amber'; timer = TL_GREEN + TL_AMBER - lt;
+      phase = first ? 'x-amber' : 'z-amber';
+    } else {
+      stateA = 'red'; timer = TL_SEG - lt;
+      phase = 'all-red';
+    }
+    const prev = this.phase;
+    this.phase = phase;
+    this.timer = timer;
+    if (first) { this.xState = stateA; this.zState = 'red'; }
+    else { this.zState = stateA; this.xState = 'red'; }
+    this.nsState = this.zState;
+    this.ewState = this.xState;
+    this.greenAxis = stateA === 'red' ? null : (first ? 'x' : 'z');
+    return prev !== phase;
+  }
+
+  /**
+   * Signal state for traffic travelling along an axis.
+   * @param {string} axis `'x'` or `'z'`.
+   * @returns {string} `'green'`, `'amber'` or `'red'`.
+   */
+  state(axis) {
+    return axis === 'x' ? this.xState : this.zState;
+  }
+
+  /**
+   * Convenience predicate for traffic AI.
+   * @param {string} axis `'x'` or `'z'`.
+   * @returns {boolean} True when traffic on that axis may proceed.
+   */
+  isGreen(axis) {
+    const s = this.state(axis);
+    return s === 'green' || s === 'amber';
+  }
+}
+
+/* ---------------------------------------------------------- instanced props */
+
+/**
+ * Creates the instanced batches for one prop type and fills their transforms.
+ * @param {object} bc Build context.
+ * @param {string} type Prop type name.
+ * @param {object[]} list Props of that type.
+ * @param {object} proto Prototype `{parts, collide, light, bulbLocal}`.
+ * @returns {void}
+ */
+function emitPropType(bc, type, list, proto) {
+  const n = list.length;
+  if (!n) return;
+  const mats = bc.mats;
+  const keys = Object.keys(proto.parts);
+  if (!keys.length) return;
+  const matrices = new Float32Array(n * 16);
+  const tints = new Float32Array(n * 4);
+  const positions = new Float32Array(n * 3);
+  const m = new Float32Array(16);
+
+  for (let i = 0; i < n; i++) {
+    const p = list[i];
+    const s = p.scale && p.scale > 0.01 ? p.scale : 1;
+    const y = Math.max(p.y || 0, bc.surfaceY(p.x, p.z));
+    trs(m, p.x, y, p.z, p.rot || 0, s, s, s);
+    matrices.set(m, i * 16);
+    positions[i * 3] = p.x; positions[i * 3 + 1] = y; positions[i * 3 + 2] = p.z;
+    const h = hash2(Math.round(p.x * 4), Math.round(p.z * 4), bc.seed + 17);
+    const vary = (type === 'tree' || type === 'palm' || type === 'planter') ? 0.26 : 0.1;
+    const k = 1 - vary * 0.5 + h * vary;
+    tints[i * 4] = k;
+    tints[i * 4 + 1] = k * (type === 'tree' ? 0.94 + h * 0.14 : 1);
+    tints[i * 4 + 2] = k * (type === 'tree' ? 0.9 : 1);
+    tints[i * 4 + 3] = 1;
+
+    // Collision for solid street furniture (never for foliage canopies).
+    if (bc.collision && proto.collide) {
+      for (let c = 0; c < proto.collide.length; c++) {
+        const cd = proto.collide[c];
+        const cs = Math.cos(p.rot || 0), sn = Math.sin(p.rot || 0);
+        const ox = (cd.x || 0) * s, oz = (cd.z || 0) * s;
+        const wx = p.x + ox * cs + oz * sn;
+        const wz = p.z - ox * sn + oz * cs;
+        if (cd.type === 'cyl' && typeof bc.collision.addCylinder === 'function') {
+          // addCylinder takes the centre; the prototypes describe the base.
+          bc.bodies.push(bc.collision.addCylinder(wx, y + ((cd.y || 0) + cd.h * 0.5) * s, wz,
+            cd.r * s, cd.h * s, 'prop', { propType: type }));
+        } else if (cd.type === 'cyl') {
+          bc.bodies.push(bc.collision.addBox(wx, y + (cd.y || 0) * s + cd.h * s * 0.5, wz,
+            cd.r * s, cd.h * s * 0.5, cd.r * s, p.rot || 0, 'prop', { propType: type }));
+        } else {
+          bc.bodies.push(bc.collision.addBox(wx, y + cd.y * s, wz, cd.hx * s, cd.hy * s, cd.hz * s,
+            p.rot || 0, 'prop', { propType: type }));
+        }
+      }
+    }
+    // Night lights carried by the prop.
+    if (proto.light) {
+      const L = proto.light;
+      const cs = Math.cos(p.rot || 0), sn = Math.sin(p.rot || 0);
+      const wx = p.x + L.x * s * cs + L.z * s * sn;
+      const wz = p.z - L.x * s * sn + L.z * s * cs;
+      bc.lights.push({
+        x: wx, y: y + L.y * s, z: wz, r: L.r, g: L.g, b: L.b,
+        radius: L.radius * s, intensity: L.intensity, night: true, street: type === 'streetlight'
+      });
+    }
+  }
+
+  const lod = LOD_DISTANCE[type] === undefined ? 0 : LOD_DISTANCE[type];
+  const batches = [];
+  for (let k = 0; k < keys.length; k++) {
+    const key = keys[k];
+    const mat = mats[key];
+    if (!mat || typeof bc.renderer.addInstanced !== 'function') continue;
+    const geo = proto.parts[key];
+    const batch = bc.renderer.addInstanced(geo, mat, n);
+    if (!batch) continue;
+    const tris = (geo.indices.length / 3) * n;
+    bc.stats.batches++;
+    bc.stats.instancedTriangles += tris;
+    batches.push({ batch, tris: geo.indices.length / 3 });
+  }
+  if (!batches.length) return;
+  bc.propGroups.push({
+    type, batches, matrices, tints, positions, count: n, lod, visible: n, subset: null
+  });
+  // Fill every batch with the full set; the LOD pass may trim it later.
+  for (let b = 0; b < batches.length; b++) fillBatch(batches[b].batch, matrices, tints, n, null);
+}
+
+/**
+ * Uploads instance data to a batch, optionally filtered to a subset.
+ * @param {object} batch InstancedBatch.
+ * @param {Float32Array} matrices Source transforms.
+ * @param {Float32Array} tints Source tints.
+ * @param {number} count Number of source instances.
+ * @param {Int32Array|null} subset Indices to upload, or null for all.
+ * @param {number} [subsetCount] Valid entries in `subset`.
+ * @returns {void}
+ */
+function fillBatch(batch, matrices, tints, count, subset, subsetCount) {
+  const n = subset ? subsetCount : count;
+  if (typeof batch.setCount === 'function') batch.setCount(n);
+  else batch.count = n;
+  if (typeof batch.setInstance === 'function') {
+    const m = fillBatch._m || (fillBatch._m = new Float32Array(16));
+    const t = fillBatch._t || (fillBatch._t = new Float32Array(4));
+    for (let i = 0; i < n; i++) {
+      const src = (subset ? subset[i] : i);
+      const o = src * 16;
+      for (let k = 0; k < 16; k++) m[k] = matrices[o + k];
+      const o4 = src * 4;
+      t[0] = tints[o4]; t[1] = tints[o4 + 1]; t[2] = tints[o4 + 2]; t[3] = tints[o4 + 3];
+      batch.setInstance(i, m, t);
+    }
+  }
+  if (typeof batch.upload === 'function') batch.upload();
+}
+
+/** View distance beyond which small props stop being uploaded (0 = never culled). */
+const LOD_DISTANCE = {
+  bench: 220, bin: 190, hydrant: 170, bollard: 150, planter: 230, sign: 220,
+  cone: 130, barrier: 180, dumpster: 230, atm: 200, parkingmeter: 150,
+  streetvendor: 260, lamp: 320
+};
+
+/**
+ * Creates the traffic light state machines from the `trafficlight` props and precomputes the
+ * world transform of every lamp so the lit bulbs can be re-instanced when a phase changes.
+ * @param {object} bc Build context.
+ * @param {object[]} props Traffic light props.
+ * @param {object} proto Traffic light prototype.
+ * @returns {{lights:TrafficLight[], heads:object[], mats:Float32Array}} Traffic light data.
+ */
+function buildTrafficLights(bc, props, proto) {
+  const nodes = bc.city.nodes || [];
+  const byNode = new Map();
+  const lights = [];
+  const heads = [];
+  const local = (proto && proto.bulbLocal) || [[0, 5.32, -2.72], [0, 4.9, -2.72], [0, 4.48, -2.72]];
+
+  /**
+   * Finds or creates the light for a node.
+   * @param {number} nodeId Node id.
+   * @param {number} x Fallback x.
+   * @param {number} z Fallback z.
+   * @returns {TrafficLight} The light.
+   */
+  const light = (nodeId, x, z) => {
+    let tl = byNode.get(nodeId);
+    if (tl) return tl;
+    const n = nodes[nodeId];
+    const nx = n ? n.x : x, nz = n ? n.z : z;
+    const bs = bc.city.blockSize || 64;
+    const parity = (Math.round(nx / bs) + Math.round(nz / bs)) & 1;
+    const offset = parity * (TL_CYCLE * 0.5) + hash2(Math.round(nx), Math.round(nz), bc.seed + 5) * 2.5;
+    tl = new TrafficLight(nodeId, nx, nz, offset);
+    tl.index = lights.length;
+    byNode.set(nodeId, tl);
+    lights.push(tl);
+    return tl;
+  };
+
+  for (let i = 0; i < props.length; i++) {
+    const p = props[i];
+    let nodeId = p.extra && p.extra.nodeId !== undefined ? p.extra.nodeId : -1;
+    if (nodeId < 0) {
+      let best = -1, bestD = 900;
+      for (let k = 0; k < nodes.length; k++) {
+        const d = (nodes[k].x - p.x) * (nodes[k].x - p.x) + (nodes[k].z - p.z) * (nodes[k].z - p.z);
+        if (d < bestD) { bestD = d; best = k; }
+      }
+      nodeId = best;
+    }
+    if (nodeId < 0) continue;
+    const tl = light(nodeId, p.x, p.z);
+    const rot = p.rot || 0;
+    const s = p.scale && p.scale > 0.01 ? p.scale : 1;
+    // The prop faces the junction: forward = (-sin, -cos). The travel axis follows it.
+    const fx = -Math.sin(rot), fz = -Math.cos(rot);
+    const axis = Math.abs(fx) >= Math.abs(fz) ? 'x' : 'z';
+    const y = Math.max(p.y || 0, bc.surfaceY(p.x, p.z));
+    const c = Math.cos(rot), sn = Math.sin(rot);
+    const head = { light: tl, axis, index: heads.length };
+    for (let b = 0; b < 3; b++) {
+      const lx = local[b][0] * s, ly = local[b][1] * s, lz = local[b][2] * s;
+      head['x' + b] = p.x + lx * c + lz * sn;
+      head['y' + b] = y + ly;
+      head['z' + b] = p.z - lx * sn + lz * c;
+    }
+    head.rot = rot;
+    head.scale = s;
+    tl.heads.push(head);
+    heads.push(head);
+  }
+
+  const mats = new Float32Array(heads.length * 3 * 16);
+  const m = new Float32Array(16);
+  for (let i = 0; i < heads.length; i++) {
+    const h = heads[i];
+    for (let b = 0; b < 3; b++) {
+      trs(m, h['x' + b], h['y' + b], h['z' + b], h.rot, 0.125 * h.scale, 0.125 * h.scale, 0.05 * h.scale);
+      mats.set(m, (i * 3 + b) * 16);
+    }
+  }
+  return { lights, heads, mats };
+}
+
+/* ------------------------------------------------------------ WorldRender */
+
+/**
+ * Runtime half of the built world: traffic light phases, night lighting, neon flicker,
+ * animated water and distance-based prop LOD.
+ */
+class WorldRender {
+  /**
+   * @param {object} o Construction bundle produced by {@link buildWorld}.
+   */
+  constructor(o) {
+    this.renderer = o.renderer;
+    this.collision = o.collision;
+    this.lights = o.lights;
+    this.trafficLights = o.trafficLights;
+    this.trafficLightByNode = o.trafficLightByNode;
+    this.minimapData = o.minimapData;
+    this.stats = o.stats;
+    this.terrain = o.terrain;
+    this.waterLevel = o.terrain.waterLevel;
+    /** Pavement / terrain height at a world position (buildings are not considered). */
+    this.surfaceHeight = o.surfaceY;
+    /** Alias of {@link WorldRender#surfaceHeight}; `collision.groundHeight` also sees bodies. */
+    this.groundHeight = o.surfaceY;
+    this.mats = o.mats;
+    this.bodies = o.bodies;
+    this.city = o.city;
+
+    this._staticIds = o.staticIds;
+    this._propGroups = o.propGroups;
+    this._heads = o.heads;
+    this._headMats = o.headMats;
+    this._bulbBatches = o.bulbBatches;
+    this._signKeys = o.signKeys;
+    this._billboardKeys = o.billboardKeys;
+
+    this.time = 0;
+    this.nightFactor = 0;
+    this._lastNight = -1;
+    this._bulbDirty = true;
+    this._tlAccum = 0;
+    this._lodAccum = 0;
+    this._lodCursor = 0;
+    this._lightAccum = 1;
+    this._flickerAccum = 0;
+    this._selCount = 0;
+    this._sel = new Int32Array(MAX_WORLD_LIGHTS);
+    this._selDist = new Float32Array(MAX_WORLD_LIGHTS);
+    this._m16 = new Float32Array(16);
+    this._tint = new Float32Array([1, 1, 1, 1]);
+    this._camX = 1e9;
+    this._camZ = 1e9;
+    this._waterUv = [0, 0];
+    this._flicker = [1, 1, 1];
+  }
+
+  /**
+   * Per-frame world tick.
+   * @param {number} dt Delta time in seconds.
+   * @param {number} timeOfDay Clock in hours (0..24).
+   * @param {object} camera Active camera.
+   * @returns {void}
+   */
+  update(dt, timeOfDay, camera) {
+    const step = dt > 0.25 ? 0.25 : dt;
+    this.time += step;
+    const h = typeof timeOfDay === 'number' ? timeOfDay : 12;
+    const night = clamp(Math.max(smoothstep(17.3, 19.6, h), 1 - smoothstep(4.9, 7.1, h)), 0, 1);
+    this.nightFactor = night;
+
+    if (Math.abs(night - this._lastNight) > 0.012) {
+      this._applyNight(night);
+      this._lastNight = night;
+    }
+
+    // --- traffic light phases --------------------------------------------
+    const tl = this.trafficLights;
+    for (let i = 0; i < tl.length; i++) {
+      if (tl[i].tick(this.time)) this._bulbDirty = true;
+    }
+    this._tlAccum += step;
+    if (this._bulbDirty && this._tlAccum >= 0.1) {
+      this._refreshBulbs();
+      this._tlAccum = 0;
+      this._bulbDirty = false;
+    }
+
+    // --- neon flicker ------------------------------------------------------
+    this._flickerAccum += step;
+    if (this._flickerAccum >= 0.05) {
+      this._flickerAccum = 0;
+      const t = this.time;
+      for (let i = 0; i < this._signKeys.length && i < 3; i++) {
+        const key = this._signKeys[i];
+        const mat = this.mats[key];
+        if (!mat) continue;
+        // Two of the neon materials buzz; the rest stay solid.
+        let k = 1;
+        if (i < 2) {
+          const n = valueNoise(t * (7 + i * 4), i * 13.7, 4242);
+          k = n > 0.82 ? 0.35 + n * 0.3 : 0.94 + n * 0.12;
+        }
+        const strength = (0.35 + night * 1.9) * k;
+        if (Math.abs((this._flicker[i] || 0) - strength) > 0.02) {
+          this._flicker[i] = strength;
+          _patchGlow.emissiveStrength = strength;
+          _patchGlow.albedo[0] = strength;
+          _patchGlow.albedo[1] = strength;
+          _patchGlow.albedo[2] = strength;
+          patchMaterial(this.renderer, mat, _patchGlow);
+        }
+      }
+    }
+
+    // --- water scroll ------------------------------------------------------
+    const water = this.mats.water;
+    if (water) {
+      const uo = water.uvOffset && water.uvOffset.length >= 2 ? water.uvOffset : this._waterUv;
+      uo[0] = (uo[0] + step * 0.011) % 1;
+      uo[1] = (uo[1] + step * 0.019) % 1;
+      _patchUv.uvOffset = uo;
+      patchMaterial(this.renderer, water, _patchUv);
+    }
+
+    // --- point lights ------------------------------------------------------
+    if (camera && camera.position) {
+      this._lightAccum += step;
+      if (this._lightAccum >= 0.1) {
+        this._lightAccum = 0;
+        this._selectLights(camera.position[0], camera.position[1], camera.position[2]);
+      }
+      if (night > 0.04 && typeof this.renderer.submitLight === 'function') {
+        for (let i = 0; i < this._selCount; i++) {
+          const L = this.lights[this._sel[i]];
+          let k = night * L.intensity;
+          if (L.blink) k *= 0.55 + 0.45 * Math.sin(this.time * 3.1 + L.x * 0.7);
+          if (L.neon) k *= this._flicker[0] > 0.6 ? 1 : 0.5;
+          this.renderer.submitLight(L.x, L.y, L.z, L.r, L.g, L.b, L.radius, k);
+        }
+      }
+      // --- prop LOD --------------------------------------------------------
+      this._lodAccum += step;
+      if (this._lodAccum >= 0.2) {
+        this._lodAccum = 0;
+        this._updateLod(camera.position[0], camera.position[2]);
+      }
+    }
+  }
+
+  /**
+   * Switches street lamps, shop signs and window glow between day and night.
+   * @param {number} night Night factor 0..1.
+   * @returns {void}
+   */
+  _applyNight(night) {
+    const m = this.mats;
+    if (m.propLamp) {
+      const k = 0.12 + night * 2.3;
+      patchMaterial(this.renderer, m.propLamp, { emissiveStrength: k, albedo: [k, k, k] });
+    }
+    for (let i = 0; i < this._billboardKeys.length; i++) {
+      const mat = m[this._billboardKeys[i]];
+      if (mat) patchMaterial(this.renderer, mat, { emissiveStrength: 0.1 + night * 0.85 });
+    }
+    if (m.propSign) patchMaterial(this.renderer, m.propSign, { emissiveStrength: 0.08 + night * 0.5 });
+    // Facade windows are not touched here: the renderer lights them from `material.windowGlow`
+    // times its own night factor, using the alpha channel of the facade texture as the mask.
+  }
+
+  /**
+   * Re-instances the lit traffic light bulbs (three batches, one per colour).
+   * @returns {void}
+   */
+  _refreshBulbs() {
+    const b = this._bulbBatches;
+    if (!b || !b.red) return;
+    const counts = [0, 0, 0];
+    const order = [b.red, b.amber, b.green];
+    const m = this._m16;
+    for (let i = 0; i < this._heads.length; i++) {
+      const head = this._heads[i];
+      const st = head.light.state(head.axis);
+      const slot = st === 'red' ? 0 : st === 'amber' ? 1 : 2;
+      const batch = order[slot];
+      if (!batch) continue;
+      const off = (i * 3 + slot) * 16;
+      for (let k = 0; k < 16; k++) m[k] = this._headMats[off + k];
+      if (typeof batch.setInstance === 'function') batch.setInstance(counts[slot], m, this._tint);
+      counts[slot]++;
+    }
+    for (let s = 0; s < 3; s++) {
+      const batch = order[s];
+      if (!batch) continue;
+      if (typeof batch.setCount === 'function') batch.setCount(counts[s]); else batch.count = counts[s];
+      if (typeof batch.upload === 'function') batch.upload();
+    }
+  }
+
+  /**
+   * Picks the nearest night lights around the camera.
+   * @param {number} x Camera x.
+   * @param {number} y Camera y.
+   * @param {number} z Camera z.
+   * @returns {void}
+   */
+  _selectLights(x, y, z) {
+    const list = this.lights;
+    const maxD = LIGHT_RADIUS * LIGHT_RADIUS;
+    let n = 0;
+    for (let i = 0; i < list.length; i++) {
+      const L = list[i];
+      const dx = L.x - x, dy = L.y - y, dz = L.z - z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d > maxD) continue;
+      if (n < MAX_WORLD_LIGHTS) {
+        let k = n++;
+        while (k > 0 && this._selDist[k - 1] > d) {
+          this._selDist[k] = this._selDist[k - 1];
+          this._sel[k] = this._sel[k - 1];
+          k--;
+        }
+        this._selDist[k] = d;
+        this._sel[k] = i;
+      } else if (d < this._selDist[n - 1]) {
+        let k = n - 1;
+        while (k > 0 && this._selDist[k - 1] > d) {
+          this._selDist[k] = this._selDist[k - 1];
+          this._sel[k] = this._sel[k - 1];
+          k--;
+        }
+        this._selDist[k] = d;
+        this._sel[k] = i;
+      }
+    }
+    this._selCount = n;
+  }
+
+  /**
+   * Trims one instanced prop group per tick to the props near the camera.
+   * @param {number} cx Camera x.
+   * @param {number} cz Camera z.
+   * @returns {void}
+   */
+  _updateLod(cx, cz) {
+    const groups = this._propGroups;
+    if (!groups.length) return;
+    const moved = Math.abs(cx - this._camX) + Math.abs(cz - this._camZ) > 10;
+    if (!moved && this._lodCursor === 0) return;
+    if (this._lodCursor === 0) { this._camX = cx; this._camZ = cz; }
+    const g = groups[this._lodCursor];
+    this._lodCursor = (this._lodCursor + 1) % groups.length;
+    if (!g.lod) return;
+    if (!g.subset) g.subset = new Int32Array(g.count);
+    const r2 = g.lod * g.lod;
+    let c = 0;
+    const pos = g.positions;
+    for (let i = 0; i < g.count; i++) {
+      const dx = pos[i * 3] - cx, dz = pos[i * 3 + 2] - cz;
+      if (dx * dx + dz * dz <= r2) g.subset[c++] = i;
+    }
+    g.visible = c;
+    for (let b = 0; b < g.batches.length; b++) {
+      fillBatch(g.batches[b].batch, g.matrices, g.tints, g.count, g.subset, c);
+    }
+  }
+
+  /**
+   * Releases every GPU batch and collision body this world created.
+   * @returns {void}
+   */
+  dispose() {
+    const r = this.renderer;
+    if (typeof r.removeStatic === 'function') {
+      for (let i = 0; i < this._staticIds.length; i++) r.removeStatic(this._staticIds[i]);
+    }
+    this._staticIds.length = 0;
+    const kill = (batch) => {
+      if (!batch) return;
+      if (typeof r.removeInstanced === 'function') r.removeInstanced(batch);
+      else if (typeof batch.dispose === 'function') batch.dispose();
+      else { batch.visible = false; if (typeof batch.setCount === 'function') batch.setCount(0); }
+    };
+    for (let i = 0; i < this._propGroups.length; i++) {
+      const g = this._propGroups[i];
+      for (let b = 0; b < g.batches.length; b++) kill(g.batches[b].batch);
+    }
+    this._propGroups.length = 0;
+    if (this._bulbBatches) {
+      kill(this._bulbBatches.red); kill(this._bulbBatches.amber); kill(this._bulbBatches.green);
+    }
+    if (this.collision && typeof this.collision.remove === 'function') {
+      for (let i = 0; i < this.bodies.length; i++) {
+        if (this.bodies[i] !== undefined && this.bodies[i] !== null) this.collision.remove(this.bodies[i]);
+      }
+    }
+    this.bodies.length = 0;
+    this.trafficLights.length = 0;
+    this._heads.length = 0;
+  }
+}
+
+/* ------------------------------------------------------------- minimap */
+
+/**
+ * Precomputes the flat description ui/hud.js and ui/map.js draw. All coordinates are world
+ * metres; rectangles carry both their centre (`x`, `z`) and their minimum corner
+ * (`x0`, `z0`) so either drawing convention works.
+ * @param {object} bc Build context.
+ * @returns {object} Minimap data.
+ */
+function buildMinimapData(bc) {
+  const city = bc.city;
+  const roads = [];
+  const list = city.roads || [];
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i];
+    roads.push({ x1: r.ax, z1: r.az, x2: r.bx, z2: r.bz, w: r.width, kind: r.kind || 'street' });
+  }
+  const blocks = [], water = [], parks = [];
+  const lots = city.lots || [];
+  for (let i = 0; i < lots.length; i++) {
+    const l = lots[i];
+    const x0 = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
+    const z0 = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
+    const d = city.districts && city.districts[l.districtId];
+    const rect = { x: l.x, z: l.z, w: l.w, d: l.d, x0, z0 };
+    if (l.kind === 'water' || l.surface === 'water') {
+      rect.c = DISTRICT_MAP_COLOR.water;
+      water.push(rect);
+    } else if (l.kind === 'park') {
+      rect.c = l.surface === 'sand' ? DISTRICT_MAP_COLOR.beach : DISTRICT_MAP_COLOR.park;
+      parks.push(rect);
+    } else {
+      rect.c = (d && DISTRICT_MAP_COLOR[d.kind]) || DISTRICT_MAP_COLOR.midtown;
+      rect.kind = l.kind;
+      blocks.push(rect);
+    }
+  }
+  const buildings = [];
+  const bl = city.buildings || [];
+  for (let i = 0; i < bl.length; i++) {
+    const b = bl[i];
+    buildings.push({ x: b.x, z: b.z, w: b.w, d: b.d, rot: b.rot || 0, h: b.h, style: b.style });
+  }
+  const districts = [];
+  const dl = city.districts || [];
+  for (let i = 0; i < dl.length; i++) {
+    const d = dl[i];
+    const r = d.rect;
+    const x0 = r.x0 !== undefined ? r.x0 : r.x;
+    const z0 = r.z0 !== undefined ? r.z0 : r.z;
+    districts.push({
+      name: d.name, kind: d.kind, x0, z0, w: r.w, d: r.d,
+      x: x0 + r.w * 0.5, z: z0 + r.d * 0.5,
+      c: DISTRICT_MAP_COLOR[d.kind] || DISTRICT_MAP_COLOR.midtown
+    });
+  }
+  const landmarks = [];
+  const ll = city.landmarks || [];
+  for (let i = 0; i < ll.length; i++) {
+    landmarks.push({ id: ll[i].id, name: ll[i].name, x: ll[i].x, z: ll[i].z, kind: ll[i].kind });
+  }
+  return {
+    bounds: {
+      min: [city.bounds.min[0], city.bounds.min[1]],
+      max: [city.bounds.max[0], city.bounds.max[1]]
+    },
+    roads, blocks, water, parks, buildings, districts, landmarks,
+    waterLevel: bc.terrain.waterLevel
+  };
+}
+
+/**
+ * Installs the world height function on the collision world so `groundHeight` answers
+ * everywhere — roads, raised sidewalks, beaches, hills and the sea bed.
+ * @param {object} collision Collision world.
+ * @param {(x:number,z:number)=>number} fn Height function.
+ * @returns {string} The hook that was used (for diagnostics).
+ */
+function installTerrainFunction(collision, fn) {
+  if (!collision) return 'none';
+  const setters = ['setTerrainFn', 'setTerrainHeightFn', 'setTerrainHeight', 'setGroundHeightFn',
+    'setHeightFunction', 'setTerrain', 'setGroundFunction'];
+  for (let i = 0; i < setters.length; i++) {
+    if (typeof collision[setters[i]] === 'function') {
+      collision[setters[i]](fn);
+      return setters[i];
+    }
+  }
+  collision.terrainHeight = fn;
+  collision.terrainHeightFn = fn;
+  const orig = collision.groundHeight;
+  if (typeof orig !== 'function') {
+    collision.groundHeight = (x, z) => fn(x, z);
+    return 'assigned';
+  }
+  collision.groundHeight = function groundHeightWithTerrain(x, z) {
+    const t = fn(x, z);
+    const b = orig.call(this, x, z);
+    if (!Number.isFinite(b)) return t;
+    // Inside the flat city the collision bodies (sidewalks, roofs) win; on slopes and out at
+    // sea the sampled terrain is the only truth.
+    return t > -0.02 ? (b > t ? b : t) : (b > 0.05 ? b : t);
+  };
+  return 'wrapped';
+}
+
+/* ------------------------------------------------------------- buildWorld */
+
+/**
+ * Builds the whole visible world from city data: static batches, instanced props, collision
+ * bodies, night lights, traffic lights and the minimap description.
+ *
+ * @param {WebGL2RenderingContext} gl GL context (kept for API symmetry; batches go through
+ *   the renderer).
+ * @param {object} renderer Renderer exposing `addStatic`, `addInstanced` and `createMaterial`.
+ * @param {object} textures Texture library from `render/textures.js`.
+ * @param {object} city CityData from `world/citygen.js`.
+ * @param {object} [opts] Options.
+ * @param {object} [opts.collision] Existing CollisionWorld to populate.
+ * @param {number} [opts.chunkSize] Building chunk size in metres (default ~2 blocks).
+ * @param {number} [opts.terrainMargin] Metres of terrain built beyond the city bounds.
+ * @returns {object} WorldRender.
+ */
+export function buildWorld(gl, renderer, textures, city, opts = {}) {
+  const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (!city || !city.bounds) throw new Error('buildWorld: invalid CityData');
+  // Use the metrics the layout was generated with so kerbs and props line up exactly.
+  SIDEWALK_H = typeof city.sidewalkHeight === 'number' ? city.sidewalkHeight : 0.15;
+  WALK_W = typeof city.sidewalkWidth === 'number' ? city.sidewalkWidth : 3.0;
+  const bounds = city.bounds;
+  const spanX = bounds.max[0] - bounds.min[0];
+  const spanZ = bounds.max[1] - bounds.min[1];
+
+  let collision = opts.collision || null;
+  if (!collision && COLLISION && typeof COLLISION.CollisionWorld === 'function') {
+    collision = new COLLISION.CollisionWorld(Math.max(spanX, spanZ) + 800, 16);
+  }
+
+  const now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  const phases = {};
+  let mark = now();
+  /**
+   * Records how long a build phase took (surfaced in `stats.phases`).
+   * @param {string} name Phase name.
+   * @returns {void}
+   */
+  const phase = (name) => { const t = now(); phases[name] = Math.round((t - mark) * 10) / 10; mark = t; };
+
+  const margin = opts.terrainMargin === undefined ? 380 : opts.terrainMargin;
+  const terrain = new Terrain(city, margin, 6);
+  phase('heightfield');
+  const lots = city.lots || [];
+  let maxLotId = lots.length;
+  for (let i = 0; i < lots.length; i++) if (lots[i].id >= maxLotId) maxLotId = lots[i].id + 1;
+  const lotIndex = new LotIndex(lots, [terrain.minX, terrain.minZ], [terrain.maxX, terrain.maxZ], 16);
+  const raised = new Uint8Array(maxLotId);
+  const waterRects = terrain.waterRects;
+
+  /**
+   * Walkable surface height: raised block slabs inside the city, terrain everywhere else.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @returns {number} Height in metres.
+   */
+  const surfaceY = (x, z) => {
+    const lot = lotIndex.at(x, z);
+    if (lot && raised[lot.id]) {
+      for (let i = 0; i < waterRects.length; i++) {
+        const r = waterRects[i];
+        if (x > r.x - r.w * 0.5 && x < r.x + r.w * 0.5 && z > r.z - r.d * 0.5 && z < r.z + r.d * 0.5) {
+          return terrain.height(x, z);
+        }
+      }
+      return SIDEWALK_H;
+    }
+    return terrain.height(x, z);
+  };
+
+  // --- node topology ------------------------------------------------------
+  const nodes = city.nodes || [];
+  const roads = city.roads || [];
+  const nodeHalf = new Float32Array(nodes.length);
+  const nodeApproaches = new Array(nodes.length);
+  const roadBox = [Infinity, Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < nodes.length; i++) nodeApproaches[i] = [];
+  for (let i = 0; i < roads.length; i++) {
+    const r = roads[i];
+    roadBox[0] = Math.min(roadBox[0], r.ax - r.width, r.bx - r.width);
+    roadBox[1] = Math.min(roadBox[1], r.az - r.width, r.bz - r.width);
+    roadBox[2] = Math.max(roadBox[2], r.ax + r.width, r.bx + r.width);
+    roadBox[3] = Math.max(roadBox[3], r.az + r.width, r.bz + r.width);
+    const dx = r.bx - r.ax, dz = r.bz - r.az;
+    const len = Math.hypot(dx, dz) || 1;
+    const ux = dx / len, uz = dz / len;
+    const ends = [[r.nodeA, r.ax, r.az, ux, uz], [r.nodeB, r.bx, r.bz, -ux, -uz]];
+    for (let e = 0; e < 2; e++) {
+      const id = ends[e][0];
+      const n = nodes[id];
+      if (!n) continue;
+      if (Math.hypot(n.x - ends[e][1], n.z - ends[e][2]) > 1.4) continue;
+      if (r.width * 0.5 > nodeHalf[id]) nodeHalf[id] = r.width * 0.5;
+      const list = nodeApproaches[id];
+      let dup = false;
+      for (let k = 0; k < list.length; k++) {
+        if (list[k].dx * ends[e][3] + list[k].dz * ends[e][4] > 0.94) { dup = true; break; }
+      }
+      if (!dup) list.push({ dx: ends[e][3], dz: ends[e][4], width: r.width, roadId: r.id });
+    }
+  }
+  if (!isFinite(roadBox[0])) {
+    roadBox[0] = bounds.min[0]; roadBox[1] = bounds.min[1];
+    roadBox[2] = bounds.max[0]; roadBox[3] = bounds.max[1];
+  }
+
+  // --- chunk grids --------------------------------------------------------
+  const blockPitch = (city.blockSize || 64) + (city.roadWidth || 16);
+  const chunkSize = opts.chunkSize || Math.max(120, blockPitch * 2);
+  const gx0 = bounds.min[0] - 60, gz0 = bounds.min[1] - 60;
+  const cnx = Math.max(1, Math.ceil((spanX + 120) / chunkSize));
+  const cnz = Math.max(1, Math.ceil((spanZ + 120) / chunkSize));
+  phase('topology');
+  const chunks = new ChunkGrid(gx0, gz0, chunkSize, cnx, cnz);
+  const coarse = new ChunkGrid(gx0, gz0, chunkSize * 2,
+    Math.max(1, Math.ceil(cnx / 2)), Math.max(1, Math.ceil(cnz / 2)));
+
+  const stats = {
+    batches: 0, triangles: 0, instancedTriangles: 0, staticTriangles: 0,
+    buildings: 0, props: 0, bodies: 0, drawCalls: 0, buildMs: 0
+  };
+
+  const bc = {
+    city, renderer, textures, collision, terrain, lotIndex, raised, surfaceY,
+    seed: (city.seed | 0) || 1337,
+    mats: buildMaterials(renderer, textures),
+    proto: buildPrimitiveCache(),
+    chunks, coarse, stats,
+    nodeHalf, nodeApproaches, roadBox,
+    staticIds: [], bodies: [], lights: [], propGroups: [],
+    signMaterials: new Set(), billboardMaterials: new Set(),
+    markRects: null, buildingBodies: 0,
+    m16: new Float32Array(16)
+  };
+
+  // --- geometry -----------------------------------------------------------
+  phase('materials');
+  buildDistrictGrid(bc);
+  buildTerrainMesh(bc);
+  phase('terrain');
+  buildWaterMesh(bc);
+  buildWaterBodies(bc);
+  phase('water');
+  buildRoadSurfaces(bc);
+  phase('roads');
+  buildRoadMarkings(bc);
+  phase('markings');
+  buildLotSurfaces(bc);
+  phase('lots');
+
+  const buildings = city.buildings || [];
+  for (let i = 0; i < buildings.length; i++) buildBuilding(bc, buildings[i]);
+  stats.buildings = buildings.length;
+  phase('buildings');
+
+  // --- props --------------------------------------------------------------
+  const protos = buildPropPrototypes(bc.proto);
+  const groups = new Map();
+  const props = city.props || [];
+  for (let i = 0; i < props.length; i++) {
+    const p = props[i];
+    let type = p.type;
+    // citygen tags parking meters and wall billboards through `extra`.
+    if (type === 'sign' && p.extra && p.extra.kind === 'meter') type = 'parkingmeter';
+    else if (type === 'billboard' && p.extra && p.extra.onWall) type = 'billboardwall';
+    if (!protos[type]) type = protos[p.type] ? p.type : 'sign';
+    let arr = groups.get(type);
+    if (!arr) { arr = []; groups.set(type, arr); }
+    arr.push(p);
+  }
+  let propCount = 0;
+  for (const [type, list] of groups) {
+    emitPropType(bc, type, list, protos[type]);
+    propCount += list.length;
+  }
+  stats.props = propCount;
+  phase('props');
+
+  // --- traffic lights -----------------------------------------------------
+  const tlProps = groups.get('trafficlight') || [];
+  const tlData = buildTrafficLights(bc, tlProps, protos.trafficlight);
+  const bulbBatches = { red: null, amber: null, green: null };
+  if (tlData.heads.length && typeof renderer.addInstanced === 'function') {
+    const geo = bc.proto.discZ;
+    const cap = tlData.heads.length;
+    bulbBatches.red = renderer.addInstanced(geo, bc.mats.bulbRed, cap);
+    bulbBatches.amber = renderer.addInstanced(geo, bc.mats.bulbAmber, cap);
+    bulbBatches.green = renderer.addInstanced(geo, bc.mats.bulbGreen, cap);
+    const tris = geo.indices.length / 3;
+    for (const k of ['red', 'amber', 'green']) {
+      if (bulbBatches[k]) { stats.batches++; stats.instancedTriangles += tris * cap; }
+    }
+  }
+  const trafficLightByNode = new Map();
+  for (let i = 0; i < tlData.lights.length; i++) trafficLightByNode.set(tlData.lights[i].nodeId, tlData.lights[i]);
+
+  // --- upload static geometry --------------------------------------------
+  chunks.emit(renderer, bc.mats, bc.staticIds, stats);
+  coarse.emit(renderer, bc.mats, bc.staticIds, stats);
+  phase('upload');
+
+  // --- collision ----------------------------------------------------------
+  const hook = installTerrainFunction(collision, surfaceY);
+  stats.terrainHook = hook;
+  stats.bodies = bc.bodies.length;
+  stats.buildingBodies = bc.buildingBodies;
+
+  stats.staticTriangles = stats.triangles;
+  stats.triangles = stats.staticTriangles + stats.instancedTriangles;
+  stats.drawCalls = stats.batches;
+  stats.phases = phases;
+  stats.lights = bc.lights.length;
+  stats.trafficLights = tlData.lights.length;
+  stats.buildMs = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - t0;
+
+  const world = new WorldRender({
+    renderer, collision, city, terrain, surfaceY,
+    mats: bc.mats,
+    lights: bc.lights,
+    bodies: bc.bodies,
+    staticIds: bc.staticIds,
+    propGroups: bc.propGroups,
+    trafficLights: tlData.lights,
+    trafficLightByNode,
+    heads: tlData.heads,
+    headMats: tlData.mats,
+    bulbBatches,
+    signKeys: Array.from(bc.signMaterials),
+    billboardKeys: Array.from(bc.billboardMaterials),
+    minimapData: buildMinimapData(bc),
+    stats
+  });
+  world._applyNight(0);
+  world._lastNight = 0;
+  world._refreshBulbs();
+  return world;
+}
+
+export { WorldRender, TrafficLight };

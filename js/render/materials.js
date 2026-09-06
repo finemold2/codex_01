@@ -188,6 +188,9 @@ export function createMaterial(desc = {}) {
     queue: QUEUE_OPAQUE,
     additive: false,
 
+    // Renderer-owned bookkeeping.
+    _anisoStamp: -1,
+
     // Preallocated uniform payloads (never reallocated).
     _baseColor: new Float32Array(4),
     _params: new Float32Array(4),

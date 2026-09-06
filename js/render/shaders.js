@@ -261,8 +261,8 @@ void main() {
  * Frame uniforms: `uCameraPos`, `uTime`, `uSunDirection` (towards the sun), `uSunColor`
  * (colour * intensity), `uAmbientSky`, `uAmbientGround`, `uFogColor`, `uFogParams`
  * (density, heightFalloff, sunScatter, unused), `uNightFactor`, `uGlobalWet` (wetness, rain),
- * `uShadowParams` (strength, normalBias, depthBias, 1/shadowRes), `uLightViewProj[]`,
- * `uCascadeSplit[]`, `uCascadeTexel[]`, `uShadowMap0..3`, `uLightPosRadius[]`, `uLightColor[]`,
+ * `uShadowParams` (strength, normalBias, depthBiasScale, 1/shadowRes), `uLightViewProj[]`,
+ * `uCascadeSplit[]`, `uCascadeTexel[]`, `uCascadeBias[]`, `uShadowMap0..3`, `uLightPosRadius[]`, `uLightColor[]`,
  * `uLightDir[]`, `uResolution`, `uAoTex`.
  *
  * Material uniforms: `uBaseColor` (rgb, alpha), `uMatParams` (roughness, metallic, reflectance,
@@ -313,6 +313,7 @@ uniform vec2 uResolution;
 uniform mat4 uLightViewProj[SHADOW_CASCADES];
 uniform float uCascadeSplit[SHADOW_CASCADES];
 uniform float uCascadeTexel[SHADOW_CASCADES];
+uniform float uCascadeBias[SHADOW_CASCADES];
 uniform vec4 uShadowParams;
 uniform sampler2D uShadowMap0;
 #if SHADOW_CASCADES > 1
@@ -386,7 +387,9 @@ float shadowFromCascade(int ci, vec3 worldPos, vec3 N, float NoL) {
   vec3 c = lp.xyz / lp.w;
   c = c * 0.5 + 0.5;
   if (c.z >= 1.0 || c.x < 0.002 || c.x > 0.998 || c.y < 0.002 || c.y > 0.998) return 1.0;
-  c.z -= uShadowParams.z * (1.0 + slope * 3.0);
+  // Per-cascade constant bias: a world-space distance already normalised by the cascade's
+  // depth range on the CPU, so the offset stays the same few centimetres in every cascade.
+  c.z -= uCascadeBias[ci] * uShadowParams.z * (1.0 + slope * 3.0);
   float texel = uShadowParams.w;
   if (ci == 0) return pcfShadow(uShadowMap0, c, texel);
 #if SHADOW_CASCADES > 1

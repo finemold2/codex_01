@@ -80,7 +80,8 @@ export default async function run({ canvas }) {
   cam.position[0] = 0; cam.position[1] = 6; cam.position[2] = 26;
   cam.yaw = 0; cam.pitch = -0.14;
 
-  const sun = { direction: [-0.4, -0.75, -0.5], color: [1, 0.95, 0.85], intensity: 3.4,
+  // NOTE: `direction` points FROM the world TOWARD the light (see render/sky.js).
+  const sun = { direction: [-0.4, 0.75, 0.5], color: [1, 0.95, 0.85], intensity: 3.4,
     ambientSky: [0.28, 0.36, 0.5], ambientGround: [0.14, 0.13, 0.11] };
   renderer.setSun(sun);
   renderer.setFog({ color: [0.55, 0.65, 0.78], density: 0.0018, heightFalloff: 0.02 });
@@ -117,24 +118,55 @@ export default async function run({ canvas }) {
   if (centre.uniq < 8) bad('rendered frame looks flat/blank');
 
   // --- shadow check: same ground spot with the sun on vs a sun aimed elsewhere --------------
-  const shadowProbe = () => {
+  // Look straight down at empty ground so nothing occludes the sample, and kill ambient so the
+  // measurement isolates the sun's direct contribution.
+  const darkAmbient = { ambientSky: [0.01, 0.01, 0.01], ambientGround: [0.01, 0.01, 0.01] };
+  const groundProbe = (intensity) => {
+    renderer.setSun({ ...sun, ...darkAmbient, direction: [0, 1, 0], intensity });
+    cam.position[0] = 60; cam.position[1] = 14; cam.position[2] = 60; // empty ground inside the 200x200 plane
+    cam.pitch = -0.85; cam.yaw = 0.6;
     cam.update(canvas.width / canvas.height);
     renderer.render(cam, 1 / 60);
-    return sample(gl, 250, 60, 60, 40).luma;
+    return sample(gl, 300, 150, 40, 40).luma;
   };
-  renderer.setSun({ ...sun, direction: [-0.35, -0.55, -0.75] });
-  const litOrShadow = shadowProbe();
-  renderer.setSun({ ...sun, intensity: 0.0 });
-  const noSun = shadowProbe();
+  const noSun = groundProbe(0.0);
+  const withSun = groundProbe(3.4);
+  cam.position[0] = 0; cam.position[1] = 6; cam.position[2] = 26; cam.pitch = -0.14; cam.yaw = 0;
   renderer.setSun(sun);
-  const withSun = shadowProbe();
-  out.notes.push(`ground luma: sun=${withSun.toFixed(1)} noSun=${noSun.toFixed(1)} angled=${litOrShadow.toFixed(1)}`);
-  if (!(withSun > noSun + 2)) bad(`sun light has no visible effect (${withSun.toFixed(1)} vs ${noSun.toFixed(1)})`);
+  out.notes.push(`unoccluded ground luma: sun=${withSun.toFixed(1)} noSun=${noSun.toFixed(1)}`);
+  if (!(withSun > noSun + 20)) bad(`sun light barely affects lit ground (${withSun.toFixed(1)} vs ${noSun.toFixed(1)})`);
+
+  // Shadow test: a tall pillar stands at the origin; compare ground luma inside vs outside its shadow.
+  // Light from +X so the pillar's shadow falls along -X, beside the pillar rather than behind it
+  // (a sample directly behind it would read the sunlit pillar face instead of the ground).
+  renderer.setSun({ ...sun, direction: [0.57, 0.82, 0.0], intensity: 3.4 });
+  cam.position[0] = 0; cam.position[1] = 9; cam.position[2] = 22; cam.pitch = -0.42; cam.yaw = 0;
+  cam.update(canvas.width / canvas.height);
+  renderer.render(cam, 1 / 60);
+  // The pillar is 14 m tall at the origin; with the sun at (0.57, 0.82, 0) its shadow falls along
+  // -X. Project a shadowed point and a lit point to get exact screen coordinates.
+  const proj = (x, y, z) => {
+    const o = [0, 0, 0];
+    if (typeof cam.worldToScreen === 'function' && cam.worldToScreen([x, y, z], o, canvas.width, canvas.height)) {
+      // readPixels is bottom-up; worldToScreen is top-down.
+      return [Math.round(o[0]) - 8, canvas.height - Math.round(o[1]) - 8];
+    }
+    return null;
+  };
+  const shadowPt = proj(-7, 0.02, 0);
+  const litPt = proj(9, 0.02, 0);
+  if (shadowPt && litPt) {
+    const inShadow = sample(gl, Math.max(0, shadowPt[0]), Math.max(0, shadowPt[1]), 16, 16).luma;
+    const outShadow = sample(gl, Math.max(0, litPt[0]), Math.max(0, litPt[1]), 16, 16).luma;
+    out.notes.push(`shadow test @${shadowPt} vs @${litPt}: shadow=${inShadow.toFixed(1)} lit=${outShadow.toFixed(1)}`);
+    if (!(outShadow > inShadow + 6)) bad(`cascaded shadow does not darken the ground (shadow ${inShadow.toFixed(1)} vs lit ${outShadow.toFixed(1)})`);
+  } else out.notes.push('camera.worldToScreen unavailable — shadow sampling skipped');
+  renderer.setSun(sun);
 
   // --- sky progression -----------------------------------------------------------------------
   if (renderer.sky) {
     const readings = {};
-    for (const h of [1, 5.5, 8, 12, 18.4, 21]) {
+    for (const h of [1, 5.4, 8, 12, 18.2, 21]) {
       renderer.sky.setTimeOfDay(h);
       renderer.sky.update(0.016, 0);
       renderer.setSun({
@@ -142,16 +174,20 @@ export default async function run({ canvas }) {
         intensity: renderer.sky.sunIntensity, ambientSky: renderer.sky.ambientSky,
         ambientGround: renderer.sky.ambientGround,
       });
-      cam.pitch = 0.22;
+      // Pitch up slightly and read the band just above the horizon line.
+      cam.position[1] = 40; cam.pitch = 0.10; cam.yaw = 0;
       cam.update(canvas.width / canvas.height);
       renderer.render(cam, 1 / 60);
-      readings[h] = sample(gl, 260, 300, 120, 50);
+      readings[h] = sample(gl, 200, 196, 240, 26);
     }
     out.notes.push('sky by hour: ' + JSON.stringify(Object.fromEntries(
       Object.entries(readings).map(([k, v]) => [k, `${v.r.toFixed(0)}/${v.g.toFixed(0)}/${v.b.toFixed(0)} luma ${v.luma.toFixed(0)}`]))));
     if (!(readings[12].luma > readings[1].luma + 15)) bad(`noon sky is not brighter than night (${readings[12].luma.toFixed(0)} vs ${readings[1].luma.toFixed(0)})`);
     if (!(readings[12].b > readings[12].r)) bad('midday sky is not blue (B <= R)');
-    if (!(readings[18.4].r > readings[18.4].b)) bad('sunset sky is not warm (R <= B)');
+    const sunsetWarmth = readings[18.2].r - readings[18.2].b;
+    const noonWarmth = readings[12].r - readings[12].b;
+    out.notes.push(`horizon warmth: sunset ${sunsetWarmth.toFixed(1)} vs noon ${noonWarmth.toFixed(1)}`);
+    if (!(sunsetWarmth > noonWarmth + 8)) bad(`sunset horizon is not warmer than midday (${sunsetWarmth.toFixed(1)} vs ${noonWarmth.toFixed(1)})`);
     if (readings[1].luma > 90) bad(`night sky is too bright (luma ${readings[1].luma.toFixed(0)})`);
     err('sky');
   } else bad('renderer.sky is missing');

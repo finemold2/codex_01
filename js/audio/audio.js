@@ -856,15 +856,14 @@ export class AudioEngine {
       panner.panningModel = 'equalpower';
     }
     panner.distanceModel = 'inverse';
-    panner.refDistance = clampNum(o.refDistance, 0.5, 200) || 6;
-    panner.maxDistance = clampNum(o.maxDistance, 10, 20000) || 260;
+    panner.refDistance = Number.isFinite(o.refDistance) ? clampNum(o.refDistance, 0.5, 2000) : 6;
+    panner.maxDistance = Number.isFinite(o.maxDistance) ? clampNum(o.maxDistance, 10, 20000) : 260;
     panner.rolloffFactor = Number.isFinite(o.rolloff) ? clampNum(o.rolloff, 0.05, 8) : 1.1;
     panner.coneInnerAngle = 360;
     panner.coneOuterAngle = 360;
     panner.coneOuterGain = 1;
     const output = ctx.createGain();
-    output.gain.value = clampNum(o.gain, 0, 8);
-    if (!Number.isFinite(o.gain)) output.gain.value = 1;
+    output.gain.value = Number.isFinite(o.gain) ? clampNum(o.gain, 0, 8) : 1;
     const send = ctx.createGain();
     send.gain.value = clampNum(o.reverb, 0, 4);
 
@@ -1287,7 +1286,7 @@ export class AudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = this.getNoiseBuffer(kind);
     src.loop = !!loop;
-    src.playbackRate.value = clampNum(rate, 0.05, 8);
+    src.playbackRate.value = Number.isFinite(rate) ? clampNum(rate, 0.05, 8) : 1;
     return src;
   }
 
@@ -1298,7 +1297,7 @@ export class AudioEngine {
    */
   createDistortion(drive = 2) {
     if (!this._built && !this._build()) return null;
-    const d = clampNum(drive, 0.1, 40);
+    const d = Number.isFinite(drive) ? clampNum(drive, 0.1, 40) : 2;
     const key = Math.round(d * 4);
     let curve = this._curves.get(key);
     if (!curve) {
@@ -1330,8 +1329,8 @@ export class AudioEngine {
     const f = this.ctx.createBiquadFilter();
     f.type = type;
     f.frequency.value = clampFreq(freq);
-    f.Q.value = clampNum(q, 0.0001, 40);
-    if (gainDb) f.gain.value = clampNum(gainDb, -40, 40);
+    f.Q.value = Number.isFinite(q) ? clampNum(q, 0.0001, 40) : 1;
+    if (Number.isFinite(gainDb) && gainDb !== 0) f.gain.value = clampNum(gainDb, -40, 40);
     return f;
   }
 
@@ -1343,7 +1342,7 @@ export class AudioEngine {
   createGain(value = 1) {
     if (!this._built && !this._build()) return null;
     const g = this.ctx.createGain();
-    g.gain.value = clampNum(value, -8, 8);
+    g.gain.value = Number.isFinite(value) ? clampNum(value, -8, 8) : 1;
     return g;
   }
 
@@ -1359,7 +1358,7 @@ export class AudioEngine {
     const o = this.ctx.createOscillator();
     o.type = type;
     o.frequency.value = clampFreq(freq);
-    if (detune) o.detune.value = clampNum(detune, -2400, 2400);
+    if (Number.isFinite(detune) && detune !== 0) o.detune.value = clampNum(detune, -2400, 2400);
     return o;
   }
 
