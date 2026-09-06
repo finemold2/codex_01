@@ -1054,3 +1054,1037 @@ function buildDistricts(ctx) {
     }
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Phase 2 — road rectangles and the keep-out index
+ * ------------------------------------------------------------------ */
+
+/**
+ * Splits every edge polyline into straight road rectangles and fills two
+ * spatial indices: the asphalt index (used by {@link isOnRoad}) and the
+ * keep-out index (asphalt + sidewalk, used by building placement).
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildRoads(ctx) {
+  const b = ctx.bounds;
+  ctx.roads = [];
+  ctx.roadGrid = new Grid2D(b.min[0], b.min[1], b.max[0], b.max[1], HASH_CELL);
+  ctx.blockGrid = new Grid2D(b.min[0], b.min[1], b.max[0], b.max[1], HASH_CELL);
+
+  for (const e of ctx.edges) {
+    for (let s = 0; s + 1 < e.pts.length; s++) {
+      const p = e.pts[s];
+      const q = e.pts[s + 1];
+      const dx = q[0] - p[0];
+      const dz = q[1] - p[1];
+      const len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      const rot = Math.atan2(dz, dx);
+      const road = {
+        id: ctx.roads.length,
+        ax: p[0], az: p[1], bx: q[0], bz: q[1],
+        width: e.width,
+        axis: Math.abs(dx) >= Math.abs(dz) ? 'x' : 'z',
+        lanes: e.lanesPerDir * 2,
+        lanesPerDir: e.lanesPerDir,
+        kind: e.kind,
+        edgeId: e.id,
+        nodeA: e.a,
+        nodeB: e.b
+      };
+      ctx.roads.push(road);
+      e.roadIds.push(road.id);
+      const cx = (p[0] + q[0]) * 0.5;
+      const cz = (p[1] + q[1]) * 0.5;
+      const grow = e.width * 0.5;
+      insertBox(ctx.roadGrid, {
+        x: cx, z: cz, hx: len * 0.5 + grow, hz: e.width * 0.5, rot, road
+      });
+      insertBox(ctx.blockGrid, {
+        x: cx, z: cz, hx: len * 0.5 + grow, hz: e.width * 0.5 + SIDEWALK_W, rot, road
+      });
+    }
+    ctx.nodes[e.a].roads.push(e.roadIds[0]);
+    ctx.nodes[e.b].roads.push(e.roadIds[e.roadIds.length - 1]);
+  }
+
+  // Square asphalt pads so intersection corners also report as "on road".
+  for (const n of ctx.nodes) {
+    let half = 0;
+    for (const eid of n.edges) half = Math.max(half, ctx.edges[eid].width * 0.5);
+    if (half <= 0) continue;
+    insertBox(ctx.roadGrid, { x: n.x, z: n.z, hx: half, hz: half, rot: 0, road: null });
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Phase 3 — lots
+ * ------------------------------------------------------------------ */
+
+/**
+ * Appends one lot.
+ * @param {object} ctx Generation context.
+ * @param {number} x0 Min x.
+ * @param {number} z0 Min z.
+ * @param {number} x1 Max x.
+ * @param {number} z1 Max z.
+ * @param {number} districtId District id.
+ * @param {string} kind Lot kind.
+ * @param {string} surface Surface hint for the renderer.
+ * @returns {object} The lot.
+ */
+function pushLot(ctx, x0, z0, x1, z1, districtId, kind, surface) {
+  const lot = {
+    id: ctx.lots.length,
+    districtId,
+    x: (x0 + x1) * 0.5,
+    z: (z0 + z1) * 0.5,
+    w: x1 - x0,
+    d: z1 - z0,
+    kind,
+    surface,
+    x0, z0, x1, z1
+  };
+  ctx.lots.push(lot);
+  return lot;
+}
+
+/**
+ * Creates one lot per block / superblock plus the beach, sea and fringe lots.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildLots(ctx) {
+  const { blocksX, blocksZ, xRoad, zRoad, roadWX, roadWZ } = ctx;
+  const rng = new Rand(mixSeed(ctx.seed, 'lots'));
+  ctx.lots = [];
+
+  const bx0 = (i) => xRoad[i] + roadWX[i] * 0.5;
+  const bx1 = (i) => xRoad[i + 1] - roadWX[i + 1] * 0.5;
+  const bz0 = (j) => zRoad[j] + roadWZ[j] * 0.5;
+  const bz1 = (j) => zRoad[j + 1] - roadWZ[j + 1] * 0.5;
+
+  for (const sb of ctx.superblocks) {
+    const districtId = ctx.blockDistrict[sb.i0][sb.j0];
+    let kind = 'building';
+    let surface = 'concrete';
+    if (sb.kind === 'park') { kind = 'park'; surface = 'grass'; }
+    else if (sb.kind === 'plaza') { kind = 'plaza'; surface = 'concrete'; }
+    else if (sb.kind === 'railyard') { kind = 'parking'; surface = 'gravel'; }
+    else if (sb.kind === 'parking') { kind = 'parking'; surface = 'asphalt'; }
+    else if (sb.kind === 'stadium') { kind = 'building'; surface = 'concrete'; }
+    const lot = pushLot(ctx, bx0(sb.i0), bz0(sb.j0), bx1(sb.i1), bz1(sb.j1),
+      districtId, kind, surface);
+    lot.superblock = sb.kind;
+    lot.name = sb.name;
+    sb.lotId = lot.id;
+  }
+
+  for (let i = 0; i < blocksX; i++) {
+    for (let j = 0; j < blocksZ; j++) {
+      if (ctx.blockOwner[i][j] !== -1) continue;
+      const districtId = ctx.blockDistrict[i][j];
+      const dk = ctx.districts[districtId].kind;
+      let kind = 'building';
+      let surface = 'concrete';
+      const roll = rng.next();
+      if (dk === 'industrial' && roll < 0.20) { kind = 'parking'; surface = 'asphalt'; }
+      else if (dk === 'midtown' && roll < 0.06) { kind = 'parking'; surface = 'asphalt'; }
+      else if (dk === 'residential' && roll < 0.07) { kind = 'park'; surface = 'grass'; }
+      else if (dk === 'downtown' && roll < 0.05) { kind = 'plaza'; surface = 'concrete'; }
+      else if (dk === 'beach' && roll < 0.14) { kind = 'park'; surface = 'sand'; }
+      const lot = pushLot(ctx, bx0(i), bz0(j), bx1(i), bz1(j), districtId, kind, surface);
+      lot.blockI = i;
+      lot.blockJ = j;
+    }
+  }
+
+  const b = ctx.bounds;
+  // North and west fringe strips.
+  const fringeNorth = ctx.districts[ctx.blockDistrict[Math.floor(blocksX / 2)][0]].id;
+  const fringeWest = ctx.districts[ctx.blockDistrict[0][Math.floor(blocksZ / 2)]].id;
+  pushLot(ctx, ctx.gridMinX, b.min[1], ctx.gridMaxX, ctx.gridMinZ, fringeNorth, 'park', 'grass');
+  pushLot(ctx, b.min[0], b.min[1], ctx.gridMinX, ctx.gridMaxZ, fringeWest, 'park', 'grass');
+
+  if (!ctx.seaSide) {
+    pushLot(ctx, ctx.gridMaxX, b.min[1], b.max[0], ctx.gridMaxZ, fringeNorth, 'park', 'grass');
+    pushLot(ctx, b.min[0], ctx.gridMaxZ, b.max[0], b.max[1], fringeWest, 'park', 'grass');
+    ctx.waterLevel = null;
+    return;
+  }
+
+  const beachSouth = ctx.districts[ctx.blockDistrict[Math.floor(blocksX / 2)][blocksZ - 1]].id;
+  const beachEast = ctx.districts[ctx.blockDistrict[blocksX - 1][Math.floor(blocksZ / 2)]].id;
+  pushLot(ctx, b.min[0], ctx.gridMaxZ, ctx.shoreX, ctx.shoreZ, beachSouth, 'park', 'sand');
+  pushLot(ctx, ctx.gridMaxX, b.min[1], ctx.shoreX, ctx.gridMaxZ, beachEast, 'park', 'sand');
+  pushLot(ctx, b.min[0], ctx.shoreZ, b.max[0], b.max[1], beachSouth, 'water', 'water');
+  pushLot(ctx, ctx.shoreX, b.min[1], b.max[0], ctx.shoreZ, beachEast, 'water', 'water');
+  ctx.waterLevel = WATER_LEVEL;
+}
+
+/* ------------------------------------------------------------------ *
+ * Phase 4 — buildings
+ * ------------------------------------------------------------------ */
+
+/**
+ * Recursively subdivides a lot into building cells separated by alleys.
+ * @param {object} ctx Generation context.
+ * @param {number[][]} cells Output array of `[x0, z0, x1, z1]`.
+ * @param {object[]} alleys Output array of alley descriptors.
+ * @param {number} x0 Min x.
+ * @param {number} z0 Min z.
+ * @param {number} x1 Max x.
+ * @param {number} z1 Max z.
+ * @param {number} target Target cell area in m².
+ * @param {Rand} rng Random source.
+ * @param {number} depth Current recursion depth.
+ * @returns {void}
+ */
+function subdivide(ctx, cells, alleys, x0, z0, x1, z1, target, rng, depth) {
+  const w = x1 - x0;
+  const d = z1 - z0;
+  if (w < 7 || d < 7) return;
+  const area = w * d;
+  if (depth >= 5 || area < target * rr(rng, 1.05, 1.9) || Math.min(w, d) < 13) {
+    cells.push([x0, z0, x1, z1]);
+    return;
+  }
+  const alley = rr(rng, 1.6, 3.4);
+  if (w >= d) {
+    const t = rr(rng, 0.36, 0.64);
+    const xm = x0 + w * t;
+    alleys.push({ x: xm, z: (z0 + z1) * 0.5, len: d, rot: Math.PI * 0.5, width: alley });
+    subdivide(ctx, cells, alleys, x0, z0, xm - alley * 0.5, z1, target, rng, depth + 1);
+    subdivide(ctx, cells, alleys, xm + alley * 0.5, z0, x1, z1, target, rng, depth + 1);
+  } else {
+    const t = rr(rng, 0.36, 0.64);
+    const zm = z0 + d * t;
+    alleys.push({ x: (x0 + x1) * 0.5, z: zm, len: w, rot: 0, width: alley });
+    subdivide(ctx, cells, alleys, x0, z0, x1, zm - alley * 0.5, target, rng, depth + 1);
+    subdivide(ctx, cells, alleys, x0, zm + alley * 0.5, x1, z1, target, rng, depth + 1);
+  }
+}
+
+/** Scratch array reused by the overlap queries during building placement. */
+const _hits = [];
+
+/**
+ * Tests a candidate footprint against roads, sidewalks and existing buildings.
+ * @param {object} ctx Generation context.
+ * @param {number} x Centre x.
+ * @param {number} z Centre z.
+ * @param {number} hx Half width.
+ * @param {number} hz Half depth.
+ * @param {number} rot Rotation.
+ * @param {number} margin Clearance.
+ * @returns {boolean} True when the footprint is free.
+ */
+function footprintFree(ctx, x, z, hx, hz, rot, margin) {
+  const c = Math.abs(Math.cos(rot));
+  const s = Math.abs(Math.sin(rot));
+  const ex = hx * c + hz * s + margin + 1;
+  const ez = hx * s + hz * c + margin + 1;
+  ctx.blockGrid.query(x - ex, z - ez, x + ex, z + ez, _hits);
+  for (let i = 0; i < _hits.length; i++) {
+    const o = _hits[i];
+    if (obbOverlap(x, z, hx, hz, rot, o.x, o.z, o.hx, o.hz, o.rot, margin)) return false;
+  }
+  ctx.buildingGrid.query(x - ex, z - ez, x + ex, z + ez, _hits);
+  for (let i = 0; i < _hits.length; i++) {
+    const o = _hits[i];
+    if (obbOverlap(x, z, hx, hz, rot, o.x, o.z, o.hx, o.hz, o.rot, margin)) return false;
+  }
+  return true;
+}
+
+/**
+ * Picks a building style for a district / footprint combination.
+ * @param {string} dk District kind.
+ * @param {number} area Footprint area.
+ * @param {Rand} rng Random source.
+ * @returns {string} One of the contract styles.
+ */
+function pickStyle(dk, area, rng) {
+  const r = rng.next();
+  switch (dk) {
+    case 'downtown':
+      if (area > 430) return r < 0.72 ? 'tower' : 'office';
+      if (area > 190) return r < 0.45 ? 'office' : r < 0.75 ? 'tower' : 'apartment';
+      return r < 0.7 ? 'shop' : 'office';
+    case 'midtown':
+      if (area > 380) return r < 0.5 ? 'office' : 'apartment';
+      if (area > 150) return r < 0.4 ? 'apartment' : r < 0.75 ? 'office' : 'shop';
+      return r < 0.75 ? 'shop' : 'apartment';
+    case 'residential':
+      if (area > 320) return r < 0.55 ? 'apartment' : 'house';
+      return r < 0.62 ? 'house' : r < 0.86 ? 'shop' : 'apartment';
+    case 'industrial':
+      return r < 0.78 ? 'warehouse' : r < 0.92 ? 'office' : 'shop';
+    case 'beach':
+      return r < 0.5 ? 'house' : r < 0.86 ? 'shop' : 'apartment';
+    default:
+      return r < 0.5 ? 'shop' : 'house';
+  }
+}
+
+/**
+ * Roof shape for a style.
+ * @param {string} style Building style.
+ * @param {number} h Height in metres.
+ * @param {Rand} rng Random source.
+ * @returns {string} 'flat'|'hip'|'setback'|'dome'|'sawtooth'.
+ */
+function pickRoof(style, h, rng) {
+  const r = rng.next();
+  switch (style) {
+    case 'tower': return h > 95 && r < 0.6 ? 'setback' : r < 0.12 ? 'dome' : 'flat';
+    case 'warehouse': return r < 0.6 ? 'sawtooth' : 'flat';
+    case 'house': return r < 0.82 ? 'hip' : 'flat';
+    case 'apartment': return r < 0.14 ? 'hip' : 'flat';
+    case 'office': return r < 0.1 ? 'setback' : 'flat';
+    default: return r < 0.16 ? 'hip' : 'flat';
+  }
+}
+
+/**
+ * Builds the signage array for a building.
+ * @param {object} ctx Generation context.
+ * @param {object} bld Building record.
+ * @param {string} dk District kind.
+ * @param {Rand} rng Random source.
+ * @returns {object[]} Sign descriptors.
+ */
+function makeSigns(ctx, bld, dk, rng) {
+  const signs = [];
+  const face = bld.face;
+  const nx = face === 0 ? 1 : face === 2 ? -1 : 0;
+  const nz = face === 1 ? 1 : face === 3 ? -1 : 0;
+  const halfAlong = (face === 0 || face === 2) ? bld.d * 0.5 : bld.w * 0.5;
+  const halfOut = (face === 0 || face === 2) ? bld.w * 0.5 : bld.d * 0.5;
+  const sx = bld.x + nx * (halfOut + 0.12);
+  const sz = bld.z + nz * (halfOut + 0.12);
+  if (bld.style === 'shop' || (bld.style === 'apartment' && rchance(rng, 0.25))) {
+    const w = Math.min(halfAlong * 1.5, rr(rng, 2.4, 4.6));
+    signs.push({
+      kind: 'shopfront',
+      text: rpick(rng, SHOP_SIGNS),
+      face, nx, nz,
+      x: sx, z: sz,
+      y: Math.min(bld.h - 0.9, 3.35),
+      w, h: 1.0,
+      color: rpick(rng, NEON_COLORS)
+    });
+    if (rchance(rng, 0.35) && bld.h > 7) {
+      signs.push({
+        kind: 'vertical',
+        text: rpick(rng, SHOP_SIGNS),
+        face, nx, nz,
+        x: sx, z: sz,
+        y: bld.h * 0.55,
+        w: 1.1, h: Math.min(bld.h * 0.45, 6.5),
+        color: rpick(rng, NEON_COLORS)
+      });
+    }
+  }
+  if ((bld.style === 'tower' || bld.style === 'office') && bld.h > 26 &&
+      (dk === 'downtown' || dk === 'midtown') && rchance(rng, 0.42)) {
+    signs.push({
+      kind: 'roof',
+      text: rpick(rng, TOWER_SIGNS),
+      face, nx, nz,
+      x: sx, z: sz,
+      y: bld.h - 3.2,
+      w: Math.min(halfAlong * 1.7, 12),
+      h: 2.6,
+      color: rpick(rng, NEON_COLORS)
+    });
+  }
+  if (bld.style === 'warehouse' && rchance(rng, 0.3)) {
+    signs.push({
+      kind: 'shopfront',
+      text: rpick(rng, ['제1창고', '제2창고', '냉동창고', '물류센터', '부두 창고']),
+      face, nx, nz,
+      x: sx, z: sz,
+      y: Math.min(bld.h - 1.2, 5.2),
+      w: Math.min(halfAlong * 1.4, 6.5),
+      h: 1.2,
+      color: [1.6, 1.5, 1.2]
+    });
+  }
+  return signs;
+}
+
+/**
+ * Fills every buildable lot with non-overlapping footprints, then promotes a
+ * few downtown giants to landmark towers.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildBuildings(ctx) {
+  const b = ctx.bounds;
+  const rng = new Rand(mixSeed(ctx.seed, 'buildings'));
+  ctx.buildings = [];
+  ctx.alleys = [];
+  ctx.buildingGrid = new Grid2D(b.min[0], b.min[1], b.max[0], b.max[1], HASH_CELL);
+  ctx.maxRadius = Math.max(ctx.gridMaxX - ctx.gridMinX, ctx.gridMaxZ - ctx.gridMinZ) * 0.5;
+
+  const targets = {
+    downtown: 620, midtown: 360, residential: 200,
+    industrial: 900, beach: 190, park: 260
+  };
+  const heights = {
+    downtown: [60, 160], midtown: [25, 70], residential: [8, 20],
+    industrial: [7, 15], beach: [6, 16], park: [5, 9]
+  };
+
+  for (const lot of ctx.lots) {
+    if (lot.kind !== 'building') continue;
+    const district = ctx.districts[lot.districtId];
+    const dk = district.kind;
+    const inset = SIDEWALK_W + BUILDING_SETBACK;
+    const ux0 = lot.x0 + inset;
+    const uz0 = lot.z0 + inset;
+    const ux1 = lot.x1 - inset;
+    const uz1 = lot.z1 - inset;
+    if (ux1 - ux0 < 8 || uz1 - uz0 < 8) continue;
+
+    if (lot.superblock === 'stadium') {
+      makeStadium(ctx, lot, district, rng);
+      continue;
+    }
+
+    const cells = [];
+    const alleys = [];
+    subdivide(ctx, cells, alleys, ux0, uz0, ux1, uz1, targets[dk] || 260, rng, 0);
+    for (const a of alleys) {
+      if (a.width >= 2.0) ctx.alleys.push(a);
+    }
+
+    for (const cell of cells) {
+      const [cx0, cz0, cx1, cz1] = cell;
+      const cw = cx1 - cx0;
+      const cd = cz1 - cz0;
+      if (cw < 7 || cd < 7) continue;
+      const area = cw * cd;
+      const style = pickStyle(dk, area, rng);
+
+      let rot = 0;
+      if ((style === 'house' || style === 'shop') && rchance(rng, 0.35)) rot = rr(rng, -0.05, 0.05);
+      let w = cw * rr(rng, 0.80, 0.99);
+      let d = cd * rr(rng, 0.80, 0.99);
+      if (style === 'house') {
+        w = Math.min(w, rr(rng, 9, 15));
+        d = Math.min(d, rr(rng, 8, 14));
+      } else if (style === 'warehouse') {
+        w = Math.max(w, cw * 0.9);
+        d = Math.max(d, cd * 0.9);
+      }
+      const ca = Math.abs(Math.cos(rot));
+      const sa = Math.abs(Math.sin(rot));
+      let ex = w * 0.5 * ca + d * 0.5 * sa;
+      let ez = w * 0.5 * sa + d * 0.5 * ca;
+      const fit = Math.min(1, (cw * 0.5) / ex, (cd * 0.5) / ez);
+      w *= fit;
+      d *= fit;
+      ex *= fit;
+      ez *= fit;
+      const slackX = Math.max(0, cw * 0.5 - ex);
+      const slackZ = Math.max(0, cd * 0.5 - ez);
+      let px = (cx0 + cx1) * 0.5 + rr(rng, -1, 1) * slackX;
+      let pz = (cz0 + cz1) * 0.5 + rr(rng, -1, 1) * slackZ;
+
+      // Resolve against roads / neighbours: push out, then shrink, then drop.
+      let placed = false;
+      for (let attempt = 0; attempt < 7 && !placed; attempt++) {
+        if (footprintFree(ctx, px, pz, w * 0.5, d * 0.5, rot, 0.25)) {
+          placed = true;
+          break;
+        }
+        if (attempt < 4) {
+          // _mtv holds the push-out from the last reported overlap.
+          const push = Math.min(_mtv[2] + 0.15, 6);
+          px += _mtv[0] * push;
+          pz += _mtv[1] * push;
+          px = clamp(px, cx0 + ex, cx1 - ex);
+          pz = clamp(pz, cz0 + ez, cz1 - ez);
+        } else {
+          w *= 0.82;
+          d *= 0.82;
+          ex *= 0.82;
+          ez *= 0.82;
+          if (w < 6 || d < 6) break;
+        }
+      }
+      if (!placed) continue;
+
+      const range = heights[dk] || [8, 20];
+      const dc = clamp(Math.hypot(px, pz) / ctx.maxRadius, 0, 1);
+      const n1 = noise2(px / 96, pz / 96, ctx.seed);
+      const n2 = noise2(px / 31, pz / 31, ctx.seed + 7717);
+      let t = clamp((1 - dc) * 0.55 + n1 * 0.32 + n2 * 0.18, 0, 1);
+      if (style === 'house') t *= 0.45;
+      if (style === 'shop') t = Math.min(t, 0.22);
+      if (style === 'warehouse') t = Math.min(t, 0.4);
+      let h = lerp(range[0], range[1], t);
+      if (style === 'tower') h = Math.max(h, range[0] * 1.05);
+      if (style === 'shop') h = clamp(h, 6.4, 11.5);
+      if (style === 'house') h = clamp(h, 5.2, 11.0);
+      if (style === 'warehouse') h = clamp(h, 6.5, 15);
+      h = Math.round(h * 10) / 10;
+
+      const pal = PALETTES[dk] || PALETTES.midtown;
+      const lx = px - lot.x;
+      const lz = pz - lot.z;
+      const face = Math.abs(lx) >= Math.abs(lz) ? (lx >= 0 ? 0 : 2) : (lz >= 0 ? 1 : 3);
+      const bld = {
+        id: ctx.buildings.length,
+        lotId: lot.id,
+        x: px, z: pz, w, d, h,
+        floors: Math.max(1, Math.round(h / FLOOR_HEIGHT)),
+        style,
+        rot,
+        palette: {
+          wall: rpick(rng, pal.wall).slice(),
+          trim: rpick(rng, pal.trim).slice(),
+          glass: rpick(rng, pal.glass).slice()
+        },
+        hasSetback: false,
+        roofKind: pickRoof(style, h, rng),
+        signs: [],
+        face,
+        districtId: lot.districtId
+      };
+      bld.hasSetback = bld.roofKind === 'setback' || (style === 'tower' && h > 110);
+      bld.signs = makeSigns(ctx, bld, dk, rng);
+      ctx.buildings.push(bld);
+      insertBox(ctx.buildingGrid, { x: px, z: pz, hx: w * 0.5, hz: d * 0.5, rot, bld });
+    }
+  }
+
+  promoteLandmarkTowers(ctx, rng);
+}
+
+/**
+ * Places the single stadium volume inside its superblock lot.
+ * @param {object} ctx Generation context.
+ * @param {object} lot Stadium lot.
+ * @param {object} district Owning district.
+ * @param {Rand} rng Random source.
+ * @returns {void}
+ */
+function makeStadium(ctx, lot, district, rng) {
+  const w = lot.w - 26;
+  const d = lot.d - 26;
+  if (w < 20 || d < 20) return;
+  if (!footprintFree(ctx, lot.x, lot.z, w * 0.5, d * 0.5, 0, 0.25)) return;
+  const pal = PALETTES[district.kind] || PALETTES.midtown;
+  const bld = {
+    id: ctx.buildings.length,
+    lotId: lot.id,
+    x: lot.x, z: lot.z, w, d, h: 32,
+    floors: Math.max(1, Math.round(32 / FLOOR_HEIGHT)),
+    style: 'office',
+    rot: 0,
+    palette: {
+      wall: rpick(rng, pal.wall).slice(),
+      trim: [0.24, 0.24, 0.26],
+      glass: rpick(rng, pal.glass).slice()
+    },
+    hasSetback: false,
+    roofKind: 'dome',
+    signs: [{
+      kind: 'roof',
+      text: '스타디움',
+      face: 3, nx: 0, nz: -1,
+      x: lot.x, z: lot.z - d * 0.5 - 0.12,
+      y: 27,
+      w: 14, h: 3.2,
+      color: [3.6, 2.0, 0.35]
+    }],
+    face: 3,
+    districtId: lot.districtId,
+    landmark: true,
+    name: '스타디움'
+  };
+  ctx.buildings.push(bld);
+  insertBox(ctx.buildingGrid, { x: bld.x, z: bld.z, hx: w * 0.5, hz: d * 0.5, rot: 0, bld });
+}
+
+/**
+ * Boosts the largest downtown footprints into signature skyline towers.
+ * @param {object} ctx Generation context.
+ * @param {Rand} rng Random source.
+ * @returns {void}
+ */
+function promoteLandmarkTowers(ctx, rng) {
+  const cands = [];
+  for (const b of ctx.buildings) {
+    if (b.style !== 'tower') continue;
+    if (ctx.districts[b.districtId].kind !== 'downtown') continue;
+    cands.push(b);
+  }
+  cands.sort((a, c) => (c.w * c.d) - (a.w * a.d) || a.id - c.id);
+  const names = ['네온 타워', '오리온 빌딩', '천공 센터', '미래 은행 본점',
+    '한강 트윈타워', '스타 미디어 본사'];
+  ctx.landmarkTowers = [];
+  for (let i = 0; i < Math.min(names.length, cands.length); i++) {
+    const b = cands[i];
+    b.h = Math.round(Math.min(192, Math.max(b.h * 1.28, 118 + i * 2)) * 10) / 10;
+    b.floors = Math.max(1, Math.round(b.h / FLOOR_HEIGHT));
+    b.hasSetback = true;
+    b.roofKind = i === 0 ? 'setback' : (i % 3 === 0 ? 'dome' : 'setback');
+    b.landmark = true;
+    b.name = names[i];
+    const halfOut = (b.face === 0 || b.face === 2) ? b.w * 0.5 : b.d * 0.5;
+    const nx = b.face === 0 ? 1 : b.face === 2 ? -1 : 0;
+    const nz = b.face === 1 ? 1 : b.face === 3 ? -1 : 0;
+    b.signs.push({
+      kind: 'roof',
+      text: names[i],
+      face: b.face, nx, nz,
+      x: b.x + nx * (halfOut + 0.12),
+      z: b.z + nz * (halfOut + 0.12),
+      y: b.h - 4.5,
+      w: Math.min(b.w, b.d) * 0.85,
+      h: 3.4,
+      color: rpick(rng, NEON_COLORS)
+    });
+    ctx.landmarkTowers.push(b);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Phase 5 — directed lane graph
+ * ------------------------------------------------------------------ */
+
+/** Scratch direction vectors used while stitching the graphs together. */
+const _d0 = [0, 0];
+const _d1 = [0, 0];
+const _d2 = [0, 0];
+
+/**
+ * Distance a lane/sidewalk must keep from a node centre so it stops at the
+ * kerb line of every crossing road (exact for perpendicular crossings).
+ * @param {object} ctx Generation context.
+ * @param {number} nodeId Node id.
+ * @param {number} edgeId Edge being trimmed.
+ * @param {number} dx Travel direction x at the node.
+ * @param {number} dz Travel direction z at the node.
+ * @param {number} extra Additional clearance (sidewalk offset for walks).
+ * @returns {number} Trim distance in metres.
+ */
+function nodeTrim(ctx, nodeId, edgeId, dx, dz, extra) {
+  const node = ctx.nodes[nodeId];
+  let best = 0;
+  for (let i = 0; i < node.edges.length; i++) {
+    const fid = node.edges[i];
+    if (fid === edgeId) continue;
+    const f = ctx.edges[fid];
+    let fx;
+    let fz;
+    if (f.a === nodeId) {
+      polyStartDir(f.pts, _d2);
+      fx = _d2[0];
+      fz = _d2[1];
+    } else {
+      polyEndDir(f.pts, _d2);
+      fx = -_d2[0];
+      fz = -_d2[1];
+    }
+    const sn = Math.abs(dx * fz - dz * fx);
+    if (sn < 0.4) continue;
+    const t = (f.width * 0.5 + extra) / sn;
+    if (t > best) best = t;
+  }
+  return best;
+}
+
+/**
+ * Creates the two directed lane bundles of one edge.
+ * @param {object} ctx Generation context.
+ * @param {object} e Edge record.
+ * @returns {void}
+ */
+function buildEdgeLanes(ctx, e) {
+  const len = polyLength(e.pts);
+  polyStartDir(e.pts, _d0);
+  polyEndDir(e.pts, _d1);
+  const capA = len * 0.42;
+  const capB = len * 0.42;
+  const trimA = Math.min(nodeTrim(ctx, e.a, e.id, _d0[0], _d0[1], 0), capA);
+  const trimB = Math.min(nodeTrim(ctx, e.b, e.id, _d1[0], _d1[1], 0), capB);
+  const L = e.lanesPerDir;
+  const slot = e.width / (2 * L);
+  const rev = e.pts.slice().reverse();
+
+  for (let dir = 0; dir < 2; dir++) {
+    const base = dir === 0 ? e.pts : rev;
+    const ts = dir === 0 ? trimA : trimB;
+    const te = dir === 0 ? trimB : trimA;
+    for (let k = 0; k < L; k++) {
+      const off = (k + 0.5) * slot;
+      const line = polyTrim(polyOffset(base, off), ts, te);
+      if (!line) continue;
+      const lane = {
+        id: ctx.lanes.length,
+        pts: line,
+        width: Math.min(slot, 3.8),
+        next: [],
+        nodeId: null,
+        speedLimit: e.speed,
+        oneWay: true,
+        edgeId: e.id,
+        index: k,
+        offset: off,
+        kind: e.kind,
+        fromNode: dir === 0 ? e.a : e.b,
+        toNode: dir === 0 ? e.b : e.a
+      };
+      ctx.lanes.push(lane);
+      (dir === 0 ? e.fwdLanes : e.bwdLanes).push(lane.id);
+    }
+  }
+}
+
+/**
+ * Connects an incoming lane to an outgoing lane, inserting a curved turn lane
+ * through the intersection unless the two already meet.
+ * @param {object} ctx Generation context.
+ * @param {object} node Intersection node.
+ * @param {object} inLane Incoming lane.
+ * @param {object} outLane Outgoing lane.
+ * @param {string} turn 'straight'|'left'|'right'|'uturn'.
+ * @returns {void}
+ */
+function connectLanes(ctx, node, inLane, outLane, turn) {
+  const p0 = inLane.pts[inLane.pts.length - 1];
+  const p1 = outLane.pts[0];
+  const gap = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  polyEndDir(inLane.pts, _d0);
+  polyStartDir(outLane.pts, _d1);
+  const cosang = _d0[0] * _d1[0] + _d0[1] * _d1[1];
+  if (gap < 0.9 && cosang > 0.94) {
+    if (inLane.next.indexOf(outLane.id) < 0) inLane.next.push(outLane.id);
+    return;
+  }
+  const pts = bezierArc(p0, [_d0[0], _d0[1]], p1, [_d1[0], _d1[1]], 6);
+  const lane = {
+    id: ctx.lanes.length,
+    pts,
+    width: Math.min(inLane.width, outLane.width),
+    next: [outLane.id],
+    nodeId: node.id,
+    speedLimit: turn === 'straight'
+      ? Math.min(inLane.speedLimit, outLane.speedLimit)
+      : Math.min(inLane.speedLimit, outLane.speedLimit, SPEED_TURN),
+    oneWay: true,
+    edgeId: -1,
+    index: 0,
+    offset: 0,
+    kind: 'turn',
+    turn,
+    fromNode: node.id,
+    toNode: outLane.toNode
+  };
+  ctx.lanes.push(lane);
+  inLane.next.push(lane.id);
+}
+
+/**
+ * Builds every lane and threads turn lanes through all intersections so that
+ * `next` forms a strongly connected directed graph.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildLanes(ctx) {
+  ctx.lanes = [];
+  for (const e of ctx.edges) buildEdgeLanes(ctx, e);
+
+  for (const node of ctx.nodes) {
+    /** @type {object[]} */
+    const app = [];
+    for (const eid of node.edges) {
+      const e = ctx.edges[eid];
+      if (e.a === node.id) {
+        polyStartDir(e.pts, _d2);
+        app.push({
+          e,
+          inLanes: e.bwdLanes,
+          outLanes: e.fwdLanes,
+          inDir: [-_d2[0], -_d2[1]],
+          outDir: [_d2[0], _d2[1]]
+        });
+      } else {
+        polyEndDir(e.pts, _d2);
+        app.push({
+          e,
+          inLanes: e.fwdLanes,
+          outLanes: e.bwdLanes,
+          inDir: [_d2[0], _d2[1]],
+          outDir: [-_d2[0], -_d2[1]]
+        });
+      }
+    }
+    node.approaches = app.length;
+    const dk = ctx.districts[districtIndexAt(ctx, node.x, node.z)];
+    node.hasTrafficLight = app.length >= 4 ||
+      (app.length === 3 && dk !== undefined && (dk.kind === 'downtown' || dk.kind === 'midtown'));
+
+    for (let a = 0; a < app.length; a++) {
+      const A = app[a];
+      if (A.inLanes.length === 0) continue;
+      for (let b = 0; b < app.length; b++) {
+        if (b === a) continue;
+        const B = app[b];
+        if (B.outLanes.length === 0) continue;
+        const cross = A.inDir[0] * B.outDir[1] - A.inDir[1] * B.outDir[0];
+        const dot = A.inDir[0] * B.outDir[0] + A.inDir[1] * B.outDir[1];
+        const ang = Math.atan2(cross, dot);
+        const abs = Math.abs(ang);
+        if (abs > 2.62 && app.length > 1) continue;   // no U-turns at real junctions
+        const Lin = A.inLanes.length;
+        const Lout = B.outLanes.length;
+        if (abs <= 0.7) {
+          for (let k = 0; k < Lin; k++) {
+            const inLane = ctx.lanes[A.inLanes[k]];
+            let prev = -1;
+            for (let o = -1; o <= 1; o++) {
+              const j = clamp(k + o, 0, Lout - 1);
+              if (j === prev) continue;
+              prev = j;
+              connectLanes(ctx, node, inLane, ctx.lanes[B.outLanes[j]], 'straight');
+            }
+          }
+        } else if (ang > 0) {
+          connectLanes(ctx, node, ctx.lanes[A.inLanes[Lin - 1]],
+            ctx.lanes[B.outLanes[Lout - 1]], 'right');
+        } else {
+          connectLanes(ctx, node, ctx.lanes[A.inLanes[0]],
+            ctx.lanes[B.outLanes[0]], 'left');
+        }
+      }
+    }
+
+    // Dead ends (and any lane the rules above missed) get a U-turn so the
+    // graph never traps a driver.
+    for (let a = 0; a < app.length; a++) {
+      const A = app[a];
+      for (let k = 0; k < A.inLanes.length; k++) {
+        const inLane = ctx.lanes[A.inLanes[k]];
+        if (inLane.next.length > 0) continue;
+        const j = Math.min(k, A.outLanes.length - 1);
+        if (j < 0) continue;
+        connectLanes(ctx, node, inLane, ctx.lanes[A.outLanes[j]], 'uturn');
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Phase 6 — pedestrian graph
+ * ------------------------------------------------------------------ */
+
+/**
+ * Snaps a sidewalk endpoint onto one of a node's kerb corners, creating the
+ * corner the first time it is seen.
+ * @param {object} ctx Generation context.
+ * @param {number} nodeId Node id.
+ * @param {number} x Endpoint x.
+ * @param {number} z Endpoint z.
+ * @returns {number[]} The corner position `[x, z]` (shared instance).
+ */
+function snapCorner(ctx, nodeId, x, z) {
+  let list = ctx.corners.get(nodeId);
+  if (list === undefined) {
+    list = [];
+    ctx.corners.set(nodeId, list);
+  }
+  let best = null;
+  let bestD = 16 * 16;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    const dx = c[0] - x;
+    const dz = c[1] - z;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  if (best !== null) return best;
+  const c = [x, z];
+  list.push(c);
+  return c;
+}
+
+/**
+ * Adds a forward/backward walk pair sharing one polyline.
+ * @param {object} ctx Generation context.
+ * @param {number[][]} pts Polyline.
+ * @param {boolean} crossing True for a road crossing.
+ * @param {number} nodeId Owning node id, or -1.
+ * @param {number} edgeId Owning edge id, or -1.
+ * @returns {void}
+ */
+function addWalkPair(ctx, pts, crossing, nodeId, edgeId) {
+  if (pts.length < 2 || polyLength(pts) < 0.6) return;
+  const a = {
+    id: ctx.walks.length,
+    pts,
+    next: [],
+    crossing,
+    width: SIDEWALK_W,
+    nodeId,
+    edgeId,
+    twin: ctx.walks.length + 1
+  };
+  ctx.walks.push(a);
+  const rev = pts.slice().reverse();
+  const b = {
+    id: ctx.walks.length,
+    pts: rev,
+    next: [],
+    crossing,
+    width: SIDEWALK_W,
+    nodeId,
+    edgeId,
+    twin: a.id
+  };
+  ctx.walks.push(b);
+}
+
+/**
+ * Builds sidewalk centre lines on both sides of every road plus the crossings
+ * that link the kerb corners of each intersection, then wires `next`.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildWalks(ctx) {
+  ctx.walks = [];
+  ctx.corners = new Map();
+
+  // Grid streets first so their exact kerb corners seed every cluster.
+  const order = [];
+  for (const e of ctx.edges) if (e.kind === 'street' || e.kind === 'avenue') order.push(e);
+  for (const e of ctx.edges) if (e.kind !== 'street' && e.kind !== 'avenue') order.push(e);
+
+  for (const e of order) {
+    const len = polyLength(e.pts);
+    polyStartDir(e.pts, _d0);
+    polyEndDir(e.pts, _d1);
+    const trimA = Math.min(nodeTrim(ctx, e.a, e.id, _d0[0], _d0[1], WALK_OFFSET), len * 0.45);
+    const trimB = Math.min(nodeTrim(ctx, e.b, e.id, _d1[0], _d1[1], WALK_OFFSET), len * 0.45);
+    for (let side = 0; side < 2; side++) {
+      const off = (side === 0 ? 1 : -1) * (e.width * 0.5 + WALK_OFFSET);
+      const line = polyTrim(polyOffset(e.pts, off), trimA, trimB);
+      if (!line) continue;
+      const c0 = snapCorner(ctx, e.a, line[0][0], line[0][1]);
+      const c1 = snapCorner(ctx, e.b, line[line.length - 1][0], line[line.length - 1][1]);
+      line[0] = [c0[0], c0[1]];
+      line[line.length - 1] = [c1[0], c1[1]];
+      addWalkPair(ctx, line, false, -1, e.id);
+    }
+  }
+
+  // Crossings: link kerb corners that are neighbours around the intersection.
+  const scratch = [];
+  for (const node of ctx.nodes) {
+    const list = ctx.corners.get(node.id);
+    if (list === undefined || list.length < 2) continue;
+    scratch.length = 0;
+    for (const c of list) {
+      scratch.push({ c, a: Math.atan2(c[1] - node.z, c[0] - node.x) });
+    }
+    scratch.sort((p, q) => p.a - q.a);
+    const n = scratch.length;
+    const limit = n === 2 ? 1 : n;
+    for (let i = 0; i < limit; i++) {
+      const p = scratch[i].c;
+      const q = scratch[(i + 1) % n].c;
+      const dist = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      if (dist < 1 || dist > 72) continue;
+      const mx = (p[0] + q[0]) * 0.5;
+      const mz = (p[1] + q[1]) * 0.5;
+      const crossing = pointOnRoadRects(ctx, mx, mz);
+      addWalkPair(ctx, [[p[0], p[1]], [mx, mz], [q[0], q[1]]], crossing, node.id, -1);
+    }
+  }
+
+  // Wire the graph by exact endpoint identity.
+  /** @type {Map<string, number[]>} */
+  const starts = new Map();
+  for (const w of ctx.walks) {
+    const k = walkKey(w.pts[0]);
+    let arr = starts.get(k);
+    if (arr === undefined) {
+      arr = [];
+      starts.set(k, arr);
+    }
+    arr.push(w.id);
+  }
+  for (const w of ctx.walks) {
+    const arr = starts.get(walkKey(w.pts[w.pts.length - 1]));
+    if (arr === undefined) {
+      w.next.push(w.twin);
+      continue;
+    }
+    for (let i = 0; i < arr.length; i++) {
+      const id = arr[i];
+      if (id === w.id || id === w.twin) continue;
+      w.next.push(id);
+    }
+    if (w.next.length === 0) w.next.push(w.twin);
+  }
+}
+
+/**
+ * Hash key for an endpoint, quantised to a millimetre.
+ * @param {number[]} p Point `[x, z]`.
+ * @returns {string} Map key.
+ */
+function walkKey(p) {
+  return Math.round(p[0] * 1000) + '|' + Math.round(p[1] * 1000);
+}
+
+/**
+ * Point-in-asphalt test against the generation-time road index.
+ * @param {object} ctx Generation context.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @returns {boolean} True when the point lies on a carriageway.
+ */
+function pointOnRoadRects(ctx, x, z) {
+  ctx.roadGrid.query(x - 0.1, z - 0.1, x + 0.1, z + 0.1, _hits);
+  for (let i = 0; i < _hits.length; i++) {
+    const o = _hits[i];
+    if (obbOverlap(x, z, 0.05, 0.05, 0, o.x, o.z, o.hx, o.hz, o.rot, 0)) return true;
+  }
+  return false;
+}
+
+/**
+ * Index of the district rectangle containing a point (falls back to the
+ * nearest rectangle so points on the sea still resolve).
+ * @param {object} ctx Generation context or built city.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @returns {number} District index.
+ */
+function districtIndexAt(ctx, x, z) {
+  const ds = ctx.districts;
+  let bestIdx = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < ds.length; i++) {
+    const r = ds[i].rect;
+    if (x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1) return i;
+    const dx = x < r.x0 ? r.x0 - x : x > r.x1 ? x - r.x1 : 0;
+    const dz = z < r.z0 ? r.z0 - z : z > r.z1 ? z - r.z1 : 0;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) {
+      bestD = d;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}

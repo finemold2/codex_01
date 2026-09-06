@@ -46,10 +46,6 @@ const TWO_PI = Math.PI * 2;
 const _n3 = mat3.create();
 const _va = vec3.create();
 const _vb = vec3.create();
-const _vc = vec3.create();
-const _e1 = vec3.create();
-const _e2 = vec3.create();
-const _cross = vec3.create();
 /** Reusable index scratch used by the ear clipper. */
 const _earIndices = [];
 /** Reusable triangle output scratch used by the ear clipper. */
@@ -1276,13 +1272,20 @@ export function tube(pathPoints3d, radius, radialSeg = 8) {
       nz -= tc[2] * proj;
       let l = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (l < TINY) {
-        nx = 1;
-        ny = 0;
-        nz = 0;
-        const p2 = nx * tc[0] + ny * tc[1] + nz * tc[2];
-        nx -= tc[0] * p2;
-        ny -= tc[1] * p2;
-        nz -= tc[2] * p2;
+        // Drifted onto the tangent: rebuild from the least aligned world axis.
+        const bx0 = Math.abs(tc[0]);
+        const by0 = Math.abs(tc[1]);
+        const bz0 = Math.abs(tc[2]);
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        if (by0 <= bx0 && by0 <= bz0) sy = 1;
+        else if (bx0 <= bz0) sx = 1;
+        else sz = 1;
+        const p2 = sx * tc[0] + sy * tc[1] + sz * tc[2];
+        nx = sx - tc[0] * p2;
+        ny = sy - tc[1] * p2;
+        nz = sz - tc[2] * p2;
         l = Math.sqrt(nx * nx + ny * ny + nz * nz);
       }
       nx /= l;
@@ -1491,5 +1494,489 @@ export function quadStrip(pointsLeft3d, pointsRight3d, uvRepeat = 1) {
 
   const geo = { positions, normals, uvs, indices };
   computeBounds(geo);
+  return geo;
+}
+
+// --- geometry utilities -------------------------------------------------------
+
+/**
+ * Recomputes the axis-aligned bounds of a geometry and stores them on `geo.bounds`.
+ * Existing bound arrays are reused so repeated calls do not allocate.
+ * @param {object} geo Geometry object.
+ * @returns {{min:number[], max:number[]}} The refreshed bounds.
+ */
+export function computeBounds(geo) {
+  const p = geo.positions;
+  let minX = 0;
+  let minY = 0;
+  let minZ = 0;
+  let maxX = 0;
+  let maxY = 0;
+  let maxZ = 0;
+  if (p && p.length >= 3) {
+    minX = Infinity; minY = Infinity; minZ = Infinity;
+    maxX = -Infinity; maxY = -Infinity; maxZ = -Infinity;
+    for (let i = 0; i < p.length; i += 3) {
+      const x = p[i];
+      const y = p[i + 1];
+      const z = p[i + 2];
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+  }
+  let b = geo.bounds;
+  if (!b || !b.min || !b.max || b.min.length < 3 || b.max.length < 3) {
+    b = { min: [0, 0, 0], max: [0, 0, 0] };
+    geo.bounds = b;
+  }
+  b.min[0] = minX; b.min[1] = minY; b.min[2] = minZ;
+  b.max[0] = maxX; b.max[1] = maxY; b.max[2] = maxZ;
+  return b;
+}
+
+/**
+ * Number of triangles a geometry draws.
+ * @param {object} geo Geometry object.
+ * @returns {number} Triangle count.
+ */
+export function geometryTriangleCount(geo) {
+  if (!geo) return 0;
+  if (geo.indices && geo.indices.length) return Math.floor(geo.indices.length / 3);
+  if (geo.positions) return Math.floor(geo.positions.length / 9);
+  return 0;
+}
+
+/**
+ * Transforms a geometry in place by a column-major mat4. Positions go through the
+ * full matrix, normals through the inverse-transpose, and triangle winding is
+ * reversed when the transform mirrors (negative determinant).
+ * @param {object} geo Geometry object (mutated).
+ * @param {ArrayLike<number>} matrix Column-major 4x4 matrix.
+ * @returns {object} geo
+ */
+export function transformGeometry(geo, matrix) {
+  const p = geo.positions;
+  if (!p || !matrix) return geo;
+  for (let i = 0; i < p.length; i += 3) {
+    _va[0] = p[i];
+    _va[1] = p[i + 1];
+    _va[2] = p[i + 2];
+    vec3.transformMat4(_vb, _va, matrix);
+    p[i] = _vb[0];
+    p[i + 1] = _vb[1];
+    p[i + 2] = _vb[2];
+  }
+  const n = geo.normals;
+  if (n && n.length === p.length) {
+    mat3.normalFromMat4(_n3, matrix);
+    const m0 = _n3[0], m1 = _n3[1], m2 = _n3[2];
+    const m3 = _n3[3], m4 = _n3[4], m5 = _n3[5];
+    const m6 = _n3[6], m7 = _n3[7], m8 = _n3[8];
+    for (let i = 0; i < n.length; i += 3) {
+      const x = n[i];
+      const y = n[i + 1];
+      const z = n[i + 2];
+      let nx = m0 * x + m3 * y + m6 * z;
+      let ny = m1 * x + m4 * y + m7 * z;
+      let nz = m2 * x + m5 * y + m8 * z;
+      const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (l > TINY) {
+        nx /= l;
+        ny /= l;
+        nz /= l;
+      } else {
+        nx = 0;
+        ny = 1;
+        nz = 0;
+      }
+      n[i] = nx;
+      n[i + 1] = ny;
+      n[i + 2] = nz;
+    }
+  }
+  if (det3OfMat4(matrix) < 0 && geo.indices) {
+    const idx = geo.indices;
+    for (let i = 0; i + 2 < idx.length; i += 3) {
+      const t = idx[i + 1];
+      idx[i + 1] = idx[i + 2];
+      idx[i + 2] = t;
+    }
+  }
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Translates a geometry in place.
+ * @param {object} geo Geometry object (mutated).
+ * @param {number} x Offset along X (meters).
+ * @param {number} y Offset along Y (meters).
+ * @param {number} z Offset along Z (meters).
+ * @returns {object} geo
+ */
+export function translateGeometry(geo, x, y, z) {
+  const p = geo.positions;
+  if (!p) return geo;
+  for (let i = 0; i < p.length; i += 3) {
+    p[i] += x;
+    p[i + 1] += y;
+    p[i + 2] += z;
+  }
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Scales a geometry in place. Normals are corrected with the inverse-transpose so
+ * non-uniform scaling stays correct, and winding flips when the scale mirrors.
+ * @param {object} geo Geometry object (mutated).
+ * @param {number} sx Scale along X.
+ * @param {number} sy Scale along Y.
+ * @param {number} sz Scale along Z.
+ * @returns {object} geo
+ */
+export function scaleGeometry(geo, sx, sy, sz) {
+  const p = geo.positions;
+  if (!p) return geo;
+  for (let i = 0; i < p.length; i += 3) {
+    p[i] *= sx;
+    p[i + 1] *= sy;
+    p[i + 2] *= sz;
+  }
+  const n = geo.normals;
+  if (n && n.length === p.length) {
+    const ix = Math.abs(sx) > TINY ? 1 / sx : 0;
+    const iy = Math.abs(sy) > TINY ? 1 / sy : 0;
+    const iz = Math.abs(sz) > TINY ? 1 / sz : 0;
+    for (let i = 0; i < n.length; i += 3) {
+      let nx = n[i] * ix;
+      let ny = n[i + 1] * iy;
+      let nz = n[i + 2] * iz;
+      const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (l > TINY) {
+        nx /= l;
+        ny /= l;
+        nz /= l;
+      } else {
+        nx = 0;
+        ny = 1;
+        nz = 0;
+      }
+      n[i] = nx;
+      n[i + 1] = ny;
+      n[i + 2] = nz;
+    }
+  }
+  if (sx * sy * sz < 0 && geo.indices) {
+    const idx = geo.indices;
+    for (let i = 0; i + 2 < idx.length; i += 3) {
+      const t = idx[i + 1];
+      idx[i + 1] = idx[i + 2];
+      idx[i + 2] = t;
+    }
+  }
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Fills the per-vertex color attribute with a single linear rgb value, allocating
+ * the attribute when it is missing.
+ * @param {object} geo Geometry object (mutated).
+ * @param {ArrayLike<number>} rgb Linear color [r, g, b].
+ * @returns {object} geo
+ */
+export function colorizeGeometry(geo, rgb) {
+  const p = geo.positions;
+  if (!p) return geo;
+  if (!geo.colors || geo.colors.length !== p.length) geo.colors = new Float32Array(p.length);
+  const c = geo.colors;
+  const r = rgb ? (rgb[0] || 0) : 1;
+  const g = rgb ? (rgb[1] || 0) : 1;
+  const b = rgb ? (rgb[2] || 0) : 1;
+  for (let i = 0; i < c.length; i += 3) {
+    c[i] = r;
+    c[i + 1] = g;
+    c[i + 2] = b;
+  }
+  return geo;
+}
+
+/**
+ * Merges many geometries into one, applying an optional per-entry matrix.
+ * Runs in two passes (count, then fill) with no intermediate per-part arrays, so
+ * it stays cheap for thousands of city parts. When any entry carries a color the
+ * merged mesh gets a complete vertex-color attribute (missing colors become white)
+ * so the attribute layout stays consistent.
+ * @param {Array<{geometry?:object, matrix?:ArrayLike<number>, color?:ArrayLike<number>}>} list
+ *   Entries; a bare geometry object is also accepted.
+ * @returns {object} Merged geometry with Uint32Array indices and refreshed bounds.
+ */
+export function mergeGeometries(list) {
+  if (!list || list.length === 0) return emptyGeometry();
+  const count = list.length;
+  let vertexTotal = 0;
+  let indexTotal = 0;
+  let needColors = false;
+  for (let i = 0; i < count; i++) {
+    const entry = list[i];
+    if (!entry) continue;
+    const geo = entry.positions ? entry : entry.geometry;
+    if (!geo || !geo.positions || geo.positions.length < 3) continue;
+    const vc = Math.floor(geo.positions.length / 3);
+    vertexTotal += vc;
+    indexTotal += geo.indices && geo.indices.length ? geo.indices.length : vc;
+    if (!needColors && (entry.color || geo.colors)) needColors = true;
+  }
+  if (vertexTotal === 0) return emptyGeometry();
+
+  const positions = new Float32Array(vertexTotal * 3);
+  const normals = new Float32Array(vertexTotal * 3);
+  const uvs = new Float32Array(vertexTotal * 2);
+  const indices = new Uint32Array(indexTotal);
+  const colors = needColors ? new Float32Array(vertexTotal * 3) : null;
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  let vBase = 0;
+  let iBase = 0;
+  for (let e = 0; e < count; e++) {
+    const entry = list[e];
+    if (!entry) continue;
+    const geo = entry.positions ? entry : entry.geometry;
+    if (!geo || !geo.positions || geo.positions.length < 3) continue;
+    const src = geo.positions;
+    const vc = Math.floor(src.length / 3);
+    const srcN = geo.normals && geo.normals.length === src.length ? geo.normals : null;
+    const srcU = geo.uvs && geo.uvs.length === vc * 2 ? geo.uvs : null;
+    const srcC = geo.colors && geo.colors.length === src.length ? geo.colors : null;
+    const m = entry.matrix || null;
+    const tint = entry.color || null;
+    let flip = false;
+
+    if (m) {
+      const m0 = m[0], m1 = m[1], m2 = m[2];
+      const m4 = m[4], m5 = m[5], m6 = m[6];
+      const m8 = m[8], m9 = m[9], m10 = m[10];
+      const m12 = m[12], m13 = m[13], m14 = m[14];
+      mat3.normalFromMat4(_n3, m);
+      const n0 = _n3[0], n1 = _n3[1], n2 = _n3[2];
+      const n3 = _n3[3], n4 = _n3[4], n5 = _n3[5];
+      const n6 = _n3[6], n7 = _n3[7], n8 = _n3[8];
+      flip = det3OfMat4(m) < 0;
+      for (let v = 0; v < vc; v++) {
+        const s = v * 3;
+        const o = (vBase + v) * 3;
+        const x = src[s];
+        const y = src[s + 1];
+        const z = src[s + 2];
+        const px = m0 * x + m4 * y + m8 * z + m12;
+        const py = m1 * x + m5 * y + m9 * z + m13;
+        const pz = m2 * x + m6 * y + m10 * z + m14;
+        positions[o] = px;
+        positions[o + 1] = py;
+        positions[o + 2] = pz;
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (pz < minZ) minZ = pz;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+        if (pz > maxZ) maxZ = pz;
+        let nx = 0;
+        let ny = 1;
+        let nz = 0;
+        if (srcN) {
+          const sx = srcN[s];
+          const sy = srcN[s + 1];
+          const sz = srcN[s + 2];
+          nx = n0 * sx + n3 * sy + n6 * sz;
+          ny = n1 * sx + n4 * sy + n7 * sz;
+          nz = n2 * sx + n5 * sy + n8 * sz;
+          const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+          if (l > TINY) {
+            nx /= l;
+            ny /= l;
+            nz /= l;
+          } else {
+            nx = 0;
+            ny = 1;
+            nz = 0;
+          }
+        }
+        normals[o] = nx;
+        normals[o + 1] = ny;
+        normals[o + 2] = nz;
+      }
+    } else {
+      for (let v = 0; v < vc; v++) {
+        const s = v * 3;
+        const o = (vBase + v) * 3;
+        const px = src[s];
+        const py = src[s + 1];
+        const pz = src[s + 2];
+        positions[o] = px;
+        positions[o + 1] = py;
+        positions[o + 2] = pz;
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (pz < minZ) minZ = pz;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+        if (pz > maxZ) maxZ = pz;
+        normals[o] = srcN ? srcN[s] : 0;
+        normals[o + 1] = srcN ? srcN[s + 1] : 1;
+        normals[o + 2] = srcN ? srcN[s + 2] : 0;
+      }
+    }
+
+    for (let v = 0; v < vc; v++) {
+      const o = (vBase + v) * 2;
+      uvs[o] = srcU ? srcU[v * 2] : 0;
+      uvs[o + 1] = srcU ? srcU[v * 2 + 1] : 0;
+    }
+
+    if (colors) {
+      const cr = tint ? (tint[0] !== undefined ? tint[0] : 1) : 1;
+      const cg = tint ? (tint[1] !== undefined ? tint[1] : 1) : 1;
+      const cb = tint ? (tint[2] !== undefined ? tint[2] : 1) : 1;
+      for (let v = 0; v < vc; v++) {
+        const o = (vBase + v) * 3;
+        if (tint) {
+          colors[o] = cr;
+          colors[o + 1] = cg;
+          colors[o + 2] = cb;
+        } else if (srcC) {
+          colors[o] = srcC[v * 3];
+          colors[o + 1] = srcC[v * 3 + 1];
+          colors[o + 2] = srcC[v * 3 + 2];
+        } else {
+          colors[o] = 1;
+          colors[o + 1] = 1;
+          colors[o + 2] = 1;
+        }
+      }
+    }
+
+    const srcI = geo.indices;
+    if (srcI && srcI.length) {
+      const len = srcI.length;
+      if (flip) {
+        for (let i = 0; i + 2 < len; i += 3) {
+          indices[iBase + i] = srcI[i] + vBase;
+          indices[iBase + i + 1] = srcI[i + 2] + vBase;
+          indices[iBase + i + 2] = srcI[i + 1] + vBase;
+        }
+        // Carry over a trailing partial triangle, if any, unchanged.
+        for (let i = len - (len % 3); i < len; i++) indices[iBase + i] = srcI[i] + vBase;
+      } else {
+        for (let i = 0; i < len; i++) indices[iBase + i] = srcI[i] + vBase;
+      }
+      iBase += len;
+    } else {
+      if (flip) {
+        for (let i = 0; i + 2 < vc; i += 3) {
+          indices[iBase + i] = vBase + i;
+          indices[iBase + i + 1] = vBase + i + 2;
+          indices[iBase + i + 2] = vBase + i + 1;
+        }
+        for (let i = vc - (vc % 3); i < vc; i++) indices[iBase + i] = vBase + i;
+      } else {
+        for (let i = 0; i < vc; i++) indices[iBase + i] = vBase + i;
+      }
+      iBase += vc;
+    }
+    vBase += vc;
+  }
+
+  const geo = { positions, normals, uvs, indices };
+  if (colors) geo.colors = colors;
+  geo.bounds = {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ]
+  };
+  return geo;
+}
+
+/**
+ * Recomputes smooth vertex normals, area weighted (the raw cross product of each
+ * triangle is proportional to twice its area) and welded across vertices that
+ * share a position within 1e-4 m, so duplicated seam vertices still shade smoothly.
+ * @param {object} geo Geometry object (mutated; `normals` is allocated if absent).
+ * @returns {object} geo
+ */
+export function computeNormals(geo) {
+  const pos = geo.positions;
+  if (!pos || pos.length < 9) return geo;
+  const vc = Math.floor(pos.length / 3);
+  if (!geo.normals || geo.normals.length !== pos.length) geo.normals = new Float32Array(pos.length);
+  const nrm = geo.normals;
+
+  const map = new Map();
+  const rep = new Int32Array(vc);
+  const inv = 1 / WELD_TOLERANCE;
+  for (let v = 0; v < vc; v++) {
+    const s = v * 3;
+    const key = Math.round(pos[s] * inv) + '|' + Math.round(pos[s + 1] * inv) + '|' +
+      Math.round(pos[s + 2] * inv);
+    const found = map.get(key);
+    if (found === undefined) {
+      map.set(key, v);
+      rep[v] = v;
+    } else {
+      rep[v] = found;
+    }
+  }
+
+  const accum = new Float64Array(vc * 3);
+  const idx = geo.indices;
+  const triCount = idx && idx.length ? Math.floor(idx.length / 3) : Math.floor(vc / 3);
+  for (let t = 0; t < triCount; t++) {
+    const ia = idx && idx.length ? idx[t * 3] : t * 3;
+    const ib = idx && idx.length ? idx[t * 3 + 1] : t * 3 + 1;
+    const ic = idx && idx.length ? idx[t * 3 + 2] : t * 3 + 2;
+    const a = ia * 3;
+    const b = ib * 3;
+    const c = ic * 3;
+    const e1x = pos[b] - pos[a];
+    const e1y = pos[b + 1] - pos[a + 1];
+    const e1z = pos[b + 2] - pos[a + 2];
+    const e2x = pos[c] - pos[a];
+    const e2y = pos[c + 1] - pos[a + 1];
+    const e2z = pos[c + 2] - pos[a + 2];
+    const fx = e1y * e2z - e1z * e2y;
+    const fy = e1z * e2x - e1x * e2z;
+    const fz = e1x * e2y - e1y * e2x;
+    const ra = rep[ia] * 3;
+    const rb = rep[ib] * 3;
+    const rc = rep[ic] * 3;
+    accum[ra] += fx; accum[ra + 1] += fy; accum[ra + 2] += fz;
+    accum[rb] += fx; accum[rb + 1] += fy; accum[rb + 2] += fz;
+    accum[rc] += fx; accum[rc + 1] += fy; accum[rc + 2] += fz;
+  }
+
+  for (let v = 0; v < vc; v++) {
+    const r = rep[v] * 3;
+    let nx = accum[r];
+    let ny = accum[r + 1];
+    let nz = accum[r + 2];
+    const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (l > TINY) {
+      nx /= l;
+      ny /= l;
+      nz /= l;
+    } else {
+      nx = 0;
+      ny = 1;
+      nz = 0;
+    }
+    const o = v * 3;
+    nrm[o] = nx;
+    nrm[o + 1] = ny;
+    nrm[o + 2] = nz;
+  }
   return geo;
 }

@@ -24,13 +24,14 @@ const MAX_MOUSE_DELTA = 200;
 const TOUCH_STICK_RADIUS = 68;
 
 /** Keyboard codes whose browser default we always swallow so the page never steals them. */
-const ALWAYS_PREVENT = Object.freeze({
+const ALWAYS_PREVENT = Object.freeze(Object.assign(Object.create(null), {
   tab: true, space: true, arrowup: true, arrowdown: true, arrowleft: true, arrowright: true,
   slash: true, quote: true,
-});
+}));
 
 /** DOM node names that own their own keyboard input (menus with text fields). */
-const TEXT_INPUT_NODES = Object.freeze({ INPUT: true, TEXTAREA: true, SELECT: true });
+const TEXT_INPUT_NODES = Object.freeze(Object.assign(Object.create(null),
+  { INPUT: true, TEXTAREA: true, SELECT: true }));
 
 /**
  * Standard-mapping gamepad button index -> canonical code.
@@ -62,6 +63,13 @@ const PAD_CODE_INDEX = (() => {
   map.paddpadup = 12; map.paddpaddown = 13; map.paddpadleft = 14; map.paddpadright = 15;
   return Object.freeze(map);
 })();
+
+/** Mouse button index -> canonical code. @type {ReadonlyArray<string>} */
+const MOUSE_CODES = Object.freeze(['mouse0', 'mouse1', 'mouse2', 'mouse3', 'mouse4']);
+
+/** Mouse code -> button index. */
+const MOUSE_CODE_INDEX = Object.freeze(Object.assign(Object.create(null),
+  { mouse0: 0, mouse1: 1, mouse2: 2, mouse3: 3, mouse4: 4 }));
 
 /**
  * Default action -> device code bindings (keyboard + mouse), exactly as documented in
@@ -130,7 +138,7 @@ export const DEFAULT_GAMEPAD_BINDINGS = Object.freeze({
 const DEFAULT_UI_ACTIONS = Object.freeze(['pause', 'map']);
 
 /** Human-readable labels for codes that would otherwise render badly in the controls menu. */
-const CODE_LABELS = Object.freeze({
+const CODE_LABELS = Object.freeze(Object.assign(Object.create(null), {
   space: 'Space', tab: 'Tab', escape: 'Esc', enter: 'Enter', backspace: 'Backspace',
   arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→',
   shiftleft: 'L-Shift', shiftright: 'R-Shift', controlleft: 'L-Ctrl', controlright: 'R-Ctrl',
@@ -141,7 +149,7 @@ const CODE_LABELS = Object.freeze({
   pada: 'A', padb: 'B', padx: 'X', pady: 'Y', padlb: 'LB', padrb: 'RB', padlt: 'LT', padrt: 'RT',
   padback: 'Back', padstart: 'Start', padls: 'L3', padrs: 'R3', padup: 'D-Up', paddown: 'D-Down',
   padleft: 'D-Left', padright: 'D-Right', padguide: 'Guide',
-});
+}));
 
 /**
  * Applies a radial deadzone plus a smooth response curve to a single stick axis pair.
@@ -317,6 +325,10 @@ export class Input {
     this._stickR = { x: 0, y: 0 };
 
     // ---------------------------------------------------------------- gamepad internals
+    // ---------------------------------------------------------------- mouse internals
+    /** Digital mouse button state, index-aligned with `MOUSE_CODES`. @type {Uint8Array} */
+    this._mouseDown = new Uint8Array(MOUSE_CODES.length);
+
     /** Digital button state, index-aligned with `PAD_BUTTON_CODES`. @type {Uint8Array} */
     this._padDown = new Uint8Array(PAD_BUTTON_CODES.length);
     /** Reused gamepad snapshot so `this.gamepad` never reallocates. */
@@ -578,8 +590,9 @@ export class Input {
 
   /**
    * Derived analog axis in -1..1. Returns 0 while `blocked`.
-   * `moveY` and `throttle` are positive forward, `moveX` / `steer` positive right,
-   * `lookX` positive right and `lookY` positive up (before `invertY`).
+   * `moveY` and `throttle` are positive forward, `moveX` / `steer` positive right.
+   * Look axes are expressed the way the camera consumes them (`yaw -= lookX`, `pitch -= lookY`),
+   * so `lookX > 0` turns right and `lookY > 0` looks down before `invertY` is applied.
    * @param {'moveX'|'moveY'|'lookX'|'lookY'|'throttle'|'steer'} name
    * @returns {number}
    */
@@ -798,8 +811,8 @@ export class Input {
   injectKey(code, down) {
     const norm = Input.normalizeCode(code);
     if (!norm) return;
-    if (down) this._pressCode(norm, this.keys);
-    else this._releaseCode(norm, this.keys);
+    if (down) this._pressCode(norm);
+    else this._releaseCode(norm);
   }
 
   /**

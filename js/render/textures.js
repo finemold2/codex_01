@@ -2790,3 +2790,555 @@ function genGraffiti(index, S, seed) {
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
+
+/* ------------------------------------------------------------------------- *
+ * 3d. Particle sprites, decals and lookup textures
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Soft smoke puff: radial falloff broken up by fBm so plumes look turbulent.
+ * @param {number} S Sprite size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genSmoke(S, seed) {
+  const noise = new NoiseSource(seed);
+  const puff = fbmField(S, S, noise, { freq: 4, octaves: 4, gain: 0.55 });
+  const detail = fbmField(S, S, new NoiseSource(seed + 1), { freq: 11, octaves: 3 });
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const c = (S - 1) * 0.5;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const dy = (y - c) / c;
+    for (let x = 0; x < S; x++) {
+      const i = row + x;
+      const dx = (x - c) / c;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const shape = 1 - smoothstep(0.15, 1.0, d + (puff[i] - 0.5) * 0.55);
+      const a = clamp(shape * (0.55 + detail[i] * 0.7), 0, 1);
+      const lum = 176 + detail[i] * 60 + (1 - d) * 22;
+      const p = i * 4;
+      px[p] = lum; px[p + 1] = lum; px[p + 2] = lum * 1.02;
+      px[p + 3] = a * 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Hot spark streak (long on X, thin on Y) with a white core.
+ * @param {number} S Sprite size.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genSpark(S) {
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const c = (S - 1) * 0.5;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const dy = (y - c) / (S * 0.06);
+    for (let x = 0; x < S; x++) {
+      const dx = (x - c) / (S * 0.46);
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const core = Math.exp(-d * d * 5.5);
+      const tail = Math.exp(-Math.abs(dx) * 2.2) * Math.exp(-dy * dy * 1.6) * 0.55;
+      const a = clamp(core + tail, 0, 1);
+      const heat = clamp(core * 1.6, 0, 1);
+      const p = (row + x) * 4;
+      px[p] = 255;
+      px[p + 1] = lerp(150, 246, heat);
+      px[p + 2] = lerp(46, 210, heat * heat);
+      px[p + 3] = a * 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Omnidirectional light flash: hot core, soft halo and thin star spikes.
+ * @param {number} S Sprite size.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genFlash(S) {
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const c = (S - 1) * 0.5;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const dy = (y - c) / c;
+    for (let x = 0; x < S; x++) {
+      const dx = (x - c) / c;
+      const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
+      const ang = Math.atan2(dy, dx);
+      const halo = Math.exp(-d * d * 6.5);
+      const core = Math.exp(-d * d * 60);
+      const spikes = Math.pow(Math.max(0, Math.cos(ang * 4)), 12) * Math.exp(-d * 3.4) * 0.55;
+      const ring = Math.exp(-Math.pow((d - 0.42) * 7.5, 2)) * 0.18;
+      const a = clamp(halo * 0.8 + core + spikes + ring, 0, 1);
+      const p = (row + x) * 4;
+      px[p] = 255;
+      px[p + 1] = lerp(214, 255, clamp(core + spikes, 0, 1));
+      px[p + 2] = lerp(150, 246, clamp(core * 1.4, 0, 1));
+      px[p + 3] = a * 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Blood splat: irregular core plus satellite droplets.
+ * @param {number} S Sprite size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genBlood(S, seed) {
+  const rng = new Rand(seed ^ 0xb100d);
+  const noise = new NoiseSource(seed + 2);
+  const wobble = fbmField(S, S, noise, { freq: 5, octaves: 3 });
+  const field = new Float32Array(S * S);
+  splatBlob(field, S, S, S * 0.5, S * 0.5, S * 0.30, 1.0, wobble);
+  for (let i = 0; i < 16; i++) {
+    const ang = rng.next() * TWO_PI;
+    const r = S * rng.range(0.18, 0.44);
+    splatBlob(field, S, S, S * 0.5 + Math.cos(ang) * r, S * 0.5 + Math.sin(ang) * r,
+      S * rng.range(0.015, 0.06), rng.range(0.6, 1.0), wobble);
+  }
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  for (let i = 0, p = 0; i < S * S; i++, p += 4) {
+    const a = clamp(field[i] * 1.35 - 0.12, 0, 1);
+    const thick = smoothstep(0.2, 0.9, field[i]);
+    px[p] = lerp(78, 148, thick);
+    px[p + 1] = lerp(6, 16, thick);
+    px[p + 2] = lerp(8, 18, thick);
+    px[p + 3] = (a > 0.06 ? a : 0) * 255;
+  }
+  bleedAlpha(px, S, S, 2);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Broken glass shard with bright refracted edges.
+ * @param {number} S Sprite size.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genGlassShard(S) {
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  ctx.clearRect(0, 0, S, S);
+  ctx.beginPath();
+  ctx.moveTo(S * 0.50, S * 0.06);
+  ctx.lineTo(S * 0.86, S * 0.62);
+  ctx.lineTo(S * 0.58, S * 0.94);
+  ctx.lineTo(S * 0.16, S * 0.52);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(S * 0.2, 0, S * 0.9, S);
+  grad.addColorStop(0, 'rgba(214,246,255,0.92)');
+  grad.addColorStop(0.45, 'rgba(126,186,206,0.55)');
+  grad.addColorStop(1, 'rgba(206,240,255,0.85)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(246,255,255,0.95)';
+  ctx.lineWidth = Math.max(1, S * 0.02);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(S * 0.50, S * 0.10);
+  ctx.lineTo(S * 0.55, S * 0.86);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = Math.max(1, S * 0.012);
+  ctx.stroke();
+  const img = ctx.getImageData(0, 0, S, S);
+  bleedAlpha(img.data, S, S, 2);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: img.data };
+}
+
+/**
+ * Falling rain streak (tall, thin, soft ends).
+ * @param {number} W Sprite width.
+ * @param {number} H Sprite height.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genRaindrop(W, H) {
+  const canvas = createCanvas(W, H);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, W, H);
+  const px = img.data;
+  const cx = (W - 1) * 0.5;
+  for (let y = 0; y < H; y++) {
+    const t = y / (H - 1);
+    const along = Math.sin(t * Math.PI);
+    const widthAt = 0.30 + along * 0.55;
+    for (let x = 0; x < W; x++) {
+      const dx = Math.abs(x - cx) / (W * 0.5 * widthAt);
+      const a = clamp((1 - smoothstep(0.35, 1.0, dx)) * Math.pow(along, 0.6), 0, 1);
+      const p = (y * W + x) * 4;
+      px[p] = 196; px[p + 1] = 216; px[p + 2] = 236;
+      px[p + 3] = a * 235;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Muzzle flash: irregular star burst with a white-hot core and smoke wisps.
+ * @param {number} S Sprite size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genMuzzle(S, seed) {
+  const noise = new NoiseSource(seed);
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const c = (S - 1) * 0.5;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const dy = (y - c) / c;
+    for (let x = 0; x < S; x++) {
+      const dx = (x - c) / c;
+      const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
+      const ang = Math.atan2(dy, dx);
+      /* Petals: an angular noise ring so the flash is never symmetric. */
+      const petal = 0.42 + 0.30 * Math.pow(Math.abs(Math.cos(ang * 3 + 0.7)), 1.6)
+        + 0.16 * noise.perlin2(Math.cos(ang) * 3 + 8, Math.sin(ang) * 3 + 8, 64, 64);
+      const body = 1 - smoothstep(petal * 0.55, petal, d);
+      const core = Math.exp(-d * d * 44);
+      const spike = Math.pow(Math.max(0, Math.cos(ang * 2)), 26) * Math.exp(-d * 2.2);
+      const a = clamp(body * 0.9 + core + spike * 0.7, 0, 1);
+      const heat = clamp(core * 1.5 + body * 0.5, 0, 1);
+      const p = (row + x) * 4;
+      px[p] = 255;
+      px[p + 1] = lerp(176, 252, heat);
+      px[p + 2] = lerp(64, 226, heat * heat);
+      px[p + 3] = a * 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Bullet impact decal: punched hole, dark rim, radial cracks and dust ring.
+ * @param {number} S Decal size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genBulletHole(S, seed) {
+  const noise = new NoiseSource(seed);
+  const dust = fbmField(S, S, noise, { freq: 7, octaves: 3 });
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const c = (S - 1) * 0.5;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const dy = (y - c) / c;
+    for (let x = 0; x < S; x++) {
+      const i = row + x;
+      const dx = (x - c) / c;
+      const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
+      const ang = Math.atan2(dy, dx);
+      const wob = 1 + 0.22 * noise.perlin2(Math.cos(ang) * 4 + 5, Math.sin(ang) * 4 + 5, 64, 64);
+      const hole = 1 - smoothstep(0.10 * wob, 0.16 * wob, d);
+      const rim = (1 - smoothstep(0.16 * wob, 0.30 * wob, d)) * (1 - hole);
+      /* Radial cracks. */
+      const cr = Math.pow(Math.abs(Math.sin(ang * 5.5 + dust[i] * 3.2)), 22) * (1 - smoothstep(0.16, 0.62, d));
+      const ring = (1 - smoothstep(0.30, 0.86, d)) * (0.20 + dust[i] * 0.5);
+      const a = clamp(hole + rim * 0.92 + cr * 0.8 + ring * 0.42, 0, 1);
+      const lum = lerp(150, 8, clamp(hole + rim * 0.8 + cr * 0.6, 0, 1));
+      const p = i * 4;
+      px[p] = lum; px[p + 1] = lum * 0.98; px[p + 2] = lum * 0.95;
+      px[p + 3] = a * 255;
+    }
+  }
+  bleedAlpha(px, S, S, 2);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Impact crack decal: a branching fracture network with a light rim so it
+ * reads on both dark and bright surfaces.
+ * @param {number} S Decal size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genCrackDecal(S, seed) {
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const rng = new Rand(seed ^ 0xc4ac);
+  ctx.clearRect(0, 0, S, S);
+  ctx.strokeStyle = '#000000';
+  ctx.lineCap = 'round';
+
+  /**
+   * Walks one crack branch outwards, spawning children.
+   * @param {number} x Start x.
+   * @param {number} y Start y.
+   * @param {number} ang Start angle.
+   * @param {number} len Remaining length.
+   * @param {number} width Line width.
+   * @param {number} depth Recursion depth.
+   * @returns {void}
+   */
+  const branch = (x, y, ang, len, width, depth) => {
+    let cx = x, cy = y, a = ang, remaining = len, w = width;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    while (remaining > 0) {
+      const step = Math.min(remaining, S * rng.range(0.02, 0.06));
+      a += rng.range(-0.45, 0.45);
+      cx += Math.cos(a) * step;
+      cy += Math.sin(a) * step;
+      ctx.lineWidth = Math.max(0.6, w);
+      ctx.lineTo(cx, cy);
+      remaining -= step;
+      w *= 0.94;
+      if (depth < 3 && rng.chance(0.18)) {
+        branch(cx, cy, a + (rng.chance(0.5) ? 1 : -1) * rng.range(0.5, 1.1), remaining * rng.range(0.4, 0.8), w * 0.7, depth + 1);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+      }
+    }
+    ctx.stroke();
+  };
+
+  const n = 7;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TWO_PI + rng.range(-0.3, 0.3);
+    branch(S * 0.5, S * 0.5, a, S * rng.range(0.24, 0.46), S * 0.018, 0);
+  }
+  ctx.beginPath();
+  ctx.arc(S * 0.5, S * 0.5, S * 0.045, 0, TWO_PI);
+  ctx.fillStyle = 'rgba(0,0,0,0.9)';
+  ctx.fill();
+
+  /* Add a bright rim: dilate the drawn alpha and paint the halo lighter. */
+  const img = ctx.getImageData(0, 0, S, S);
+  const px = img.data;
+  const alpha = new Float32Array(S * S);
+  for (let i = 0, p = 3; i < S * S; i++, p += 4) alpha[i] = px[p] / 255;
+  const spread = blurField(alpha, S, S, Math.max(1, Math.round(S * 0.012)));
+  const noise = new NoiseSource(seed + 3);
+  const grit = fbmField(S, S, noise, { freq: 12, octaves: 3 });
+  for (let i = 0, p = 0; i < S * S; i++, p += 4) {
+    const core = alpha[i];
+    const halo = clamp(spread[i] * 2.4 - core, 0, 1) * (0.5 + grit[i] * 0.7);
+    const a = clamp(core + halo * 0.55, 0, 1);
+    const lum = lerp(190, 14, core);
+    px[p] = lum; px[p + 1] = lum * 0.99; px[p + 2] = lum * 0.97;
+    px[p + 3] = a * 255;
+  }
+  bleedAlpha(px, S, S, 2);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Adds a Gaussian star into a brightness field (wrapped horizontally).
+ * @param {Float32Array} field Target field.
+ * @param {number} w Width.
+ * @param {number} h Height.
+ * @param {number} cx Centre x.
+ * @param {number} cy Centre y.
+ * @param {number} radius Radius in pixels.
+ * @param {number} brightness Peak brightness.
+ * @returns {void}
+ */
+function splatStar(field, w, h, cx, cy, radius, brightness) {
+  const r = Math.ceil(radius * 3);
+  const k = 1 / (radius * radius);
+  for (let dy = -r; dy <= r; dy++) {
+    const y = Math.round(cy) + dy;
+    if (y < 0 || y >= h) continue;
+    const row = y * w;
+    for (let dx = -r; dx <= r; dx++) {
+      let x = (Math.round(cx) + dx) % w; if (x < 0) x += w;
+      const d2 = dx * dx + dy * dy;
+      const v = brightness * Math.exp(-d2 * k);
+      if (v < 0.002) continue;
+      field[row + x] += v;
+    }
+  }
+}
+
+/**
+ * Night sky star field with a faint milky band and a few bright stars.
+ * @param {number} W Width (wraps in U).
+ * @param {number} H Height.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genSkyStars(W, H, seed) {
+  const rng = new Rand(seed ^ 0x57a45);
+  const noise = new NoiseSource(seed);
+  const cloud = fbmField(W, H, noise, { freqX: 6, freqY: 3, octaves: 5, gain: 0.6 });
+  const dust = fbmField(W, H, new NoiseSource(seed + 1), { freqX: 14, freqY: 7, octaves: 3 });
+  const bright = new Float32Array(W * H);
+  const warm = new Float32Array(W * H);
+
+  /* Milky band: a slanted, wrapping ridge of glowing dust. */
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    const v = y / H;
+    for (let x = 0; x < W; x++) {
+      const i = row + x;
+      const u = x / W;
+      const band = Math.sin((u * 2 + 0.35) * TWO_PI) * 0.16 + 0.5;
+      const d = Math.abs(v - band);
+      const g = (1 - smoothstep(0.02, 0.26, d)) * (0.30 + cloud[i] * 0.85) * (0.4 + dust[i] * 0.9);
+      bright[i] += g * 0.28;
+    }
+  }
+  /* Field stars. */
+  const faint = Math.round(W * H * 0.0022);
+  for (let i = 0; i < faint; i++) {
+    const x = rng.next() * W;
+    const y = rng.next() * H;
+    const band = Math.sin((x / W * 2 + 0.35) * TWO_PI) * 0.16 + 0.5;
+    const near = 1 - smoothstep(0.02, 0.30, Math.abs(y / H - band));
+    if (rng.next() > 0.35 + near * 0.6) continue;
+    const b = rng.range(0.15, 0.75);
+    splatStar(bright, W, H, x, y, rng.range(0.55, 1.1), b);
+    if (rng.chance(0.3)) splatStar(warm, W, H, x, y, rng.range(0.6, 1.2), b * rng.range(0.3, 1.0));
+  }
+  /* Named bright stars with a cross flare. */
+  for (let i = 0; i < 26; i++) {
+    const x = rng.next() * W, y = rng.next() * H;
+    const b = rng.range(1.1, 2.2);
+    splatStar(bright, W, H, x, y, rng.range(1.6, 2.8), b);
+    const arm = Math.round(W * 0.012);
+    for (let k = -arm; k <= arm; k++) {
+      const f = (1 - Math.abs(k) / arm) * b * 0.35;
+      let xx = (Math.round(x) + k) % W; if (xx < 0) xx += W;
+      const yy = Math.round(y);
+      if (yy >= 0 && yy < H) bright[yy * W + xx] += f;
+      const yk = yy + k;
+      if (yk >= 0 && yk < H) bright[yk * W + Math.round(x) % W] += f;
+    }
+    if (rng.chance(0.5)) splatStar(warm, W, H, x, y, rng.range(1.4, 2.4), b * 0.6);
+  }
+
+  const canvas = createCanvas(W, H);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, W, H);
+  const px = img.data;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    const b = clamp(bright[i], 0, 1.6);
+    const wm = clamp(warm[i], 0, 1);
+    const r = clamp(b * 235 + wm * 40, 0, 255);
+    const g = clamp(b * 238 - wm * 10, 0, 255);
+    const bl = clamp(b * 255 - wm * 46 + 4, 0, 255);
+    px[p] = r; px[p + 1] = g; px[p + 2] = bl;
+    px[p + 3] = clamp(b * 1.25, 0, 1) * 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Tileable blue-noise dither texture. R and G hold two independent blue-noise
+ * masks, B holds R offset by half a period, A is opaque.
+ * @param {number} S Size (64 recommended).
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genNoiseBlue(S, seed) {
+  const a = blueNoiseField(S, S, seed);
+  const b = blueNoiseField(S, S, seed + 977);
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  for (let i = 0, p = 0; i < S * S; i++, p += 4) {
+    px[p] = a[i] * 255;
+    px[p + 1] = b[i] * 255;
+    px[p + 2] = ((a[i] + 0.5) % 1) * 255;
+    px[p + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Row centres (texture V coordinate, canvas space) of each ramp inside the
+ * `gradientRamp` LUT texture. Sample with `texture2D(gradientRamp, vec2(t, v))`.
+ * @type {{fog:number, fire:number, smoke:number, water:number,
+ *         health:number, heat:number, neon:number, sunset:number}}
+ */
+export const GRADIENT_RAMP_ROWS = {
+  fog: 0.0625,
+  fire: 0.1875,
+  smoke: 0.3125,
+  water: 0.4375,
+  health: 0.5625,
+  heat: 0.6875,
+  neon: 0.8125,
+  sunset: 0.9375
+};
+
+/** Stop tables for {@link genGradientRamp}: `[t, r, g, b, a]`. */
+const RAMP_STOPS = [
+  [[0, 150, 170, 195, 0], [0.5, 176, 196, 216, 140], [1, 210, 224, 238, 255]],
+  [[0, 0, 0, 0, 0], [0.14, 92, 12, 4, 190], [0.4, 234, 66, 12, 255], [0.7, 255, 168, 40, 255], [0.9, 255, 240, 182, 255], [1, 255, 255, 255, 255]],
+  [[0, 16, 16, 18, 0], [0.3, 60, 60, 64, 160], [0.7, 132, 132, 138, 220], [1, 192, 192, 198, 255]],
+  [[0, 10, 24, 36, 255], [0.5, 24, 86, 102, 255], [1, 124, 198, 190, 255]],
+  [[0, 198, 26, 32, 255], [0.5, 242, 176, 40, 255], [1, 72, 208, 96, 255]],
+  [[0, 40, 80, 200, 255], [0.4, 150, 40, 200, 255], [0.7, 240, 60, 90, 255], [1, 255, 220, 120, 255]],
+  [[0, 0, 229, 255, 255], [0.5, 122, 80, 255, 255], [1, 255, 46, 136, 255]],
+  [[0, 18, 20, 54, 255], [0.35, 86, 44, 110, 255], [0.7, 232, 110, 72, 255], [1, 255, 206, 140, 255]]
+];
+
+/**
+ * Horizontal LUT ramps stacked vertically (fog, fire, smoke, water, health,
+ * heat, neon, sunset). See {@link GRADIENT_RAMP_ROWS}.
+ * @param {number} W Ramp resolution (256 recommended).
+ * @param {number} H Total height; must be a multiple of the row count.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genGradientRamp(W, H) {
+  const rows = RAMP_STOPS.length;
+  const rowH = H / rows;
+  const canvas = createCanvas(W, H);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, W, H);
+  const px = img.data;
+  for (let r = 0; r < rows; r++) {
+    const stops = RAMP_STOPS[r];
+    for (let x = 0; x < W; x++) {
+      const t = x / (W - 1);
+      let s = 0;
+      while (s < stops.length - 2 && t > stops[s + 1][0]) s++;
+      const a = stops[s], b = stops[s + 1];
+      const span = Math.max(1e-5, b[0] - a[0]);
+      const f = clamp((t - a[0]) / span, 0, 1);
+      const cr = lerp(a[1], b[1], f);
+      const cg = lerp(a[2], b[2], f);
+      const cb = lerp(a[3], b[3], f);
+      const ca = lerp(a[4], b[4], f);
+      for (let y = 0; y < rowH; y++) {
+        const p = ((r * rowH + y) * W + x) * 4;
+        px[p] = cr; px[p + 1] = cg; px[p + 2] = cb; px[p + 3] = ca;
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
