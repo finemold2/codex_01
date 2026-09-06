@@ -119,10 +119,14 @@ const D2R = Math.PI / 180;
 const MAX_STEP = 0.1;
 
 /**
- * Distance a corpse must be moved before an animation request is read as "the owner recycled
- * this body" rather than "the owner is still driving the dead character". Metres.
+ * How long (seconds) and for how many consecutive updates an owner must keep asking a
+ * ragdolled character for a living state before the body is revived. A respawned or recycled
+ * character is driven every frame; a stray one-off request (a reload finishing on a body that
+ * has just died, say) never reaches the threshold, so a corpse cannot be popped upright by an
+ * unrelated system.
  */
-const RAGDOLL_RECYCLE_DIST = 1;
+const REVIVE_HOLD_TIME = 0.08;
+const REVIVE_HOLD_FRAMES = 3;
 
 /**
  * Returns `v` when it is a finite number, otherwise `fallback`.
@@ -2084,6 +2088,7 @@ export class Character {
     this._steer = 0;
     this._rootPitchCur = 0;
     this._rootLiftCur = 0;
+    this._rootYawCur = 0;
     this._pendingDt = 0;
     this._submitToken = -2;
     this._rng = rng;
@@ -2098,8 +2103,11 @@ export class Character {
     this._ragVel = new Float32Array(BONE_COUNT * POSE_STRIDE);
     this._ragTarget = new Float32Array(POSE_LEN);
     this._ragSettle = 0;
-    /** Where the body collapsed; moving it away from here means the owner recycled it. */
-    this._ragOrigin = vec3.create();
+    /** Sustained-request gate that lets an owner take a ragdolled body back. */
+    this._reviveState = '';
+    this._reviveHold = 0;
+    this._reviveFrames = 0;
+    this._reviveAsked = false;
 
     // ---- per-instance draw data ---------------------------------------------------------
     /** @type {Float32Array} rgba tint per part. */
@@ -2187,15 +2195,17 @@ export class Character {
     const clip = CLIPS[name];
     if (!clip) return;
     if (this._ragActive) {
-      // A ragdoll deliberately ignores animation requests, otherwise a corpse would pop back
-      // upright because some unrelated system (a finishing reload, say) asked for 'idle'.
-      // It must not be a dead end either: `playRagdoll` used to be irreversible, which left
-      // a respawned player lying on the ground for the rest of the session and forced ped.js
-      // and police.js to throw every killed body away instead of recycling it. Two ways out:
-      // an explicit `{revive: true}`, or a body the owner has clearly recycled by moving it
-      // somewhere else — nothing ever moves a corpse in place.
-      if (!(opts && opts.revive) && !this._recycled()) return;
-      this.revive(name);
+      // A ragdoll ignores one-off animation requests, otherwise a corpse would pop upright
+      // because some unrelated system (a reload finishing on a body that has just died)
+      // asked for 'idle'. It must not be a dead end either: `playRagdoll` used to be
+      // irreversible, which left a respawned player face-down for the rest of the session
+      // and forced ped.js and police.js to throw every killed body away instead of recycling
+      // it. Two ways out: an explicit `{revive: true}`, or an owner that keeps driving the
+      // character frame after frame, which is exactly what a respawn or a pool reuse looks
+      // like. `update()` arbitrates; see REVIVE_HOLD_TIME.
+      if (opts && opts.revive) { this.revive(name); return; }
+      this._reviveState = name;
+      this._reviveAsked = true;
       return;
     }
     const restart = !!(opts && opts.restart);
@@ -2279,6 +2289,25 @@ export class Character {
       p[0] = this._lastPos[0]; p[1] = this._lastPos[1]; p[2] = this._lastPos[2];
     }
     this.yaw = num(this.yaw, this._prevYaw);
+
+    // Hand a ragdolled body back to its owner once that owner has asked for a living state on
+    // several consecutive updates — a respawn or a pool reuse — but never on a single stray
+    // request. Arbitrated here, before the clip is sampled, so `revive()` can cross-fade out
+    // of the pose that is still on screen.
+    if (this._ragActive) {
+      if (this._reviveAsked) {
+        this._reviveAsked = false;
+        this._reviveHold += adt;
+        this._reviveFrames++;
+        if (this._reviveHold >= REVIVE_HOLD_TIME && this._reviveFrames >= REVIVE_HOLD_FRAMES) {
+          this.revive(this._reviveState);
+        }
+      } else if (this._reviveFrames !== 0) {
+        this._reviveHold = 0;
+        this._reviveFrames = 0;
+        this._reviveState = '';
+      }
+    }
 
     this._stateTime += adt;
     this._clipTime += adt;
@@ -2504,13 +2533,19 @@ export class Character {
         pitch = -this._ragFall;
         lift = this._ragLift;
         ry = this._ragYaw;
+        // Track the toppled root so a revive continues from where the body actually lies and
+        // stands it back up, instead of snapping it upright and un-twisting it in one frame.
+        this._rootPitchCur = pitch;
+        this._rootLiftCur = lift;
+        this._rootYawCur = ry;
       } else {
         const clip = this._clip;
         this._rootPitchCur = damp(this._rootPitchCur, clip.rootPitch, 7, dt);
         this._rootLiftCur = damp(this._rootLiftCur, clip.rootLift * s, 7, dt);
+        this._rootYawCur = damp(this._rootYawCur, 0, 7, dt);
         pitch = this._rootPitchCur;
         lift = this._rootLiftCur;
-        ry = 0;
+        ry = this._rootYawCur;
       }
       vec3.set(_sp, this.position[0], this.position[1] + lift, this.position[2]);
       quat.fromEuler(_sq, this.yaw + ry, pitch, 0);
@@ -2570,7 +2605,10 @@ export class Character {
   playRagdoll(impulse) {
     if (this._ragActive) return;
     this._ragActive = true;
-    vec3.copy(this._ragOrigin, this.position);
+    this._reviveState = '';
+    this._reviveHold = 0;
+    this._reviveFrames = 0;
+    this._reviveAsked = false;
     this.dead = true;
     this.state = 'die';
     this._clip = CLIPS.die;
@@ -2601,22 +2639,6 @@ export class Character {
   }
 
   /**
-   * True once the owner has moved a collapsed body away from where it fell, which is the
-   * signal that the record has been respawned or handed back to an entity pool. Nothing in
-   * the game moves a corpse in place, so this never fires for a body that is merely dead.
-   * @returns {boolean} Whether this ragdoll has been recycled.
-   * @private
-   */
-  _recycled() {
-    const p = this.position;
-    const o = this._ragOrigin;
-    const dx = p[0] - o[0];
-    const dy = p[1] - o[1];
-    const dz = p[2] - o[2];
-    return dx * dx + dy * dy + dz * dz > RAGDOLL_RECYCLE_DIST * RAGDOLL_RECYCLE_DIST;
-  }
-
-  /**
    * Cancels an active ragdoll and hands the body back to the animation system, cross-fading
    * out of the pose the corpse is actually in and letting the toppled root stand back up over
    * the next fraction of a second (no pop).
@@ -2642,11 +2664,8 @@ export class Character {
     this._blend = 0;
     this._blendDur = Math.max(0.04, BLEND_TIME[clip.name] || 0.18);
 
-    // Carry the toppled root over as the starting point so `_computeMatrices` damps it back
-    // to upright instead of teleporting the body onto its feet.
-    this._rootPitchCur = -this._ragFall;
-    this._rootLiftCur = this._ragLift;
-
+    // `_computeMatrices` has been tracking the toppled root all along, so the body now damps
+    // back to upright from where it lies rather than teleporting onto its feet.
     this._ragActive = false;
     this.dead = false;
     this._ragFall = 0;
@@ -2659,6 +2678,10 @@ export class Character {
     this._footLift = 0;
     this._recoil = 0;
     this._recoilVel = 0;
+    this._reviveState = '';
+    this._reviveHold = 0;
+    this._reviveFrames = 0;
+    this._reviveAsked = false;
   }
 
   /**

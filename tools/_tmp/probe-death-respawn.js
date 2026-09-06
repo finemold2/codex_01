@@ -61,7 +61,7 @@ export default async function run({ canvas }) {
   // --- walking after the respawn must animate normally ------------------------------------
   const before = [p.position[0], p.position[2]];
   game.input.injectKey('KeyW', true);
-  for (let i = 0; i < 150; i++) { game.update(1 / 60); game.render(1 / 60); }
+  for (let i = 0; i < 150; i++) game.update(1 / 60);
   game.input.injectKey('KeyW', false);
   const walked = Math.hypot(p.position[0] - before[0], p.position[2] - before[1]);
   out.notes.push(`walked ${walked.toFixed(2)} m after respawn, state=${ch.state}, head ${headOf().toFixed(2)} m`);
