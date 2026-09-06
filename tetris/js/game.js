@@ -32,11 +32,14 @@
     return r;
   }
 
+  var SPRINT_LINES = 40;
+  var ULTRA_MS = 120000;
+
   function Game(opts) {
     opts = opts || {};
     this.rng = opts.random || Math.random;
     this.listeners = {};
-    this.reset();
+    this.reset(opts);
   }
 
   Game.COLS = COLS;
@@ -44,6 +47,8 @@
   Game.HIDDEN = HIDDEN;
   Game.CLEAR_MS = CLEAR_MS;
   Game.LOCK_DELAY = LOCK_DELAY;
+  Game.SPRINT_LINES = SPRINT_LINES;
+  Game.ULTRA_MS = ULTRA_MS;
 
   var P = Game.prototype;
 
@@ -60,7 +65,14 @@
   };
 
   // ----- 상태 초기화 -----
-  P.reset = function () {
+  // opts.mode: 'marathon' | 'sprint'(40줄) | 'ultra'(2분), opts.startLevel: 1~
+  P.reset = function (opts) {
+    opts = opts || {};
+    this.mode = opts.mode || 'marathon';
+    this.startLevel = Math.max(1, opts.startLevel || 1);
+    this.elapsed = 0;
+    this.won = false;
+
     this.board = [];
     for (var y = 0; y < TOTAL; y++) this.board.push(emptyRow());
 
@@ -75,7 +87,7 @@
 
     this.score = 0;
     this.lines = 0;
-    this.level = 1;
+    this.level = this.startLevel;
     this.combo = -1;
     this.b2b = false;
 
@@ -308,7 +320,7 @@
       this.emit('clearStart', { rows: full });
     } else {
       this.applyScore(0, tspin);
-      this.spawn();
+      if (!this.over) this.spawn();
     }
   };
 
@@ -395,7 +407,7 @@
     if (n === 4) this.stats.tetris++;
     if (tspin) this.stats.tspins++;
 
-    var newLevel = Math.floor(this.lines / 10) + 1;
+    var newLevel = this.startLevel + Math.floor(this.lines / 10);
     var levelUp = newLevel > this.level;
     this.level = newLevel;
 
@@ -410,12 +422,48 @@
       });
     }
     if (levelUp) this.emit('levelup', this.level);
+
+    if (this.mode === 'sprint' && this.lines >= SPRINT_LINES) this.finish('lines');
+  };
+
+  // 스택 높이: 화면 아래에서부터 가장 높은 블록까지의 줄 수
+  P.stackHeight = function () {
+    for (var y = HIDDEN; y < TOTAL; y++) {
+      for (var x = 0; x < COLS; x++) {
+        if (this.board[y][x]) return TOTAL - y;
+      }
+    }
+    return 0;
+  };
+
+  P.summary = function (reason) {
+    return {
+      reason: reason,
+      mode: this.mode,
+      won: this.won,
+      score: this.score,
+      lines: this.lines,
+      level: this.level,
+      elapsed: this.elapsed,
+      stats: this.stats
+    };
+  };
+
+  // 목표 달성으로 종료 (스프린트 40줄, 울트라 시간 종료)
+  P.finish = function (reason) {
+    if (this.over) return;
+    this.over = true;
+    this.won = true;
+    this.running = false;
+    this.piece = null;
+    this.clearing = null;
+    this.emit('gameover', this.summary(reason));
   };
 
   P.gameOver = function () {
     this.over = true;
     this.running = false;
-    this.emit('gameover', { score: this.score, lines: this.lines, level: this.level, stats: this.stats });
+    this.emit('gameover', this.summary('topout'));
   };
 
   // 레벨별 중력 (가이드라인 공식), 최소 16ms
@@ -428,6 +476,13 @@
   P.update = function (dt) {
     if (!this.running || this.paused || this.over) return;
 
+    this.elapsed += dt;
+    if (this.mode === 'ultra' && this.elapsed >= ULTRA_MS) {
+      this.elapsed = ULTRA_MS;
+      this.finish('time');
+      return;
+    }
+
     if (this.clearing) {
       this.clearing.t += dt;
       if (this.clearing.t >= CLEAR_MS) {
@@ -435,7 +490,7 @@
         this.clearing = null;
         this.removeRows(c.rows);
         this.applyScore(c.rows.length, c.tspin);
-        this.spawn();
+        if (!this.over) this.spawn();
       }
       return;
     }

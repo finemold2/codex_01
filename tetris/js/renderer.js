@@ -71,11 +71,91 @@
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.cell = 24;
+    this.particles = [];
+    this.flash = 0;
+    this.time = 0;
   }
 
   Renderer.prototype.resize = function (cell) {
     this.cell = cell;
     this.ctx = setupCanvas(this.canvas, COLS * cell, ROWS * cell);
+  };
+
+  // 라인 클리어 파티클 생성 (보드에 아직 셀이 남아 있을 때 호출)
+  Renderer.prototype.burst = function (game, rows) {
+    var c = this.cell;
+    for (var i = 0; i < rows.length; i++) {
+      var by = rows[i];
+      if (by < HIDDEN) continue;
+      for (var bx = 0; bx < COLS; bx++) {
+        var t = game.board[by][bx];
+        if (!t) continue;
+        var color = T.COLORS[t];
+        for (var k = 0; k < 2; k++) {
+          var dir = bx < COLS / 2 ? -1 : 1;
+          this.particles.push({
+            x: (bx + 0.5) * c,
+            y: (by - HIDDEN + 0.5) * c,
+            vx: (dir * (0.4 + Math.random() * 1.2) + (Math.random() - 0.5) * 0.6) * c * 6,
+            vy: (-0.6 - Math.random() * 1.2) * c * 6,
+            life: 520 + Math.random() * 260,
+            age: 0,
+            size: c * (0.22 + Math.random() * 0.2),
+            color: color
+          });
+        }
+      }
+    }
+    if (this.particles.length > 600) this.particles.splice(0, this.particles.length - 600);
+  };
+
+  Renderer.prototype.tick = function (dt) {
+    this.time += dt;
+    if (this.flash > 0) this.flash = Math.max(0, this.flash - dt / 260);
+    var g = this.cell * 22; // 중력 (px/s^2)
+    var s = dt / 1000;
+    var alive = [];
+    for (var i = 0; i < this.particles.length; i++) {
+      var p = this.particles[i];
+      p.age += dt;
+      if (p.age >= p.life) continue;
+      p.vy += g * s;
+      p.x += p.vx * s;
+      p.y += p.vy * s;
+      alive.push(p);
+    }
+    this.particles = alive;
+  };
+
+  Renderer.prototype.drawEffects = function (opts) {
+    var ctx = this.ctx;
+    var c = this.cell;
+    var W = COLS * c;
+    var H = ROWS * c;
+
+    for (var i = 0; i < this.particles.length; i++) {
+      var p = this.particles[i];
+      var k = 1 - p.age / p.life;
+      ctx.globalAlpha = Math.max(0, k);
+      ctx.fillStyle = p.color;
+      var sz = p.size * (0.4 + 0.6 * k);
+      ctx.fillRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1;
+
+    if (opts.danger) {
+      var pulse = 0.35 + 0.25 * Math.sin(this.time / 140);
+      var grad = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.75);
+      grad.addColorStop(0, 'rgba(255,60,90,0)');
+      grad.addColorStop(1, 'rgba(255,60,90,' + pulse.toFixed(3) + ')');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    if (this.flash > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (this.flash * 0.45).toFixed(3) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
   };
 
   Renderer.prototype.draw = function (game, opts) {
@@ -158,8 +238,10 @@
       }
     }
 
+    this.drawEffects(opts);
+
     // 게임 오버 어둡게
-    if (game.over) {
+    if (game.over && !game.won) {
       ctx.fillStyle = 'rgba(8,9,14,0.45)';
       ctx.fillRect(0, 0, W, H);
     }

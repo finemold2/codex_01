@@ -269,4 +269,78 @@ test('I 조각 벽차기: 벽 옆에서 회전 가능', function () {
   assert.ok(g.piece.x >= 0);
 });
 
+test('시작 레벨: 레벨과 중력에 반영, 10줄마다 +1', function () {
+  var g = new Game({ random: seeded(3), startLevel: 10 });
+  g.start();
+  assert.strictEqual(g.level, 10);
+  assert.ok(g.gravityMs() < new Game({ random: seeded(3) }).gravityMs());
+  g.lines = 9;
+  fillRow(g, TOTAL - 1, [4, 5]);
+  g.board[TOTAL - 2][0] = 'J';
+  forcePiece(g, 'O', 4, HIDDEN);
+  g.hardDrop();
+  g.update(Game.CLEAR_MS);
+  assert.strictEqual(g.level, 11);
+});
+
+test('스프린트: 40줄 달성 시 승리 종료 + 경과 시간 기록', function () {
+  var g = new Game({ random: seeded(3), mode: 'sprint' });
+  g.start();
+  var ended = null;
+  g.on('gameover', function (e) { ended = e; });
+  g.update(1234);
+  g.lines = 38;
+  fillRow(g, TOTAL - 1, [4, 5]);
+  fillRow(g, TOTAL - 2, [4, 5]);
+  g.board[TOTAL - 3][0] = 'J';
+  forcePiece(g, 'O', 4, HIDDEN);
+  g.hardDrop();
+  g.update(Game.CLEAR_MS);
+  assert.ok(ended, '종료 이벤트');
+  assert.strictEqual(ended.reason, 'lines');
+  assert.ok(ended.won);
+  assert.strictEqual(ended.lines, 40);
+  assert.ok(ended.elapsed >= 1234 + Game.CLEAR_MS);
+  assert.ok(g.over && !g.running);
+  assert.strictEqual(g.piece, null);
+});
+
+test('울트라: 2분 경과 시 종료, 그 전에는 진행', function () {
+  var g = new Game({ random: seeded(3), mode: 'ultra' });
+  g.start();
+  var ended = null;
+  g.on('gameover', function (e) { ended = e; });
+  for (var i = 0; i < 1199; i++) {
+    // 조작 없이 쌓여서 탑아웃되지 않도록 보드를 비워 둔다
+    for (var y = 0; y < TOTAL; y++) for (var x = 0; x < COLS; x++) g.board[y][x] = null;
+    g.update(100);
+  }
+  assert.strictEqual(ended, null);
+  assert.ok(g.elapsed < Game.ULTRA_MS);
+  g.update(100);
+  assert.ok(ended);
+  assert.strictEqual(ended.reason, 'time');
+  assert.strictEqual(ended.elapsed, Game.ULTRA_MS);
+});
+
+test('마라톤: 탑아웃 시 reason=topout, won=false', function () {
+  var g = newGame(3);
+  var ended = null;
+  g.on('gameover', function (e) { ended = e; });
+  for (var y = HIDDEN - 2; y < TOTAL; y++) fillRow(g, y);
+  g.piece = null;
+  g.spawn();
+  assert.strictEqual(ended.reason, 'topout');
+  assert.ok(!ended.won);
+});
+
+test('스택 높이 계산', function () {
+  var g = newGame(3);
+  assert.strictEqual(g.stackHeight(), 0);
+  g.board[TOTAL - 1][0] = 'J';
+  assert.strictEqual(g.stackHeight(), 1);
+  g.board[TOTAL - 14][9] = 'J';
+  assert.strictEqual(g.stackHeight(), 14);
+});
+
 console.log('\n' + passed + ' tests passed');
