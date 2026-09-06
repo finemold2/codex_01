@@ -653,3 +653,93 @@ export class Game {
 `WASD` move · `Shift` sprint · `Space` jump/handbrake · `Mouse` look · `LMB` fire · `RMB` aim ·
 `R` reload · `1-5`/wheel weapons · `F` enter/exit vehicle · `E` interact · `Tab` map · `Esc` pause ·
 `H` horn · `C` look back · `V` camera mode · `M` music next track · `N` next station · `P` photo mode.
+
+---
+
+## 16. The `game` runtime object (normative for every gameplay/UI module)
+
+Every system receives the single `Game` instance and reads/writes only these documented members.
+`game.js` is owned by the integrator; other modules must not add fields to it outside `game.ext`.
+
+```js
+game = {
+  // --- core services ---
+  canvas, gl, renderer, camera, input, collision, textures, city, world,
+  audio,      // AudioEngine
+  sfx,        // SFX
+  music,      // MusicPlayer
+  hud, menu, mapScreen,
+  particles,  // shortcut to renderer.particles
+  rng,        // Rand (gameplay-level, seeded)
+
+  // --- clock ---
+  time: { now, dt, scale, elapsed, frame, hours /* 0..24 */, daySpeed },
+  paused, started, over,
+
+  // --- player ---
+  player: {
+    character,            // Character
+    position, velocity, yaw, pitch,
+    health, maxHealth, armor, maxArmor, money, stamina,
+    vehicle,              // Vehicle | null (null when on foot)
+    aiming, sprinting, crouching, grounded, dead, invincible,
+    weapon,               // key into WEAPONS
+    kills, damageDealt, distanceTravelled,
+    respawn(), damage(amount, dir3, source), heal(n), addMoney(n), addArmor(n),
+    enterVehicle(vehicle, seat), exitVehicle(),
+  },
+
+  // --- world entities ---
+  vehicles,   // Vehicle[] — every vehicle in the world (traffic, parked, police, player's)
+  peds,       // PedManager
+  traffic,    // TrafficManager
+  police,     // PoliceSystem     (police.wanted is the 0..5 star level)
+  weapons,    // WeaponSystem
+  missions,   // MissionManager
+  pickups,    // [{id, kind:'health'|'armor'|'ammo'|'money'|'weapon', x, y, z, value, taken}]
+
+  // --- camera ---
+  cameraMode,           // 'thirdPerson' | 'aim' | 'vehicle' | 'cinematic' | 'free'
+  setCameraMode(mode),
+  shakeCamera(amount, duration),
+
+  // --- helpers every module may call ---
+  notify(text, kind = 'info', duration = 3),   // -> hud toast
+  subtitle(text, duration),
+  setWaypoint(x, z) / clearWaypoint(),
+  waypoint,                                    // {x, z} | null
+  spawnVehicle(typeKey, x, z, yaw, opts) -> Vehicle,
+  spawnPickup(kind, x, y, z, value) -> pickup,
+  removeVehicle(vehicle),
+  explosionAt(x, y, z, radius, damage, source),
+  worldToGround(x, z) -> y,
+  nearestRoadPoint(x, z, out) -> {x, z, laneId},
+  distanceToPlayer(x, y, z) -> number,
+  isNight() -> bool,
+  save() / load(),                             // localStorage 'neoncity.save'
+  ext: {},                                     // scratch namespace for modules that need one
+}
+```
+
+### Event bus
+```js
+game.on(event, fn) -> unsubscribe;  game.emit(event, payload);
+```
+Events: `playerDamaged`, `playerDied`, `pedKilled`, `vehicleDestroyed`, `wantedChanged`,
+`missionStarted`, `missionEnded`, `enteredVehicle`, `exitedVehicle`, `weaponFired`,
+`moneyChanged`, `pickupCollected`, `explosion`, `trackChanged`, `settingsChanged`.
+
+### DOM contract (index.html already provides these)
+`#game-canvas`, `#hud-root`, `#menu-root`, `#map-root`, `#loading-screen`, `#load-fill`,
+`#load-status`, `#load-tip`, `#fatal`, `#fatal-msg`.
+UI modules build their own DOM inside their root; they must never touch another module's root.
+
+### CSS contract
+`css/game.css` is owned by the UI module. It must style the loading screen (`#loading-screen`,
+`.load-inner`, `.load-logo`, `.load-sub`, `.load-bar`, `#load-fill`, `#load-status`, `.load-tip`),
+the fatal panel (`#fatal`, `.fatal-inner`, `.fatal-hint`), `#app`, `#game-canvas`, `.layer`,
+`.hidden`, plus everything the HUD/menu/map create. Art direction: dark neon-noir, `#05070d`
+background, cyan `#00e5ff` + magenta `#ff2e88` + amber `#ffb648` accents, thin uppercase
+letter-spaced labels, subtle scanline/vignette, all HUD text with a strong shadow so it stays
+readable over bright scenes. Everything must scale sensibly from 1280x720 to 4K and degrade to a
+compact layout under 820 px wide.
