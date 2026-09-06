@@ -2088,3 +2088,321 @@ function districtIndexAt(ctx, x, z) {
   }
   return bestIdx;
 }
+
+/* ------------------------------------------------------------------ *
+ * Phase 7 — props
+ * ------------------------------------------------------------------ */
+
+/** Scratch point/direction pairs used while scattering props. */
+const _pp = [0, 0];
+const _pd = [0, 0];
+
+/**
+ * Samples a polyline at an absolute arc length.
+ * @param {number[][]} pts Polyline.
+ * @param {number} s Arc length in metres.
+ * @param {number[]} outP Output position.
+ * @param {number[]} outD Output unit direction.
+ * @returns {void}
+ */
+function polyAt(pts, s, outP, outD) {
+  let rem = s;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i - 1][0];
+    const dz = pts[i][1] - pts[i - 1][1];
+    const l = Math.hypot(dx, dz) || 1;
+    if (rem <= l || i === pts.length - 1) {
+      const k = clamp(rem / l, 0, 1);
+      outP[0] = pts[i - 1][0] + dx * k;
+      outP[1] = pts[i - 1][1] + dz * k;
+      outD[0] = dx / l;
+      outD[1] = dz / l;
+      return;
+    }
+    rem -= l;
+  }
+  outP[0] = pts[0][0];
+  outP[1] = pts[0][1];
+  outD[0] = 0;
+  outD[1] = 1;
+}
+
+/**
+ * Appends a prop.
+ * @param {object} ctx Generation context.
+ * @param {string} type Prop type.
+ * @param {number} x World x.
+ * @param {number} y World y.
+ * @param {number} z World z.
+ * @param {number} rot Yaw in radians.
+ * @param {number} scale Uniform scale.
+ * @param {object|null} extra Type specific payload.
+ * @returns {void}
+ */
+function addProp(ctx, type, x, y, z, rot, scale, extra) {
+  ctx.props.push({ type, x, y, z, rot, scale, extra: extra || null });
+}
+
+/**
+ * Scatters street furniture along one road edge.
+ * @param {object} ctx Generation context.
+ * @param {object} e Edge record.
+ * @param {string} dk District kind at the edge midpoint.
+ * @param {Rand} rng Random source.
+ * @returns {void}
+ */
+function edgeFurniture(ctx, e, dk, rng) {
+  const len = polyLength(e.pts);
+  if (len < 12) return;
+  const half = e.width * 0.5;
+  const kerb = half + 1.35;
+  const inner = half + 2.5;
+
+  // Streetlights every ~24 m, alternating sides.
+  let flip = 0;
+  for (let s = 12; s < len - 10; s += 24) {
+    polyAt(e.pts, s, _pp, _pd);
+    const side = (flip++ % 2 === 0) ? 1 : -1;
+    const rx = -_pd[1] * side;
+    const rz = _pd[0] * side;
+    addProp(ctx, 'streetlight', _pp[0] + rx * kerb, 0, _pp[1] + rz * kerb,
+      yawFromDir(-rx, -rz), 1, { arm: e.kind === 'avenue' || e.kind === 'boulevard' ? 2 : 1 });
+  }
+
+  // Trees / palms.
+  const treeType = dk === 'beach' || e.kind === 'waterfront' ? 'palm' : 'tree';
+  const wantTrees = dk === 'residential' || dk === 'park' || dk === 'beach' ||
+    e.kind === 'waterfront' || e.kind === 'boulevard' ||
+    (dk === 'midtown' && e.kind === 'avenue');
+  if (wantTrees) {
+    for (let s = 9; s < len - 9; s += 17) {
+      for (let side = -1; side <= 1; side += 2) {
+        if (rng.next() < 0.22) continue;
+        polyAt(e.pts, s, _pp, _pd);
+        const rx = -_pd[1] * side;
+        const rz = _pd[0] * side;
+        addProp(ctx, treeType, _pp[0] + rx * inner, 0, _pp[1] + rz * inner,
+          rr(rng, 0, Math.PI * 2), rr(rng, 0.82, 1.28), null);
+      }
+    }
+  }
+
+  // Sidewalk clutter sampled every 6 m on both sides.
+  for (let s = 7; s < len - 7; s += 6) {
+    for (let side = -1; side <= 1; side += 2) {
+      const roll = rng.next();
+      polyAt(e.pts, s, _pp, _pd);
+      const rx = -_pd[1] * side;
+      const rz = _pd[0] * side;
+      const face = yawFromDir(-rx, -rz);
+      const px = _pp[0] + rx * kerb;
+      const pz = _pp[1] + rz * kerb;
+      const qx = _pp[0] + rx * inner;
+      const qz = _pp[1] + rz * inner;
+      if (roll < 0.035) {
+        addProp(ctx, 'hydrant', px, SIDEWALK_H, pz, face, 1, null);
+      } else if (roll < 0.075) {
+        addProp(ctx, 'bin', qx, SIDEWALK_H, qz, face, 1,
+          { full: rchance(rng, 0.4) });
+      } else if (roll < 0.115 && (dk === 'downtown' || dk === 'midtown' || dk === 'beach')) {
+        addProp(ctx, 'bench', qx, SIDEWALK_H, qz, face + Math.PI * 0.5, 1, null);
+      } else if (roll < 0.145 && (dk === 'downtown' || dk === 'midtown')) {
+        addProp(ctx, 'sign', px, SIDEWALK_H, pz, face, 1, { kind: 'meter' });
+      } else if (roll < 0.165 && dk !== 'industrial') {
+        addProp(ctx, 'planter', qx, SIDEWALK_H, qz, face, rr(rng, 0.9, 1.2), null);
+      } else if (roll < 0.185 && (e.kind === 'avenue' || e.kind === 'boulevard')) {
+        addProp(ctx, 'bollard', px, SIDEWALK_H, pz, face, 1, null);
+      } else if (roll < 0.196 && dk === 'downtown') {
+        addProp(ctx, 'atm', qx, SIDEWALK_H, qz, face, 1, null);
+      } else if (roll < 0.206 && (dk === 'downtown' || dk === 'residential')) {
+        addProp(ctx, 'phonebox', qx, SIDEWALK_H, qz, face, 1, null);
+      } else if (roll < 0.216 && (dk === 'downtown' || dk === 'midtown' || dk === 'beach')) {
+        addProp(ctx, 'streetvendor', qx, SIDEWALK_H, qz, face, 1,
+          { menu: rpick(rng, ['어묵', '타코야키', '핫도그', '군밤']) });
+      }
+    }
+  }
+
+  // Bus stops on the big roads.
+  if ((e.kind === 'avenue' || e.kind === 'boulevard') && len > 55 && rchance(rng, 0.5)) {
+    const side = rchance(rng, 0.5) ? 1 : -1;
+    polyAt(e.pts, len * 0.5, _pp, _pd);
+    const rx = -_pd[1] * side;
+    const rz = _pd[0] * side;
+    addProp(ctx, 'busstop', _pp[0] + rx * inner, SIDEWALK_H, _pp[1] + rz * inner,
+      yawFromDir(-rx, -rz), 1, { line: ri(rng, 100, 899) + '번' });
+  }
+
+  // Boulevard billboards.
+  if (e.kind === 'boulevard' && len > 40) {
+    const side = rchance(rng, 0.5) ? 1 : -1;
+    polyAt(e.pts, len * 0.32, _pp, _pd);
+    const rx = -_pd[1] * side;
+    const rz = _pd[0] * side;
+    addProp(ctx, 'billboard', _pp[0] + rx * (half + 3.0), SIDEWALK_H,
+      _pp[1] + rz * (half + 3.0), yawFromDir(-rx, -rz), rr(rng, 1.0, 1.3),
+      { text: rpick(rng, BILLBOARD_TEXTS), onWall: false });
+  }
+}
+
+/**
+ * Generates every prop: street furniture, intersection signals, lot dressing,
+ * building billboards, alley dumpsters and roadworks.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function buildProps(ctx) {
+  const rng = new Rand(mixSeed(ctx.seed, 'props'));
+  ctx.props = [];
+
+  for (const e of ctx.edges) {
+    const mid = e.pts[Math.floor(e.pts.length / 2)];
+    const dk = ctx.districts[districtIndexAt(ctx, mid[0], mid[1])].kind;
+    edgeFurniture(ctx, e, dk, rng);
+  }
+
+  // Traffic signals, one head per approach, on the near right kerb.
+  for (const node of ctx.nodes) {
+    if (!node.hasTrafficLight) continue;
+    for (const eid of node.edges) {
+      const e = ctx.edges[eid];
+      let dx;
+      let dz;
+      if (e.a === node.id) {
+        polyStartDir(e.pts, _d2);
+        dx = -_d2[0];
+        dz = -_d2[1];
+      } else {
+        polyEndDir(e.pts, _d2);
+        dx = _d2[0];
+        dz = _d2[1];
+      }
+      const trim = Math.min(nodeTrim(ctx, node.id, e.id, dx, dz, 0), 26) + 1.6;
+      const rx = -dz;
+      const rz = dx;
+      const off = e.width * 0.5 + 1.5;
+      addProp(ctx, 'trafficlight',
+        node.x - dx * trim + rx * off, SIDEWALK_H, node.z - dz * trim + rz * off,
+        yawFromDir(-dx, -dz), 1, { nodeId: node.id, edgeId: e.id });
+    }
+  }
+
+  // Lot dressing.
+  for (const lot of ctx.lots) {
+    const dk = ctx.districts[lot.districtId].kind;
+    if (lot.kind === 'park') {
+      const sand = lot.surface === 'sand';
+      const area = lot.w * lot.d;
+      const count = Math.min(260, Math.floor(area / (sand ? 320 : 95)));
+      for (let i = 0; i < count; i++) {
+        const x = rr(rng, lot.x0 + 4, lot.x1 - 4);
+        const z = rr(rng, lot.z0 + 4, lot.z1 - 4);
+        if (!footprintFree(ctx, x, z, 1.6, 1.6, 0, 0.4)) continue;
+        addProp(ctx, sand ? 'palm' : 'tree', x, 0, z, rr(rng, 0, Math.PI * 2),
+          rr(rng, 0.8, 1.35), null);
+      }
+      const dress = Math.min(48, Math.floor(area / 420));
+      for (let i = 0; i < dress; i++) {
+        const x = rr(rng, lot.x0 + 3, lot.x1 - 3);
+        const z = rr(rng, lot.z0 + 3, lot.z1 - 3);
+        if (!footprintFree(ctx, x, z, 1.2, 1.2, 0, 0.4)) continue;
+        const r = rng.next();
+        const t = r < 0.34 ? 'bench' : r < 0.6 ? 'lamp' : r < 0.8 ? 'bin' : 'planter';
+        addProp(ctx, t, x, 0, z, rr(rng, 0, Math.PI * 2), 1, null);
+      }
+    } else if (lot.kind === 'parking') {
+      const rows = Math.max(1, Math.floor(lot.d / 14));
+      for (let r = 0; r < rows; r++) {
+        const z = lot.z0 + 7 + r * ((lot.d - 14) / Math.max(1, rows - 1 || 1));
+        for (let x = lot.x0 + 4; x < lot.x1 - 3; x += 5.5) {
+          if (rchance(rng, 0.22)) {
+            addProp(ctx, 'bollard', x, 0, z, 0, 0.8, { parking: true });
+          }
+        }
+      }
+      const lamps = Math.max(2, Math.floor(lot.w * lot.d / 900));
+      for (let i = 0; i < lamps; i++) {
+        addProp(ctx, 'lamp', rr(rng, lot.x0 + 4, lot.x1 - 4), 0,
+          rr(rng, lot.z0 + 4, lot.z1 - 4), 0, 1.2, null);
+      }
+      if (lot.superblock === 'railyard') {
+        for (let i = 0; i < 26; i++) {
+          const x = rr(rng, lot.x0 + 5, lot.x1 - 5);
+          const z = rr(rng, lot.z0 + 5, lot.z1 - 5);
+          const r = rng.next();
+          addProp(ctx, r < 0.5 ? 'barrier' : r < 0.8 ? 'dumpster' : 'bin',
+            x, 0, z, rr(rng, 0, Math.PI * 2), 1, null);
+        }
+      }
+    } else if (lot.kind === 'plaza') {
+      const count = Math.floor(lot.w * lot.d / 260);
+      for (let i = 0; i < count; i++) {
+        const x = rr(rng, lot.x0 + 4, lot.x1 - 4);
+        const z = rr(rng, lot.z0 + 4, lot.z1 - 4);
+        if (!footprintFree(ctx, x, z, 1.3, 1.3, 0, 0.4)) continue;
+        const r = rng.next();
+        const t = r < 0.3 ? 'planter' : r < 0.5 ? 'bench' : r < 0.66 ? 'lamp'
+          : r < 0.78 ? 'tree' : r < 0.9 ? 'bollard' : 'streetvendor';
+        addProp(ctx, t, x, SIDEWALK_H, z, rr(rng, 0, Math.PI * 2), 1, null);
+      }
+    } else if (dk === 'industrial' && lot.kind === 'building') {
+      for (let i = 0; i < 4; i++) {
+        const x = rr(rng, lot.x0 + 4, lot.x1 - 4);
+        const z = rr(rng, lot.z0 + 4, lot.z1 - 4);
+        if (!footprintFree(ctx, x, z, 1.5, 1.2, 0, 0.4)) continue;
+        addProp(ctx, rchance(rng, 0.6) ? 'dumpster' : 'barrier', x, 0, z,
+          rr(rng, 0, Math.PI * 2), 1, null);
+      }
+    }
+  }
+
+  // Alley dumpsters.
+  for (const a of ctx.alleys) {
+    if (!rchance(rng, 0.32)) continue;
+    const along = rr(rng, -0.35, 0.35) * a.len;
+    const x = a.x + (a.rot === 0 ? along : 0);
+    const z = a.z + (a.rot === 0 ? 0 : along);
+    if (!footprintFree(ctx, x, z, 1.1, 0.8, a.rot, 0.1)) continue;
+    addProp(ctx, 'dumpster', x, 0, z, a.rot, 1, null);
+  }
+
+  // Billboards on blank walls.
+  for (const b of ctx.buildings) {
+    if (b.h < 9 || b.h > 52) continue;
+    if (b.signs.length > 1 || !rchance(rng, 0.07)) continue;
+    const nx = b.face === 0 ? 1 : b.face === 2 ? -1 : 0;
+    const nz = b.face === 1 ? 1 : b.face === 3 ? -1 : 0;
+    const halfOut = (b.face === 0 || b.face === 2) ? b.w * 0.5 : b.d * 0.5;
+    addProp(ctx, 'billboard', b.x + nx * (halfOut + 0.2), Math.min(b.h * 0.62, 16),
+      b.z + nz * (halfOut + 0.2), yawFromDir(nx, nz), rr(rng, 0.9, 1.35),
+      { text: rpick(rng, BILLBOARD_TEXTS), onWall: true, buildingId: b.id });
+  }
+
+  // Roadworks: a few coned-off stretches.
+  const works = [];
+  for (let i = 0; i < ctx.edges.length; i++) {
+    const e = ctx.edges[i];
+    if (e.kind !== 'street' && e.kind !== 'avenue') continue;
+    if (polyLength(e.pts) > 40) works.push(e);
+  }
+  for (let n = 0; n < 3 && works.length > 0; n++) {
+    const e = works[Math.floor(rng.next() * works.length)];
+    const len = polyLength(e.pts);
+    const start = rr(rng, 10, Math.max(11, len - 30));
+    const side = rchance(rng, 0.5) ? 1 : -1;
+    for (let s = 0; s < 22; s += 2.8) {
+      polyAt(e.pts, start + s, _pp, _pd);
+      const rx = -_pd[1] * side;
+      const rz = _pd[0] * side;
+      const lat = e.width * 0.25;
+      addProp(ctx, 'cone', _pp[0] + rx * lat, 0, _pp[1] + rz * lat,
+        yawFromDir(-rx, -rz), 1, null);
+    }
+    polyAt(e.pts, start - 1.5, _pp, _pd);
+    addProp(ctx, 'barrier', _pp[0] - _pd[1] * side * e.width * 0.25, 0,
+      _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null);
+    polyAt(e.pts, start + 23, _pp, _pd);
+    addProp(ctx, 'barrier', _pp[0] - _pd[1] * side * e.width * 0.25, 0,
+      _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null);
+  }
+}

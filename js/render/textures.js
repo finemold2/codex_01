@@ -3342,3 +3342,204 @@ function genGradientRamp(W, H) {
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
+
+/* ------------------------------------------------------------------------- *
+ * 4. Library assembly
+ * ------------------------------------------------------------------------- */
+
+/**
+ * High resolution timer with a Date fallback.
+ * @returns {number} Milliseconds.
+ */
+function nowMs() {
+  return (typeof performance !== 'undefined' && performance && performance.now) ? performance.now() : Date.now();
+}
+
+/**
+ * Uploads a generated canvas as a GPU texture.
+ * Textures whose alpha carries data (emissive masks, cut-outs, LUT alpha) are
+ * uploaded from the raw pixel buffer instead of the canvas, because canvas
+ * back-buffers store premultiplied colour and would destroy RGB wherever
+ * alpha is zero.
+ * @param {WebGL2RenderingContext} gl GL context.
+ * @param {HTMLCanvasElement|OffscreenCanvas} canvas Source canvas.
+ * @param {Uint8ClampedArray|null} pixels Raw RGBA pixels (used when `opts.alphaMask`).
+ * @param {{srgb?:boolean, wrap?:string, mipmaps?:boolean, filter?:string,
+ *          anisotropy?:number, alphaMask?:boolean}} opts Upload options.
+ * @returns {Texture2D} The uploaded texture.
+ */
+function makeTexture(gl, canvas, pixels, opts) {
+  const srgb = opts.srgb !== false;
+  const wrap = opts.wrap || 'repeat';
+  const mipmaps = opts.mipmaps !== false;
+  const filter = opts.filter || 'linear';
+  const anisotropy = opts.anisotropy === undefined ? 8 : opts.anisotropy;
+  if (opts.alphaMask && pixels) {
+    try {
+      return new Texture2D(gl, {
+        width: canvas.width,
+        height: canvas.height,
+        data: pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.length),
+        wrap: wrap,
+        filter: filter,
+        mipmaps: mipmaps,
+        anisotropy: anisotropy,
+        srgb: srgb
+      });
+    } catch (err) {
+      /* Fall back to the canvas path if the data path is unavailable. */
+    }
+  }
+  return Texture2D.fromCanvas(gl, canvas, { srgb: srgb, mipmaps: mipmaps, wrap: wrap, anisotropy: anisotropy });
+}
+
+/**
+ * Builds every texture the game needs. All generation is procedural,
+ * deterministic for a given seed and runs entirely on the CPU into canvases.
+ *
+ * Colour maps are uploaded as sRGB; normal maps, masks and LUT ramps are
+ * uploaded as linear data. Tiling maps get mipmaps and anisotropic filtering.
+ *
+ * Facade textures pack two channels of information: **RGB** is the wall,
+ * frames and reflections, **ALPHA** is the emissive window mask (1 = window
+ * glass) so the shader can light random windows at night.
+ *
+ * @param {WebGL2RenderingContext} gl GL context used to upload the textures.
+ * @param {object} [opts] Options.
+ * @param {number} [opts.size] Base resolution (default 512, 1024 on 'high', 256 on 'low').
+ * @param {string} [opts.quality] 'low' | 'medium' | 'high' | 'ultra'.
+ * @param {number} [opts.seed] Deterministic seed (default 1337).
+ * @param {number} [opts.anisotropy] Anisotropic filtering level for tiling maps (default 8).
+ * @returns {object} The texture library: one {@link Texture2D} per documented key plus
+ *   `canvases` (raw canvases for the minimap / UI), `stats` `{count, bytes, ms}`
+ *   and `dispose()`.
+ */
+export function buildTextureLibrary(gl, opts) {
+  const o = opts || {};
+  const t0 = nowMs();
+  const quality = o.quality || 'medium';
+  const S = Math.max(64, (o.size || QUALITY_SIZE[quality] || 512) | 0);
+  const seed = o.seed === undefined ? 1337 : o.seed | 0;
+  const aniso = o.anisotropy === undefined ? 8 : o.anisotropy;
+
+  const P = Math.max(64, Math.round(S / 4));     // particle sprites
+  const D = Math.max(128, Math.round(S / 2));    // decals
+  const canvases = {};
+  const textures = {};
+  let bytes = 0;
+
+  /**
+   * Registers one generated canvas as a texture.
+   * @param {string} name Library key.
+   * @param {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels?:Uint8ClampedArray}} res Generator result.
+   * @param {object} texOpts Upload options (see {@link makeTexture}).
+   * @returns {void}
+   */
+  const add = (name, res, texOpts) => {
+    canvases[name] = res.canvas;
+    textures[name] = makeTexture(gl, res.canvas, res.pixels || null, texOpts);
+    const area = res.canvas.width * res.canvas.height * 4;
+    bytes += texOpts.mipmaps === false ? area : Math.round(area * 4 / 3);
+  };
+
+  /** Common option sets. */
+  const TILE = { srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso };
+  const TILE_MASK = { srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso, alphaMask: true };
+  const NORMAL = { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso };
+  const CARD = { srgb: true, wrap: 'clamp', mipmaps: true, anisotropy: 1, alphaMask: true };
+  const CARD_OPAQUE = { srgb: true, wrap: 'clamp', mipmaps: true, anisotropy: 1 };
+
+  /* --- roads and ground ------------------------------------------------- */
+  const asphalt = genAsphalt(S, seed);
+  add('asphalt', asphalt, TILE);
+  add('asphalt_n', { canvas: normalCanvasFromField(asphalt.height, S, S, 2.4) }, NORMAL);
+  add('roadLines', genRoadLines(S, seed + 1), TILE_MASK);
+
+  const sidewalk = genSidewalk(S, seed + 2);
+  add('sidewalk', sidewalk, TILE);
+  add('sidewalk_n', { canvas: normalCanvasFromField(sidewalk.height, S, S, 3.0) }, NORMAL);
+
+  const concrete = genConcrete(S, seed + 3);
+  add('concrete', concrete, TILE);
+  add('concrete_n', { canvas: normalCanvasFromField(concrete.height, S, S, 2.0) }, NORMAL);
+
+  const brick = genBrick(S, seed + 4);
+  add('brick', brick, TILE);
+  add('brick_n', { canvas: normalCanvasFromField(brick.height, S, S, 3.4) }, NORMAL);
+
+  const metal = genMetal(S, seed + 5);
+  add('metal', metal, TILE);
+  add('metal_n', { canvas: normalCanvasFromField(metal.height, S, S, 2.6) }, NORMAL);
+
+  add('roofGravel', genRoofGravel(S, seed + 6), TILE);
+  add('tileFloor', genTileFloor(S, seed + 7), TILE);
+  add('grass', genGrass(S, seed + 8), TILE);
+  add('dirt', genDirt(S, seed + 9), TILE);
+  add('sand', genSand(S, seed + 10), TILE);
+
+  const water = genWater(S, seed + 11);
+  add('water', water, TILE);
+  add('waterNormal', { canvas: normalCanvasFromField(water.height, S, S, 3.2) }, NORMAL);
+
+  /* --- vegetation and vehicles ------------------------------------------ */
+  add('treeBark', genTreeBark(S, seed + 12), TILE);
+  add('leaves', genLeaves(S, seed + 13), CARD);
+  add('carPaintNoise', genCarPaintNoise(S, seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso });
+  add('tire', genTire(S, seed + 15), TILE);
+  add('chrome', genChrome(Math.max(128, S >> 1), seed + 16), CARD_OPAQUE);
+
+  /* --- facades (alpha = emissive window mask) --------------------------- */
+  add('glassFacade', genGlassFacade(S, seed + 20), TILE_MASK);
+  add('officeFacade', genOfficeFacade(S, seed + 21), TILE_MASK);
+  add('apartmentFacade', genApartmentFacade(S, seed + 22), TILE_MASK);
+  add('groundFloorShops', genGroundFloorShops(S, seed + 23), TILE_MASK);
+
+  /* --- signage ---------------------------------------------------------- */
+  for (let i = 1; i <= 3; i++) add('neonSign' + i, genNeonSign(i, S, seed + 30 + i), CARD);
+  for (let i = 1; i <= 4; i++) add('billboard' + i, genBillboard(i, S, seed + 40 + i), CARD_OPAQUE);
+  for (let i = 1; i <= 2; i++) add('graffiti' + i, genGraffiti(i, S, seed + 50 + i), CARD);
+
+  /* --- particles -------------------------------------------------------- */
+  add('smoke', genSmoke(P, seed + 60), CARD);
+  add('spark', genSpark(P), CARD);
+  add('flash', genFlash(P), CARD);
+  add('blood', genBlood(P, seed + 61), CARD);
+  add('glassShard', genGlassShard(P), CARD);
+  add('raindrop', genRaindrop(Math.max(16, P >> 2), P), CARD);
+  add('muzzle', genMuzzle(P, seed + 62), CARD);
+
+  /* --- decals ----------------------------------------------------------- */
+  add('decalBulletHole', genBulletHole(D, seed + 70), CARD);
+  add('decalCrack', genCrackDecal(D, seed + 71), CARD);
+
+  /* --- sky and lookup tables -------------------------------------------- */
+  add('skyStars', genSkyStars(S * 2, S, seed + 80), {
+    srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso, alphaMask: true
+  });
+  add('noiseBlue', genNoiseBlue(64, seed + 81), {
+    srgb: false, wrap: 'repeat', mipmaps: false, filter: 'nearest', anisotropy: 1
+  });
+  add('gradientRamp', genGradientRamp(256, 64), {
+    srgb: false, wrap: 'clamp', mipmaps: false, filter: 'linear', anisotropy: 1, alphaMask: true
+  });
+
+  const keys = Object.keys(textures);
+  const library = textures;
+  library.canvases = canvases;
+  library.stats = { count: keys.length, bytes: bytes, ms: Math.round((nowMs() - t0) * 100) / 100 };
+  library.size = S;
+  library.seed = seed;
+  /**
+   * Releases every GPU texture in the library and drops the canvas references.
+   * @returns {void}
+   */
+  library.dispose = () => {
+    for (let i = 0; i < keys.length; i++) {
+      const tex = library[keys[i]];
+      if (tex && typeof tex.dispose === 'function') tex.dispose();
+      library[keys[i]] = null;
+    }
+    for (const k in canvases) delete canvases[k];
+  };
+  return library;
+}

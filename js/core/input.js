@@ -822,8 +822,16 @@ export class Input {
    * @returns {void}
    */
   injectMouseDelta(dx, dy) {
-    this.mouseDX += dx;
-    this.mouseDY += dy;
+    // Clamp exactly like the real pointermove path so injected input cannot produce a look
+    // delta a browser would never deliver.
+    let cx = dx || 0;
+    let cy = dy || 0;
+    if (cx > MAX_MOUSE_DELTA) cx = MAX_MOUSE_DELTA;
+    else if (cx < -MAX_MOUSE_DELTA) cx = -MAX_MOUSE_DELTA;
+    if (cy > MAX_MOUSE_DELTA) cy = MAX_MOUSE_DELTA;
+    else if (cy < -MAX_MOUSE_DELTA) cy = -MAX_MOUSE_DELTA;
+    this.mouseDX += cx;
+    this.mouseDY += cy;
   }
 
   /**
