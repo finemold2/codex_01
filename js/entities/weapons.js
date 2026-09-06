@@ -507,6 +507,12 @@ export class WeaponSystem {
 
     /** Currently equipped weapon key. @type {string} */
     this.current = 'fist';
+    /**
+     * The weapon table, published so UI code can look a definition up by key without importing
+     * this module (`ui/hud.js` reads `weapons.defs[key].magazine` / `.nameKo`).
+     * @type {Record<string, Object>}
+     */
+    this.defs = WEAPONS;
     /** Per-weapon ammunition pools. @type {Record<string, {mag:number, reserve:number}>} */
     this.ammo = {};
     /** Weapons the player owns. @type {Set<string>} */
@@ -517,6 +523,12 @@ export class WeaponSystem {
     this.reloading = false;
     /** Seconds left on the reload. @type {number} */
     this.reloadLeft = 0;
+    /**
+     * Length of the reload step currently running, so a HUD can draw `1 - reloadLeft/reloadDuration`
+     * (`ui/hud.js` reads exactly this pair). Equals `shellTime` during a per-shell reload.
+     * @type {number}
+     */
+    this.reloadDuration = 0;
     /** Seconds left before the weapon can fire again. @type {number} */
     this.cooldown = 0;
     /** Seconds left of the equip animation. @type {number} */
@@ -525,6 +537,13 @@ export class WeaponSystem {
     this.bloom = 0;
     /** Total spread used by the last shot (radians) — HUD reticle size. @type {number} */
     this.spreadRadians = WEAPONS.fist.spread;
+    /**
+     * Live aiming cone in radians: base spread scaled by stance and movement plus the dynamic
+     * bloom, refreshed every frame so the crosshair breathes even when nobody is shooting.
+     * `ui/hud.js` reads this to size the reticle.
+     * @type {number}
+     */
+    this.currentSpread = WEAPONS.fist.spread;
     /** Recoil kick applied to the view, recovering over time. @type {{pitch:number, yaw:number}} */
     this.viewKick = { pitch: 0, yaw: 0 };
     /** Scope zoom currently requested by the equipped weapon (1 = none). @type {number} */
@@ -608,7 +627,7 @@ export class WeaponSystem {
   hudInfo() {
     const d = this.def();
     const a = this.ammoFor();
-    const total = d.reloadTime > 0 ? d.reloadTime : 1;
+    const total = this.reloadDuration > 0 ? this.reloadDuration : (d.reloadTime > 0 ? d.reloadTime : 1);
     return {
       key: this.current,
       nameKo: d.nameKo,
@@ -688,6 +707,7 @@ export class WeaponSystem {
     this.reloading = false;
     this._shellReload = false;
     this.reloadLeft = 0;
+    this.reloadDuration = 0;
     this.bloom = 0;
     this.cooldown = Math.max(this.cooldown, 0.08);
     this.equipLeft = fin(def.equipTime, 0.3);
@@ -759,6 +779,7 @@ export class WeaponSystem {
     this.reloading = true;
     this._shellReload = !!def.shellTime;
     this.reloadLeft = this._shellReload ? def.shellTime : def.reloadTime;
+    this.reloadDuration = Math.max(1e-3, this.reloadLeft);
     this.bloom = 0;
     const g = this.game;
     if (g) {
@@ -801,9 +822,11 @@ export class WeaponSystem {
         this.reloading = false;
         this._shellReload = false;
         this.reloadLeft = 0;
+        this.reloadDuration = 0;
         this._setCharacterState(null);
       } else {
         this.reloadLeft = def.shellTime;
+        this.reloadDuration = Math.max(1e-3, def.shellTime);
         const g = this.game;
         if (g && g.sfx && g.sfx.reload) g.sfx.reload(def.sfx, this._ownerPos(g));
       }
@@ -812,6 +835,7 @@ export class WeaponSystem {
     this._fillMagazine(def, def.magazine);
     this.reloading = false;
     this.reloadLeft = 0;
+    this.reloadDuration = 0;
     this._setCharacterState(null);
   }
 
@@ -859,6 +883,7 @@ export class WeaponSystem {
         this.reloading = false;
         this._shellReload = false;
         this.reloadLeft = 0;
+        this.reloadDuration = 0;
       }
       if (!def.melee) {
         const a = this.ammoFor(key);
@@ -1826,6 +1851,7 @@ export class WeaponSystem {
     }
     this.reloading = false;
     this.reloadLeft = 0;
+    this.reloadDuration = 0;
     this.cooldown = 0;
     this.equipLeft = 0;
     this.current = 'fist';
@@ -1842,6 +1868,7 @@ export class WeaponSystem {
     this.reloading = false;
     this._shellReload = false;
     this.reloadLeft = 0;
+    this.reloadDuration = 0;
     this.cooldown = 0;
     this.equipLeft = 0;
     this.bloom = 0;

@@ -2262,6 +2262,20 @@ export class MissionManager {
   }
 
   /**
+   * The point marker culling measures from: the camera when there is one, else the player.
+   * @returns {ArrayLike<number>|null} `[x, y, z]`, or null when neither is available.
+   * @private
+   */
+  _viewPoint() {
+    const game = this.game;
+    const cam = game.camera;
+    if (cam && cam.position && Number.isFinite(cam.position[0])) return cam.position;
+    const p = game.player;
+    if (p && p.position && Number.isFinite(p.position[0])) return p.position;
+    return null;
+  }
+
+  /**
    * @param {Object} renderer Renderer.
    * @param {Object} meshes `{mesh, material}` cache.
    * @param {number} x World x.
@@ -2349,7 +2363,10 @@ export class MissionManager {
    * @returns {void}
    */
   dispose() {
+    // Tear-down must clean up the world without flashing a "MISSION FAILED" banner on the way out.
+    this._silent = true;
     if (this.active) this.abort('세션이 종료되었습니다.');
+    this._silent = false;
     for (let i = 0; i < this._unsub.length; i++) {
       const fn = this._unsub[i];
       if (typeof fn === 'function') fn();
@@ -2360,12 +2377,18 @@ export class MissionManager {
 }
 
 /**
- * Matrix that lifts the marker's inner cone above the ring and flips it point-down.
+ * Matrix that lifts the marker's inner cone above the ring and turns it point-down.
+ *
+ * This is a real 180 degree rotation about X (determinant +1), not a Y mirror: a mirroring matrix
+ * would flip the triangle winding and leave the cone inside out with inverted normals.
  * @returns {Float32Array} Column-major transform.
  */
 function markerConeMatrix() {
   const m = new Float32Array(16);
-  m[0] = 1; m[5] = -1; m[10] = 1; m[15] = 1;
+  m[0] = 1;
+  m[5] = -1;
+  m[10] = -1;
   m[13] = 2.05;
+  m[15] = 1;
   return m;
 }

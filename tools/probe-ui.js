@@ -404,6 +404,58 @@ export default async function run() {
   dirCase(-1, 0, Math.PI / 2, 0, 'attacker due west, camera facing west');
   game.camera.yaw = 0;
 
+  /* ---------------------------------------------------------------- police blips */
+  // police.js pushes *unit* records ({vehicle, cops, ...}) into `cars`, never bare positions,
+  // and plain cop records with a `position` into `cops`.
+  {
+    const ctx = radar.getContext('2d');
+    const d = hud.minimap.dpr;
+    const S = hud.minimap.size;
+    const blue = () => {
+      const img = ctx.getImageData(0, 0, radar.width, radar.height).data;
+      let hits = 0;
+      for (let i = 0; i < img.length; i += 4) {
+        if (img[i + 3] > 8 && img[i + 2] > 180 && img[i + 2] - img[i] > 70) hits++;
+      }
+      return hits;
+    };
+    hud.minimap.rotate = false;
+    const before = blue();
+    game.police.wanted = 2;
+    game.police.searching = true;
+    game.police.cars.push({ vehicle: { position: [18, 0, 6] }, cops: [] });
+    game.police.cops.push({ position: [-14, 0, 10] });
+    for (let i = 0; i < 3; i++) hud.update(step);
+    const after = blue();
+    out.stats.policeBlipPixels = [before, after];
+    if (after <= before) bad('hud: police units (the {vehicle,...} records police.js publishes) draw no radar blips');
+    if (!dom.hudRoot.querySelector('.hud-wanted').classList.contains('searching')) {
+      bad('hud: the searching state from police.searchTimer/searching was not shown');
+    }
+    void S;
+    void d;
+    hud.minimap.rotate = true;
+  }
+
+  // police.js emits wantedChanged with a plain number.
+  {
+    const toastsBefore = dom.hudRoot.querySelectorAll('.toast').length;
+    game.police.wanted = 4;
+    game.emit('wantedChanged', 4);
+    const toastsAfter = dom.hudRoot.querySelectorAll('.toast').length;
+    if (toastsAfter <= toastsBefore) bad('hud: wantedChanged(number) did not raise a toast');
+    hud.update(step);
+    if (dom.hudRoot.querySelectorAll('.hud-wanted .star.on').length !== 4) {
+      bad('hud: wanted stars did not follow police.wanted = 4');
+    }
+    game.police.wanted = 0;
+    game.police.searching = false;
+    game.police.cars.length = 0;
+    game.police.cops.length = 0;
+    hud.update(step);
+    for (let i = 0; i < 260; i++) hud.update(step);
+  }
+
   /* ---------------------------------------------------------------- toasts */
   hud.notify('테스트 알림', 'money', 0.5);
   hud.notify('두 번째', 'warn', 0.5);

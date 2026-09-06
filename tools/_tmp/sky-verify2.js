@@ -93,7 +93,7 @@ export default async function run({ canvas }) {
         for (let k = 0; k < 4; k++) {
           const a = k * Math.PI * 0.5; const ce = Math.cos(el * DEG2RAD);
           const d = [Math.sin(a) * ce, Math.sin(el * DEG2RAD), -Math.cos(a) * ce];
-          if (ang(d, sky.sunDirectionTrue) < 0.22 || ang(d, sky.moonDirection) < 0.22) continue;
+          if (ang(d, sky.sunDirectionTrue) < 0.75 || ang(d, sky.moonDirection) < 0.30) continue;
           const g = sample(d); const c = cpuAt(d);
           const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - c[i]) / Math.max(2e-3, c[i])));
           const abs = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - c[i])));
@@ -136,7 +136,7 @@ export default async function run({ canvas }) {
         const ca = Math.cos(azOff * DEG2RAD); const sa = Math.sin(azOff * DEG2RAD);
         const ce = Math.cos(el * DEG2RAD);
         const d = [(hx * ca - hz * sa) * ce, Math.sin(el * DEG2RAD), (hx * sa + hz * ca) * ce];
-        if (ang(d, sky.sunDirectionTrue) < 0.22) continue;    // the solar aureole is not "the sky"
+        if (ang(d, sky.sunDirectionTrue) < 0.75) continue;    // the solar aureole is glare, not "the sky"
         const r = {};
         for (const q of ['low', 'medium', 'high', 'ultra']) { sky.setQuality(q); sky.update(0, 0); quiet(); r[q] = sample(d)[1]; }
         const vals = Object.values(r);

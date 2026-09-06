@@ -119,6 +119,13 @@ const _ctx = {
 };
 const _rayHit = { ped: null, t: 0, point: new Float32Array(3), headshot: false };
 
+/** Nearest ped-shaped record found by the current {@link PedManager#raycastPeds} call. */
+let _rayBest = null;
+/** Distance to {@link _rayBest} along the ray. */
+let _rayBestT = 0;
+/** Whether {@link _rayBest} was hit in the head. */
+let _rayBestHead = false;
+
 /**
  * Reads a number defensively.
  * @param {*} v Value.
@@ -926,7 +933,16 @@ export class PedManager {
    * @returns {number} Damage actually applied.
    */
   damagePed(ped, amount, dir3, headshot = false, attacker) {
-    if (!ped || ped.dead || !ped.active) return 0;
+    if (!ped || ped.dead) return 0;
+    // `raycastPeds` also reports police officers, so route their damage to the police system.
+    if (ped.isCop === true) {
+      const police = this.game.police;
+      if (police && typeof police.damageCop === 'function') {
+        return police.damageCop(ped, amount, dir3, headshot, attacker);
+      }
+      return 0;
+    }
+    if (!ped.active) return 0;
     let dmg = Math.max(0, fin(amount, 0));
     if (dmg <= 0) return 0;
     // A clean head hit on an unarmoured civilian is always fatal.
@@ -1060,21 +1076,52 @@ export class PedManager {
     let limit = fin(maxDist, 100);
     if (!(limit > 0)) return null;
 
-    let best = null;
-    let bestT = limit;
-    let bestHead = false;
-    for (let i = 0; i < this.peds.length; i++) {
-      const ped = this.peds[i];
-      if (ped.dead || !ped.active) continue;
+    _rayBest = null;
+    _rayBestT = limit;
+    _rayBestHead = false;
+    this._rayList(this.peds, ox, oy, oz, dx, dy, dz);
+    // Police officers are shot through the same call, so the weapon system needs no special case.
+    const police = this.game.police;
+    if (police && Array.isArray(police.cops) && police.cops.length > 0) {
+      this._rayList(police.cops, ox, oy, oz, dx, dy, dz);
+    }
+    if (!_rayBest) return null;
+    _rayHit.ped = _rayBest;
+    _rayHit.t = _rayBestT;
+    _rayHit.headshot = _rayBestHead;
+    _rayHit.point[0] = ox + dx * _rayBestT;
+    _rayHit.point[1] = oy + dy * _rayBestT;
+    _rayHit.point[2] = oz + dz * _rayBestT;
+    return _rayHit;
+  }
+
+  /**
+   * Tests one list of ped-shaped records against a ray, keeping the nearest hit in the shared
+   * `_rayBest*` state.
+   * @param {object[]} list Records with `position`, `dead` and optionally `character`.
+   * @param {number} ox Ray origin x.
+   * @param {number} oy Ray origin y.
+   * @param {number} oz Ray origin z.
+   * @param {number} dx Direction x (unit).
+   * @param {number} dy Direction y (unit).
+   * @param {number} dz Direction z (unit).
+   * @returns {void}
+   * @private
+   */
+  _rayList(list, ox, oy, oz, dx, dy, dz) {
+    for (let i = 0; i < list.length; i++) {
+      const ped = list[i];
+      if (!ped || ped.dead || ped.active === false || !ped.position) continue;
       const px = ped.position[0];
       const py = ped.position[1];
       const pz = ped.position[2];
+      if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) continue;
       // Broad phase: reject anything whose centre is further from the ray than a body radius.
       const mx = px - ox;
       const my = py + 0.9 - oy;
       const mz = pz - oz;
       const along = mx * dx + my * dy + mz * dz;
-      if (along < -1.2 || along > bestT + 1.2) continue;
+      if (along < -1.2 || along > _rayBestT + 1.2) continue;
       const cx = mx - dx * along;
       const cy = my - dy * along;
       const cz = mz - dz * along;
@@ -1084,29 +1131,21 @@ export class PedManager {
       const scale = ch && Number.isFinite(ch.height) ? ch.height / 1.8 : 1;
       const r = PED_RADIUS * scale;
       const headY = py + 1.60 * scale;
-      const th = raySphere(ox, oy, oz, dx, dy, dz, px, headY, pz, 0.155 * scale, bestT);
+      const th = raySphere(ox, oy, oz, dx, dy, dz, px, headY, pz, 0.155 * scale, _rayBestT);
       if (th >= 0) {
-        bestT = th;
-        best = ped;
-        bestHead = true;
+        _rayBestT = th;
+        _rayBest = ped;
+        _rayBestHead = true;
         continue;
       }
       const tb = rayCylinderY(ox, oy, oz, dx, dy, dz, px, pz,
-        py + 0.08, py + 1.48 * scale, r, bestT);
+        py + 0.08, py + 1.48 * scale, r, _rayBestT);
       if (tb >= 0) {
-        bestT = tb;
-        best = ped;
-        bestHead = false;
+        _rayBestT = tb;
+        _rayBest = ped;
+        _rayBestHead = false;
       }
     }
-    if (!best) return null;
-    _rayHit.ped = best;
-    _rayHit.t = bestT;
-    _rayHit.headshot = bestHead;
-    _rayHit.point[0] = ox + dx * bestT;
-    _rayHit.point[1] = oy + dy * bestT;
-    _rayHit.point[2] = oz + dz * bestT;
-    return _rayHit;
   }
 
   /* ---------------------------------------------------------------- update */
