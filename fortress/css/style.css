@@ -545,6 +545,25 @@ kbd {
 .payout-wallet { margin-top: 6px; font-size: 11.5px; color: var(--muted); text-align: right; }
 .payout-wallet b { color: var(--text-dim); }
 
+/* ═══════════════ 설명 툴팁 ═══════════════ */
+.tip {
+  position: fixed; z-index: 60; max-width: 280px; pointer-events: none;
+  padding: 10px 12px; border-radius: var(--r-md);
+  background: rgba(12,15,22,.97); border: 1px solid var(--line);
+  border-left-width: 3px;
+  box-shadow: var(--shadow-2);
+  font-size: 12px; line-height: 1.6;
+}
+.tip-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.tip-ico { font-size: 17px; }
+.tip-name { font-size: 13.5px; font-weight: 700; }
+.tip-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 7px; }
+.tip-desc { color: var(--text-dim); }
+.tip-meta { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; }
+.tip-meta b { color: var(--brass); }
+.buff-chip { pointer-events: auto; }
+.buff-bar { pointer-events: none; }
+
 /* ═══════════════ 소리 설정 패널 ═══════════════ */
 .menu-shell { position: relative; }
 .audio-toggle { position: absolute; right: 0; top: -6px; }

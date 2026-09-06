@@ -426,6 +426,63 @@
     $('#audioPanel').hidden = true;
   }
 
+  /* ═══════════════ 설명 툴팁 ═══════════════ */
+
+  let tipEl = null;
+  function tip() { if (!tipEl) tipEl = $('#tip'); return tipEl; }
+
+  function tipShow(html, accent, ev) {
+    const el = tip();
+    el.innerHTML = html;
+    el.style.borderLeftColor = accent || 'var(--line)';
+    el.hidden = false;
+    tipMove(ev);
+  }
+  function tipMove(ev) {
+    const el = tip();
+    if (el.hidden || !ev) return;
+    const w = el.offsetWidth, h = el.offsetHeight;
+    let x = ev.clientX + 16, y = ev.clientY + 16;
+    if (x + w > window.innerWidth - 8) x = ev.clientX - w - 14;
+    if (y + h > window.innerHeight - 8) y = ev.clientY - h - 14;
+    el.style.left = `${Math.max(8, x)}px`;
+    el.style.top = `${Math.max(8, y)}px`;
+  }
+  function tipHide() { tip().hidden = true; }
+
+  /** 요소에 툴팁 붙이기 — build() 는 {html, accent} 를 돌려줍니다 */
+  function attachTip(el, build) {
+    el.addEventListener('mouseenter', (e) => { const b = build(); if (b) tipShow(b.html, b.accent, e); });
+    el.addEventListener('mousemove', tipMove);
+    el.addEventListener('mouseleave', tipHide);
+  }
+
+  /** 아이템 인스턴스 → 툴팁 HTML */
+  function itemTipHtml(inst, extra) {
+    const def = itemDef(inst.id);
+    if (!def) return null;
+    const r = RARITY[def.rarity];
+    const q = qualityOf(inst.roll != null ? inst.roll : 1);
+    const dur = durationOf(inst);
+    const tags =
+      `<span class="tag" style="background:${r.color}">${r.label}</span>` +
+      `<span class="tag" style="background:${q.color}">${q.label}</span>` +
+      `<span class="tag ${inst.perm ? 'tag--perm' : 'tag--dur'}">${DURATION_LABEL[dur]}</span>` +
+      `<span class="tag tag--cat">${ITEM_CATS[def.cat] || ''}</span>`;
+    const meta = [];
+    if (def.kind === 'active') meta.push(`사용 <b>${extra && extra.uses != null ? extra.uses : itemUses(inst)}회</b>`);
+    if (inst.price) meta.push(`가치 <b>◈${inst.price}</b>`);
+    meta.push(`성능 <b>${Math.round((inst.roll != null ? inst.roll : 1) * 100)}%</b>`);
+    return {
+      accent: inst.perm ? '#c07bff' : r.color,
+      html:
+        `<div class="tip-head"><span class="tip-ico">${def.icon}</span><span class="tip-name">${esc(itemName(inst))}</span></div>` +
+        `<div class="tip-tags">${tags}</div>` +
+        `<div class="tip-desc">${esc(itemDesc(inst))}</div>` +
+        `<div class="tip-meta">${meta.join(' · ')}</div>`,
+    };
+  }
+
   /* ═══════════════ 진행(런) ═══════════════ */
 
   function stageLabel() {
@@ -494,6 +551,7 @@
       `${def.kind === 'active' ? `<span class="tag tag--cat">사용 ${itemUses(entry)}회</span>` : ''}` +
       `</div></div></div>` +
       `<div class="sc-desc">${esc(itemDesc(entry))}</div>`;
+    attachTip(card, () => itemTipHtml(entry));
 
     const buy = document.createElement('button');
     buy.type = 'button';
@@ -529,6 +587,7 @@
       `<span><b>${esc(itemName(inst))}</b>` +
       `<small style="color:${q.color}">${q.label} · ${DURATION_LABEL[durationOf(inst)]}</small>` +
       `<small>${esc(itemDesc(inst))}</small></span>`;
+    attachTip(row, () => itemTipHtml(inst));
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'inv-sell';
@@ -653,6 +712,46 @@
   }
   window.addEventListener('resize', fitCanvas);
 
+  /* 전장 위 보급 상자에 마우스를 올리면 내용물을 보여 줍니다 */
+  (() => {
+    const cv = $('#canvas');
+    if (!cv) return;
+    let hover = null;
+
+    function worldAt(ev) {
+      const r = cv.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      return { x: (ev.clientX - r.left) * (cv.width / r.width), y: (ev.clientY - r.top) * (cv.height / r.height) };
+    }
+    function crateAt(p) {
+      if (!game || !game.crates) return null;
+      let best = null, bd = 26;
+      for (const c of game.crates) {
+        const d = Math.hypot(c.x - p.x, c.y - p.y);
+        if (d < bd) { bd = d; best = c; }
+      }
+      return best;
+    }
+
+    cv.addEventListener('mousemove', (ev) => {
+      const p = worldAt(ev);
+      const c = p ? crateAt(p) : null;
+      if (c !== hover) {
+        hover = c;
+        if (game) game.hoverCrate = c;
+        const b = c && c.item ? itemTipHtml(c.item) : null;
+        if (b) tipShow(b.html, b.accent, ev); else tipHide();
+      } else if (c) {
+        tipMove(ev);
+      }
+    });
+    cv.addEventListener('mouseleave', () => {
+      hover = null;
+      if (game) game.hoverCrate = null;
+      tipHide();
+    });
+  })();
+
   /* ═══════════════ 게임 HUD ═══════════════ */
 
   let bannerTimer = null;
@@ -712,9 +811,15 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'wpn' + (t.weapon === i ? ' is-active' : '') + (ammo <= 0 ? ' is-empty' : '');
-      b.title = `${w.name} — ${w.desc}`;
       b.innerHTML = `<span class="w-key">${i + 1}</span><span class="w-icon">${w.icon}</span>` +
         `<span class="w-name">${w.name}</span><span class="w-ammo">${ammo === Infinity ? '∞' : ammo}</span>`;
+      attachTip(b, () => ({
+        accent: '#f0a63c',
+        html: `<div class="tip-head"><span class="tip-ico">${w.icon}</span><span class="tip-name">${esc(w.name)}</span></div>` +
+          `<div class="tip-desc">${esc(w.desc)}</div>` +
+          `<div class="tip-meta">피해 <b>${w.damage}</b> · 폭발 반경 <b>${w.radius}</b>` +
+          `${w.count > 1 ? ` · <b>${w.count}발</b>` : ''} · 남은 탄약 <b>${ammo === Infinity ? '무제한' : ammo + '발'}</b></div>`,
+      }));
       b.addEventListener('click', () => game && game.selectWeapon(i));
       wrap.appendChild(b);
     });
@@ -733,8 +838,8 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'item-btn';
-      b.title = `${itemName(slot)} — ${itemDesc(slot)}`;
       b.disabled = game.state !== 'aim';
+      attachTip(b, () => itemTipHtml(slot, { uses: slot.uses }));
       b.style.borderLeftColor = RARITY[def.rarity].color;
       b.innerHTML =
         `<span class="i-key">${ITEM_KEYS[i]}</span>` +
@@ -747,25 +852,37 @@
   }
 
   const BUFF_CHIPS = [
-    ['shield', '🔵', (v) => `방어막 ×${v}`],
-    ['dodge', '💨', (v) => `회피 ×${v}`],
-    ['reactive', '🧱', (v) => `반응장갑 ×${v}`],
-    ['phoenix', '🔥', (v) => `부활 ×${v}`],
-    ['smoke', '🌫', (v) => `연막 ${v}턴`],
-    ['overcharge', '🔋', () => '과충전'],
-    ['pierce', '🔻', (v) => `관통 ×${v}`],
-    ['bounce', '🔄', (v) => `도탄 ×${v}`],
-    ['splitFuse', '✳', (v) => `분열 ×${v}`],
-    ['homing', '📶', (v) => `유도 ×${v}`],
-    ['lowGrav', '🌙', (v) => `저중력 ×${v}`],
-    ['extraShot', '⏩', (v) => `추가 사격 ×${v}`],
-    ['regen', '💠', (v) => `재생 +${v}`],
-    ['leech', '🩸', () => '흡혈'],
-    ['thorns', '🌵', () => '반사'],
-    ['scope', '🎯', () => '탄도 예측'],
-    ['chute', '🪂', () => '낙하 무효'],
-    ['magnet', '🧲', () => '수집기'],
-    ['dupe', '♊', () => '복제'],
+    ['shield', '🔵', (v) => `방어막 ×${v}`, '다음에 받는 피해를 통째로 막습니다. 한 번 막을 때마다 하나씩 소모됩니다.'],
+    ['dodge', '💨', (v) => `회피 ×${v}`, '다음 공격이 아예 빗나갑니다.'],
+    ['reactive', '🧱', (v) => `반응장갑 ×${v}`, '피격 시 그 피해를 절반으로 줄입니다.'],
+    ['phoenix', '🔥', (v) => `부활 ×${v}`, '파괴되는 순간 체력을 회복하며 되살아납니다.'],
+    ['smoke', '🌫', (v) => `연막 ${v}턴`, '연막이 걷힐 때까지 적 AI의 명중률이 크게 떨어집니다.'],
+    ['overcharge', '🔋', () => '과충전', '다음 사격의 파워 상한이 135까지 올라갑니다.'],
+    ['pierce', '🔻', (v) => `관통 ×${v}`, '다음 사격이 지형을 한 겹 뚫고 지나갑니다.'],
+    ['bounce', '🔄', (v) => `도탄 ×${v}`, '다음 사격이 지면에 맞으면 한 번 튕겨 나갑니다.'],
+    ['splitFuse', '✳', (v) => `분열 ×${v}`, '다음 사격이 착탄 지점에서 세 번 연쇄 폭발합니다.'],
+    ['homing', '📶', (v) => `유도 ×${v}`, '다음 사격이 비행 중 가까운 적 쪽으로 휘어집니다.'],
+    ['lowGrav', '🌙', (v) => `저중력 ×${v}`, '다음 사격 동안 중력이 약해져 포탄이 훨씬 멀리 날아갑니다.'],
+    ['extraShot', '⏩', (v) => `추가 사격 ×${v}`, '이번 턴에 한 번 더 쏠 수 있습니다.'],
+    ['regen', '💠', (v) => `재생 +${v}`, '매 턴 시작마다 체력이 회복됩니다.'],
+    ['leech', '🩸', () => '흡혈', '적에게 입힌 피해의 일부만큼 체력을 회복합니다.'],
+    ['thorns', '🌵', () => '반사', '받은 피해의 일부를 공격자에게 되돌려 줍니다.'],
+    ['scope', '🎯', () => '탄도 예측', '조준할 때 예상 탄착 궤적과 착탄점이 표시됩니다.'],
+    ['chute', '🪂', () => '낙하 무효', '높은 곳에서 떨어져도 낙하 피해를 받지 않습니다.'],
+    ['magnet', '🧲', () => '수집기', '보급 상자를 훨씬 먼 거리에서 끌어당겨 줍습니다.'],
+    ['dupe', '♊', () => '복제', '줍는 보급 상자가 두 개 분량이 됩니다.'],
+    ['twinBarrel', '⚌', () => '쌍둥이 포신', '모든 사격이 두 발로 나갑니다. 탄약은 한 발만 씁니다.'],
+    ['deathBlast', '💀', (v) => `자폭 ${v}`, '파괴되는 순간 주변에 대폭발을 일으킵니다.'],
+    ['heatsink', '🌡', (v) => `흡열 +${v}`, '불바다·산성비 피해를 받지 않고 오히려 회복합니다.'],
+    ['frostTouch', '🧊', (v) => `빙결 부여 ${v}턴`, '내 공격에 맞은 적이 얼어붙습니다.'],
+    ['autoMedic', '🚨', (v) => `응급 ${v}`, '체력이 30% 밑으로 떨어지면 자동으로 회복합니다. (1회)'],
+    ['scavenger', '🏴', (v) => `약탈 +${v}`, '적을 격파할 때마다 크레딧을 추가로 챙깁니다.'],
+    ['luck', '🍀', () => '행운', '보급 상자에서 나오는 아이템 성능이 좋아집니다.'],
+    ['siege', '🏰', (v) => `요새 +${v}%`, '이번 턴에 움직이지 않았다면 피해가 올라갑니다.'],
+    ['bulwark', '🚧', () => '방폭 격벽', '폭발로 받는 피해가 줄어듭니다.'],
+    ['dome', '⛺', (v) => `보호 돔 ${v}턴`, '폭발 피해를 70% 줄여 줍니다.'],
+    ['anchor', '⚓', () => '고정', '낙하 피해를 받지 않고 밀리지 않습니다.'],
+    ['insurance', '📜', () => '전투 보험', '져도 크레딧을 상당 부분 지킵니다.'],
   ];
 
   function renderBuffs() {
@@ -773,24 +890,30 @@
     bar.innerHTML = '';
     const t = game && game.cur;
     if (!t) return;
-    const add = (icon, text, color) => {
+    const add = (icon, text, color, note) => {
       const d = document.createElement('div');
       d.className = 'buff-chip';
       d.style.color = color || 'var(--text-dim)';
       d.innerHTML = `<span>${icon}</span><span>${esc(text)}</span>`;
+      attachTip(d, () => ({
+        accent: color || '#8fa3bf',
+        html: `<div class="tip-head"><span class="tip-ico">${icon}</span><span class="tip-name">${esc(text)}</span></div>` +
+          `<div class="tip-desc">${esc(note || '지금 걸려 있는 효과입니다.')}</div>`,
+      }));
       bar.appendChild(d);
     };
-    for (const [key, icon, fmt] of BUFF_CHIPS) {
+    for (const [key, icon, fmt, note] of BUFF_CHIPS) {
       const v = t.buffs[key];
-      if (v) add(icon, fmt(v), '#e9ecf4');
+      if (v) add(icon, fmt(v), '#e9ecf4', note);
     }
-    if ((t.buffs.armor || 1) !== 1) add('🛡', `방어 ${Math.round((1 - t.buffs.armor) * 100)}%`, '#7fd8ff');
-    if ((t.buffs.damage || 1) !== 1) add('🔺', `화력 +${Math.round((t.buffs.damage - 1) * 100)}%`, '#ffcc2e');
-    if ((t.buffs.radius || 1) !== 1) add('💥', `반경 +${Math.round((t.buffs.radius - 1) * 100)}%`, '#ff9a5a');
-    if ((t.buffs.power || 1) !== 1) add('🧨', `사거리 +${Math.round((t.buffs.power - 1) * 100)}%`, '#ffcc2e');
-    if (t.acid > 0) add('🌧', `산성비 ${t.acid}턴`, '#a8e05f');
-    if (t.oiled > 0) add('🛢', `유막 ${t.oiled}턴`, '#c9a227');
-    if (t.frozen > 0) add('❄', `빙결 ${t.frozen}턴`, '#9fe8ff');
+    if ((t.buffs.armor || 1) !== 1) add('🛡', `방어 ${Math.round((1 - t.buffs.armor) * 100)}%`, '#7fd8ff', '받는 피해가 이만큼 조정됩니다.');
+    if ((t.buffs.damage || 1) !== 1) add('🔺', `화력 +${Math.round((t.buffs.damage - 1) * 100)}%`, '#ffcc2e', '주는 피해가 늘어납니다.');
+    if ((t.buffs.radius || 1) !== 1) add('💥', `반경 +${Math.round((t.buffs.radius - 1) * 100)}%`, '#ff9a5a', '모든 폭발 반경이 커집니다.');
+    if ((t.buffs.power || 1) !== 1) add('🧨', `사거리 +${Math.round((t.buffs.power - 1) * 100)}%`, '#ffcc2e', '포구 초속이 올라 더 멀리 날아갑니다.');
+    if ((t.buffs.wind != null && t.buffs.wind < 1)) add('🧭', `바람 저항 ${Math.round((1 - t.buffs.wind) * 100)}%`, '#9fe8ff', '바람이 탄도에 주는 영향이 줄어듭니다.');
+    if (t.acid > 0) add('🌧', `산성비 ${t.acid}턴`, '#a8e05f', '매 턴 시작마다 피해를 입습니다.');
+    if (t.oiled > 0) add('🛢', `유막 ${t.oiled}턴`, '#c9a227', '이동력이 절반으로 떨어집니다.');
+    if (t.frozen > 0) add('❄', `빙결 ${t.frozen}턴`, '#9fe8ff', '이동이 거의 묶입니다.');
   }
 
   function renderRoster() {

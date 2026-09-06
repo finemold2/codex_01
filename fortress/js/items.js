@@ -34,6 +34,13 @@ const ITEM_CATS = {
 
 const ITEMS = {};
 
+/** 받침에 맞춰 목적격 조사를 붙입니다 — 핵탄두를 / 지진탄을 */
+function eul(word) {
+  const ch = (word || '').charCodeAt((word || '').length - 1);
+  const hasJong = ch >= 0xac00 && ch <= 0xd7a3 && (ch - 0xac00) % 28 !== 0;
+  return word + (hasJong ? '을' : '를');
+}
+
 function defItem(o) {
   o.rarity = o.rarity || 'common';
   o.kind = o.kind || 'instant';
@@ -79,7 +86,7 @@ for (const a of AMMO_DEFS) {
     kind: 'ammo', cat: 'ammo', rarity: a.rarity, price: a.price, base: a.n,
     weapon: a.w,
     label: (v) => `${w.name} ${v}발`,
-    desc: (v) => `${w.name}을 ${v}발 보급받습니다. ${w.desc}`,
+    desc: (v) => `${eul(w.name)} ${v}발 보급받습니다. ${w.desc}`,
     apply(game, t, v) {
       if (t.ammo[a.w] == null) { t.weapons.push(a.w); t.ammo[a.w] = 0; }
       if (t.ammo[a.w] !== Infinity) t.ammo[a.w] += v;
@@ -518,7 +525,7 @@ defItem({
 defItem({
   id: 'jackpot', name: '전리품 상자', icon: '💰', cat: 'eco', rarity: 'rare', price: 0, base: 130,
   noShop: true,
-  desc: (v) => `즉시 크레딧 ${v}을 얻습니다.`,
+  desc: (v) => `즉시 크레딧 ◈${v} 을(를) 챙깁니다.`,
   apply(game, t, v) { game.bonusCredits = (game.bonusCredits || 0) + v; return `크레딧 +${v}`; },
 });
 
@@ -551,7 +558,7 @@ defItem({
 });
 defItem({
   id: 'scavenger', name: '약탈자', icon: '🏴', kind: 'buff', cat: 'eco', rarity: 'rare', price: 245, base: 60,
-  desc: (v) => `적을 격파할 때마다 크레딧 ${v}을 추가로 챙깁니다.`,
+  desc: (v) => `적을 격파할 때마다 크레딧 ◈${v} 을(를) 추가로 챙깁니다.`,
   apply(game, t, v) { t.buffs.scavenger = (t.buffs.scavenger || 0) + v; return `격파 보상 +${v}`; },
 });
 defItem({

@@ -79,6 +79,7 @@ class Game {
     this.burns = [];          // 네이팜 불바다
     this.floaters = [];
     this.crates = [];         // 보급 상자
+    this.hoverCrate = null;   // 마우스가 올라간 상자
     this.mines = [];          // 매설된 지뢰
     this.planes = [];         // 보급기 / 폭격기
     this.bonusCredits = 0;    // 전리품 상자로 얻은 크레딧
@@ -939,17 +940,15 @@ class Game {
         // 주운 아이템을 가끔 사용합니다
         if (!ai.usedItem && t.items.length && ai.t > 0.2) {
           ai.usedItem = true;
-          if (Math.random() < 0.65) {
-            const idx = Math.floor(Math.random() * t.items.length);
-            const slot = t.items[idx];
-            const def = itemDef(slot.id);
-            if (def && def.apply) {
-              const label = def.apply(this, t, itemValue(slot));
-              if (label != null) {
-                slot.uses--;
-                if (slot.uses <= 0) t.items.splice(idx, 1);
-                this.floaters.push({ x: t.x, y: t.y - 80, text: `${def.icon} ${label}`, t: 0, color: RARITY[def.rarity].color });
-              }
+          const idx = AI.pickItem(this, t, this.difficulty);
+          const slot = idx >= 0 ? t.items[idx] : null;
+          const def = slot && itemDef(slot.id);
+          if (def && def.apply) {
+            const label = def.apply(this, t, itemValue(slot));
+            if (label != null) {
+              slot.uses--;
+              if (slot.uses <= 0) t.items.splice(idx, 1);
+              this.floaters.push({ x: t.x, y: t.y - 80, text: `${def.icon} ${label}`, t: 0, color: RARITY[def.rarity].color });
             }
           }
         }
@@ -957,6 +956,10 @@ class Game {
           ai.plan = AI.plan(this, t);
           if (!ai.plan) { this.setState('settle'); return; }
           t.weapon = ai.plan.weapon;
+          // 상자를 노리고 움직인다는 걸 눈에 보이게
+          if (ai.plan.crate && Math.abs(ai.plan.dx) > 6) {
+            this.floaters.push({ x: t.x, y: t.y - 72, text: '📦 보급품 확보', t: 0, color: '#ffd479' });
+          }
           ai.phase = 'move'; ai.t = 0; ai.moved = 0;
           this.ui.refresh(this);
         }
@@ -1327,6 +1330,15 @@ class Game {
         c.font = '12px system-ui, sans-serif';
         c.textAlign = 'center';
         c.fillText(def.icon, cr.x, y + 4);
+      }
+      // 마우스를 올린 상자는 테두리로 짚어 줍니다
+      if (cr === this.hoverCrate) {
+        c.strokeStyle = col;
+        c.lineWidth = 1.6;
+        c.setLineDash([4, 3]);
+        c.lineDashOffset = -this.time * 18;
+        c.beginPath(); c.arc(cr.x, y, 17, 0, Math.PI * 2); c.stroke();
+        c.setLineDash([]);
       }
       c.restore();
     }
