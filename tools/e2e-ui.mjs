@@ -73,6 +73,17 @@ const fail = [];
   page.on('pageerror', (e) => { fail.push(`pageerror: ${e.message}`); console.log('  page!', e.message); });
   page.on('console', (m) => { if (m.type() === 'error') { fail.push(`console: ${m.text()}`); console.log('  page>', m.text()); } });
 
+  // Headless Chromium only issues BeginFrames while something consumes them, so without this a
+  // page runs its scripts but never fires requestAnimationFrame — the game loop would sit at two
+  // frames and every HUD readout would look "broken" for reasons that have nothing to do with the
+  // UI. A tiny screencast keeps the compositor (and therefore rAF) running for the whole session.
+  const cdp = await page.context().newCDPSession(page);
+  cdp.on('Page.screencastFrame', (f) => {
+    cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
+  });
+  await cdp.send('Page.startScreencast',
+    { format: 'jpeg', quality: 1, maxWidth: 64, maxHeight: 64, everyNthFrame: 1 });
+
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__NEON && window.__NEON.ready === true, null,
     { timeout: 240000 }).catch(() => fail.push('boot timeout'));

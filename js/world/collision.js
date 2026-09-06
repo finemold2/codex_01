@@ -73,8 +73,16 @@ const SKIN = 0.02;
  * to floating point noise and drop the mover through the world. @type {number} */
 const CONTACT_EPS = 1e-3;
 
-/** Extra downward probe used to keep a grounded mover glued to small drops. @type {number} */
-const SNAP_DOWN = 0.18;
+/**
+ * Extra downward probe used to keep a grounded mover glued to drops.
+ *
+ * It has to match {@link STEP_HEIGHT}: a mover that climbs a 0.45 m kerb in one frame but is only
+ * glued for 0.18 m on the way back down goes airborne for several frames on every step of a
+ * staircase, which flips the animation state to `fall`, kills ground acceleration and stops
+ * footsteps - the character visibly hops down stairs instead of walking.
+ * @type {number}
+ */
+const SNAP_DOWN = STEP_HEIGHT;
 
 /** Depenetration passes per sub-step. @type {number} */
 const DEPEN_PASSES = 4;
@@ -363,7 +371,7 @@ export class CollisionWorld {
     if (!b) {
       b = {
         id: 0, index: i, kind: 'box', cx: 0, cy: 0, cz: 0, hx: 0, hy: 0, hz: 0,
-        yaw: 0, sin: 0, cos: 1, tag: 'static', userData: null,
+        yaw: 0, sin: 0, cos: 1, tag: 'static', solid: true, userData: null,
         aabb: { min: new Float32Array(3), max: new Float32Array(3) },
       };
       this._objects[i] = b;
@@ -564,6 +572,9 @@ export class CollisionWorld {
     this._solid[i] = NON_SOLID_TAGS.indexOf(t) === -1 ? 1 : 0;
     const b = this._syncObject(i);
     b.tag = t;
+    // Mirrored on the public record so query consumers can drop triggers / water without
+    // hard-coding the tag list; `queryAABB` deliberately reports non-solid bodies too.
+    b.solid = this._solid[i] === 1;
     b.userData = userData === undefined ? null : userData;
     b.id = i + this._gen[i] * ID_SLOT_SPAN;
     this._insert(i);
@@ -654,6 +665,10 @@ export class CollisionWorld {
 
   /**
    * Drops every body. Grid storage is kept so the world can be rebuilt without re-allocating.
+   *
+   * Every outstanding id is invalidated, exactly as if each body had been removed one by one:
+   * otherwise the ids handed out by the *next* build would repeat the ones just dropped, and a
+   * stale `dispose()` from the previous world would delete freshly built city geometry.
    */
   clear() {
     this._cellHead.fill(-1);
@@ -664,6 +679,10 @@ export class CollisionWorld {
     this._freeHead = -1;
     this._freeNext.fill(-1);
     for (let i = 0; i < this._used; i++) {
+      if (this._alive[i]) {
+        this._gen[i] = (this._gen[i] + 1) | 0;
+        if (this._gen[i] < 0) this._gen[i] = 0;
+      }
       this._alive[i] = 0;
       this._huge[i] = 0;
       const b = this._objects[i];
@@ -973,7 +992,18 @@ export class CollisionWorld {
     if (lo > hi) return 0;
     const er = this._capsuleRadiusOver(lo, hi, feetY, height, r);
     if (er <= 1e-5) return 0;
-    return this._circleVsBodyXZ(i, x, z, er);
+    const depth = this._circleVsBodyXZ(i, x, z, er);
+    // A side contact never needs more than the effective radius to separate. A deeper result
+    // means the mover's axis is *inside* the cross section, and the push is "out through the
+    // nearest face" - half a building wide.
+    if (depth <= er) return depth;
+    // That full ejection is right for a mover embedded in a wall, but catastrophic when the
+    // band only reaches one of the capsule's caps: that is a slab the mover is standing under
+    // (or a ledge under its feet), not a wall, and resolving it horizontally flings the mover
+    // metres sideways from a single millimetre of head clearance. Leave those to the vertical
+    // passes - the ascent limit, the ground probe and `_escapePush` all handle them.
+    if (lo > feetY + height - r || hi < feetY + r) return 0;
+    return depth;
   }
 
   /**
@@ -1285,7 +1315,9 @@ export class CollisionWorld {
    * @param {number} x World X.
    * @param {number} z World Z.
    * @param {number} [maxY=Infinity] Ignore surfaces above this height.
-   * @returns {number} Surface height in meters.
+   * @returns {number} Surface height in meters. Always finite: when `maxY` excludes every
+   *   surface (including the terrain) the terrain height is returned anyway, because callers
+   *   feed this straight into suspension / spawn math and `-Infinity` poisons it into NaN.
    */
   groundHeight(x, z, maxY = Infinity) {
     this.stats.queriesLastFrame++;
@@ -1322,7 +1354,7 @@ export class CollisionWorld {
     }
     const ty = this.terrainHeight(x, z);
     if (ty > best && ty <= maxY) best = ty;
-    return best;
+    return best === -Infinity ? ty : best;
   }
 
   /* ---------------------------------------------------------- moveCapsule */

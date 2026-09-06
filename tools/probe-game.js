@@ -125,6 +125,45 @@ export default async function run({ canvas }) {
     if (px && px.unique < 24) bad(`rendered frame looks blank (${px.unique} unique colours)`);
   } catch (e) { if (!e.__skip) bad(`readPixelStats threw: ${e.message}`); }
 
+  // --- render target vs canvas geometry -------------------------------------------------------
+  try {
+    const r = game.renderer;
+    const c = canvas;
+    out.notes.push(`canvas=${c.width}x${c.height} client=${c.clientWidth}x${c.clientHeight} dpr=${window.devicePixelRatio}`);
+    out.notes.push(`drawingBuffer=${game.gl.drawingBufferWidth}x${game.gl.drawingBufferHeight}`);
+    out.notes.push(`renderScale=${r.quality && r.quality.renderScale} hdr=${r.hdr ? r.hdr.width + 'x' + r.hdr.height : 'n/a'}`);
+    if (r.postfx) out.notes.push(`postfx size=${r.postfx.width || '?'}x${r.postfx.height || '?'}`);
+    const vp = game.gl.getParameter(game.gl.VIEWPORT);
+    out.notes.push(`viewport after render=[${Array.from(vp).join(',')}]`);
+  } catch (e) { out.notes.push('target diag failed: ' + e.message); }
+
+  // --- what is that geometry filling the right of the frame? ------------------------------
+  try {
+    const cam = game.camera;
+    const probeDirs = [];
+    for (const deg of [-40, -30, -20, -10, 0, 10, 20, 30, 40]) {
+      const a = cam.yaw + deg * Math.PI / 180;
+      probeDirs.push([deg, [-Math.sin(a), 0, -Math.cos(a)]]);
+    }
+    const hits = [];
+    for (const [deg, d] of probeDirs) {
+      const h = game.collision.raycast(cam.position, d, 60, null);
+      hits.push(`${deg}deg:${h ? `${h.body && h.body.tag}@${h.t.toFixed(1)}m` : 'none'}`);
+    }
+    out.notes.push('camera raycasts: ' + hits.join(' '));
+    // nearest bodies around the camera
+    const near = game.collision.querySphere(cam.position[0], cam.position[1], cam.position[2], 12, []);
+    const tags = {};
+    for (const b of near) tags[b.tag] = (tags[b.tag] || 0) + 1;
+    out.notes.push(`bodies within 12 m of the camera: ${JSON.stringify(tags)}`);
+    const b0 = near.filter((b) => b.tag === 'building')[0];
+    if (b0) {
+      const bid = b0.userData && (b0.userData.id !== undefined ? b0.userData.id : b0.userData.buildingId);
+      const bd = bid !== undefined ? game.city.buildings[bid] : null;
+      out.notes.push(`nearest building body: tag=${b0.tag} id=${bid} ${bd ? `style=${bd.style} h=${bd.h.toFixed(1)} pal=${JSON.stringify(bd.palette)}` : ''}`);
+    }
+  } catch (e) { out.notes.push('raycast diag failed: ' + e.message); }
+
   // --- HUD presence ------------------------------------------------------------------------------
   const hudChildren = dom.hudRoot.children.length;
   out.notes.push(`HUD root children: ${hudChildren}, menu root children: ${dom.menuRoot.children.length}`);
@@ -133,7 +172,8 @@ export default async function run({ canvas }) {
   for (const e of consoleErrors.slice(0, 12)) bad(`console.error: ${e}`);
   console.error = origError;
 
-  window.__shot = async () => {
+  window.__shot = async (arg) => {
+    const mode = String(arg || '');
     // main.js hides these once boot finishes; this probe drives Game directly, so do it here.
     dom.loading.classList.add('hidden');
     dom.loading.style.display = 'none';
@@ -141,7 +181,14 @@ export default async function run({ canvas }) {
     dom.menuRoot.style.display = 'none';
     game.hud.show();
     game.player.aiming = false;
-    for (let i = 0; i < 3; i++) { game.update(1 / 60); game.hud.update(1 / 60); }
+    if (mode.includes('turn')) game.camera.yaw += Math.PI;
+    if (mode.includes('move')) {
+      const p = game.city.spawns.missionPoints[3] || game.city.spawns.missionPoints[0];
+      game.player.reset(p.x, game.worldToGround(p.x, p.z) + 0.1, p.z, 0);
+      game.camera.yaw = 1.2;
+      game._camPos[0] = p.x; game._camPos[1] = p.y + 2; game._camPos[2] = p.z + 6;
+    }
+    for (let i = 0; i < 6; i++) { game.update(1 / 60); game.hud.update(1 / 60); }
     game.render(1 / 60);
   };
   window.__game = game;
