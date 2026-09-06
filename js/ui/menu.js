@@ -501,7 +501,18 @@ export class Menu {
         ctrl.apply();
         this._emitChange();
       },
-      activate: () => ctrl.step(1),
+      // Enter/Space cycles and wraps, so the last option is never a dead key.
+      cycle: () => {
+        if (!items.length) return;
+        let idx = items.findIndex((it) => it.value === this.settings[key]);
+        if (idx < 0) idx = -1;
+        idx = (idx + 1) % items.length;
+        if (items[idx].value === this.settings[key]) return;
+        this.settings[key] = items[idx].value;
+        ctrl.apply();
+        this._emitChange();
+      },
+      activate: () => ctrl.cycle(),
     };
     group.__ctrl = ctrl;
     group.__kind = 'control';
@@ -699,7 +710,7 @@ export class Menu {
    * @returns {void}
    */
   _focusNode(node, force) {
-    if (!node) return;
+    if (!node || node.__disabled) return;
     const list = this._focus;
     const idx = list.indexOf(node);
     if (idx >= 0) this._focusIndex = idx;

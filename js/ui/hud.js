@@ -15,6 +15,7 @@
  */
 
 import { clamp, damp, lerp } from '../core/math.js';
+import { WEAPONS } from '../entities/weapons.js';
 
 /* ------------------------------------------------------------------ constants */
 
@@ -77,16 +78,22 @@ const WEAPON_ICONS = Object.freeze({
     + '<ellipse cx="31.5" cy="20" rx="12" ry="10"/></g></svg>',
 });
 
-/** Fallback Korean weapon labels (the live values come from `game.weapons` when available). */
-const WEAPON_NAMES_KO = Object.freeze({
-  fist: '맨주먹', pistol: '권총', smg: '기관단총', shotgun: '산탄총',
-  rifle: '소총', sniper: '저격 소총', grenade: '수류탄',
-});
+/**
+ * Weapon definition lookup. `WEAPONS` (contract section 11) is the single source of truth for
+ * Korean names, magazine sizes, base spread and reload times; the object literal below is only a
+ * last-resort shape for a key the weapon table does not know about.
+ * @param {string} key Weapon key.
+ * @returns {object} Weapon definition.
+ */
+function weaponDef(key) {
+  const d = WEAPONS && WEAPONS[key];
+  return d || WEAPON_UNKNOWN;
+}
 
-/** Fallback base spread per weapon, used only if the weapon system does not publish one. */
-const WEAPON_SPREAD = Object.freeze({
-  fist: 0.05, pistol: 0.016, smg: 0.03, shotgun: 0.06,
-  rifle: 0.02, sniper: 0.004, grenade: 0.04,
+/** Shape used when a weapon key is not in `WEAPONS` (never in a shipped build). */
+const WEAPON_UNKNOWN = Object.freeze({
+  key: '?', name: '?', nameKo: '무기', magazine: 12, reserve: 0,
+  spread: 0.02, reloadTime: 2, melee: false,
 });
 
 /** Toast lifetimes and CSS modifier per notification kind. */
@@ -100,6 +107,8 @@ const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6l2
 const _qFills = [];
 const _qRoads = [];
 const _tmp = { x: 0, y: 0 };
+/** Reused by `_updateMission` so the timer scan never allocates. */
+const _timerSrc = [null, null, null];
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -344,6 +353,12 @@ class Minimap {
     this.game = game;
     this.ctx = canvas.getContext ? canvas.getContext('2d') : null;
     this.index = null;
+    this._indexSrc = null;
+    /** Startable mission markers, refreshed a few times a second (never per frame). */
+    this.markers = null;
+    this._markerTimer = 0;
+    this._px = 0; this._pz = 0; this._cx = 0; this._cy = 0;
+    this._ca = 1; this._sa = 0; this._scale = 1; this._r2 = 0;
     this.rotate = true;
     this.range = 105;
     this._rangeShown = 105;
@@ -353,12 +368,16 @@ class Minimap {
     this._blipPulse = 0;
   }
 
-  /** Builds (or rebuilds) the spatial index from the world data. @returns {void} */
+  /**
+   * Builds the spatial index, and rebuilds it when the world is replaced (new game / new seed).
+   * @returns {void}
+   */
   ensureIndex() {
-    if (this.index) return;
     const g = this.game;
     const data = g && g.world ? g.world.minimapData : null;
     if (!data) return;
+    if (this.index && this._indexSrc === data) return;
+    this._indexSrc = data;
     this.index = new MinimapIndex(data);
   }
 
@@ -391,6 +410,7 @@ class Minimap {
     const ctx = this.ctx;
     if (!ctx) return;
     this.ensureIndex();
+    this._refreshMarkers(dt);
     this._time += dt;
 
     const g = this.game;
@@ -574,6 +594,46 @@ class Minimap {
   }
 
   /**
+   * Projects a world position into radar pixels (stored in `_tmp`).
+   * @param {number} wx World x.
+   * @param {number} wz World z.
+   * @returns {boolean} True when the point falls inside the dial.
+   */
+  _plot(wx, wz) {
+    const ax = wx - this._px;
+    const az = wz - this._pz;
+    const x = this._cx + (ax * this._ca - az * this._sa) * this._scale;
+    const y = this._cy + (ax * this._sa + az * this._ca) * this._scale;
+    _tmp.x = x;
+    _tmp.y = y;
+    const dx = x - this._cx;
+    const dy = y - this._cy;
+    return dx * dx + dy * dy < this._r2;
+  }
+
+  /**
+   * Refreshes the startable-mission marker list at 4 Hz. `getAvailable()` allocates, so it is
+   * never called from the per-frame path; `markers` is the raw fallback when it is missing.
+   * @param {number} dt Delta seconds.
+   * @returns {void}
+   */
+  _refreshMarkers(dt) {
+    this._markerTimer -= dt;
+    if (this._markerTimer > 0 && this.markers !== null) return;
+    this._markerTimer = 0.25;
+    const mm = this.game ? this.game.missions : null;
+    if (!mm) { this.markers = null; return; }
+    if (typeof mm.getAvailable === 'function') {
+      try {
+        const list = mm.getAvailable();
+        if (Array.isArray(list)) { this.markers = list; return; }
+      } catch (err) { /* a mission manager still booting must not break the radar */ }
+    }
+    this.markers = Array.isArray(mm.markers) ? mm.markers
+      : Array.isArray(mm.available) ? mm.available : null;
+  }
+
+  /**
    * Draws every blip category around the player.
    * @param {CanvasRenderingContext2D} ctx Context.
    * @param {number} cx Centre x.
@@ -590,17 +650,9 @@ class Minimap {
   _drawBlips(ctx, cx, cy, px, pz, ca, sa, scale, mapR, pulse) {
     const g = this.game;
     if (!g) return;
-    const R2 = mapR * mapR;
-
-    const plot = (wx, wz) => {
-      const ax = wx - px;
-      const az = wz - pz;
-      _tmp.x = cx + (ax * ca - az * sa) * scale;
-      _tmp.y = cy + (ax * sa + az * ca) * scale;
-      const ddx = _tmp.x - cx;
-      const ddy = _tmp.y - cy;
-      return ddx * ddx + ddy * ddy < R2;
-    };
+    // Projection parameters live on the instance so `_plot` needs no per-frame closure.
+    this._px = px; this._pz = pz; this._cx = cx; this._cy = cy;
+    this._ca = ca; this._sa = sa; this._scale = scale; this._r2 = mapR * mapR;
 
     // Vehicles (grey) — skip the player's own car, cheap distance reject first.
     const vehicles = g.vehicles;
@@ -615,7 +667,7 @@ class Minimap {
         const ddx = num(v.position[0], 0) - px;
         const ddz = num(v.position[2], 0) - pz;
         if (ddx * ddx + ddz * ddz > rangeSq) continue;
-        if (!plot(num(v.position[0], 0), num(v.position[2], 0))) continue;
+        if (!this._plot(num(v.position[0], 0), num(v.position[2], 0))) continue;
         ctx.fillRect(_tmp.x - 2, _tmp.y - 2, 4, 4);
       }
     }
@@ -627,17 +679,15 @@ class Minimap {
       for (let i = 0; i < pickups.length; i++) {
         const k = pickups[i];
         if (!k || k.taken) continue;
-        if (!plot(num(k.x, 0), num(k.z, 0))) continue;
+        if (!this._plot(num(k.x, 0), num(k.z, 0))) continue;
         ctx.beginPath();
         ctx.arc(_tmp.x, _tmp.y, 2.6, 0, Math.PI * 2);
         ctx.fill();
       }
     }
 
-    // Mission markers (yellow diamonds).
-    const mm = g.missions;
-    const markers = mm ? (Array.isArray(mm.markers) ? mm.markers
-      : Array.isArray(mm.available) ? mm.available : null) : null;
+    // Mission markers (yellow diamonds) — only the ones the player can actually start.
+    const markers = this.markers;
     if (markers && markers.length) {
       ctx.fillStyle = RC.mission;
       for (let i = 0; i < markers.length; i++) {
@@ -647,7 +697,7 @@ class Minimap {
         const mx = num(m.x, mp ? num(mp[0], NaN) : NaN);
         const mz = num(m.z, mp ? num(mp[2], NaN) : NaN);
         if (!Number.isFinite(mx) || !Number.isFinite(mz)) continue;
-        if (!plot(mx, mz)) continue;
+        if (!this._plot(mx, mz)) continue;
         ctx.save();
         ctx.translate(_tmp.x, _tmp.y);
         ctx.rotate(Math.PI * 0.25);
@@ -669,7 +719,7 @@ class Minimap {
           const c = cars[i];
           const p = c && (c.position || (c.vehicle && c.vehicle.position));
           if (!p) continue;
-          if (!plot(num(p[0], 0), num(p[2], 0))) continue;
+          if (!this._plot(num(p[0], 0), num(p[2], 0))) continue;
           ctx.beginPath();
           ctx.arc(_tmp.x, _tmp.y, 3.4, 0, Math.PI * 2);
           ctx.fill();
@@ -680,7 +730,7 @@ class Minimap {
           const c = cops[i];
           const p = c && (c.position || (c.character && c.character.position));
           if (!p) continue;
-          if (!plot(num(p[0], 0), num(p[2], 0))) continue;
+          if (!this._plot(num(p[0], 0), num(p[2], 0))) continue;
           ctx.beginPath();
           ctx.arc(_tmp.x, _tmp.y, 2.4, 0, Math.PI * 2);
           ctx.fill();
@@ -917,8 +967,14 @@ export class HUD {
     this._off.push(g.on('missionEnded', (payload) => {
       this._missionManual = false;
       this.setMissionText(null, null);
-      if (payload && payload.success === true) this.showMissionResult(true, payload.name || payload.nameKo || '');
-      else if (payload && payload.success === false) this.showMissionResult(false, payload.reason || '');
+      if (!payload) return;
+      // `missions.js` emits {id, result:'success'|'fail'|'abort', note}; a boolean `success`
+      // field is also accepted so either shape lights the banner.
+      const r = payload.result;
+      const passed = payload.success === true || r === 'success';
+      const failed = payload.success === false || r === 'fail' || r === 'abort';
+      if (passed) this.showMissionResult(true, payload.note || payload.nameKo || payload.name || '');
+      else if (failed) this.showMissionResult(false, payload.note || payload.reason || '');
     }));
     this._off.push(g.on('wantedChanged', (lvl) => {
       const n = typeof lvl === 'number' ? lvl : (g.police ? num(g.police.wanted, 0) : 0);
@@ -992,7 +1048,8 @@ export class HUD {
     this._updateRadio(d);
     this._updateDebug(d);
 
-    if (this.minimap) {
+    // The radar is a full canvas repaint: skip it while the HUD is hidden (menu / map screen).
+    if (this.minimap && this.visible) {
       const wp = this._waypoint || (g.waypoint && Number.isFinite(g.waypoint.x) ? g.waypoint : null);
       this.minimap.draw(d, this._hp, this._armor, wp);
     }
@@ -1111,9 +1168,8 @@ export class HUD {
     if (this._weaponKey !== key) {
       this._weaponKey = key;
       if (this._e.wicon) this._e.wicon.innerHTML = WEAPON_ICONS[key] || WEAPON_ICONS.pistol;
-      const def = w && w.defs && w.defs[key] ? w.defs[key] : (w && w.def && w.def.key === key ? w.def : null);
-      const label = (def && (def.nameKo || def.name)) || WEAPON_NAMES_KO[key] || key;
-      setText(this._e.wname, label);
+      const def = weaponDef(key);
+      setText(this._e.wname, def.nameKo || def.name || key);
     }
 
     let mag = -1;
@@ -1122,7 +1178,7 @@ export class HUD {
       mag = Math.round(num(w.ammo[key].mag, -1));
       reserve = Math.round(num(w.ammo[key].reserve, -1));
     }
-    const melee = key === 'fist';
+    const melee = weaponDef(key).melee === true || key === 'fist';
     if (melee || mag < 0) {
       setText(this._e.wmag, melee ? '∞' : '--');
       setText(this._e.wres, '');
@@ -1130,14 +1186,14 @@ export class HUD {
     } else {
       setText(this._e.wmag, String(mag));
       setText(this._e.wres, reserve >= 0 ? `/ ${reserve}` : '');
-      const capacity = this._magCapacity(w, key, mag);
+      const capacity = this._magCapacity(key, mag);
       const low = mag <= Math.max(1, Math.ceil(capacity * 0.25)) && mag >= 0;
       setClass(this._e.lowammo, 'on', low && !inCar);
       setClass(this._e.wmag, 'low', low);
     }
 
     // Reload arc — circumference of r=19 circle is ~119.38.
-    const prog = this._reloadProgress(w);
+    const prog = this._reloadProgress(w, key);
     if (prog !== this._reloadShown) {
       this._reloadShown = prog;
       const arc = this._e.reloadArc;
@@ -1151,37 +1207,37 @@ export class HUD {
   }
 
   /**
-   * Magazine capacity lookup with graceful fallbacks.
-   * @param {object} w Weapon system.
+   * Magazine capacity for the low-ammo threshold.
    * @param {string} key Weapon key.
    * @param {number} mag Current magazine.
    * @returns {number} Capacity.
    */
-  _magCapacity(w, key, mag) {
-    if (w && w.defs && w.defs[key] && Number.isFinite(w.defs[key].magazine)) return w.defs[key].magazine;
-    if (w && w.def && Number.isFinite(w.def.magazine) && w.current === key) return w.def.magazine;
+  _magCapacity(key, mag) {
+    const cap = weaponDef(key).magazine;
+    if (Number.isFinite(cap) && cap > 0) return cap;
+    // Unknown weapon: infer the capacity from the largest magazine ever observed.
     if (this._magMax === undefined) this._magMax = {};
-    const seen = this._magMax[key] || 0;
-    if (mag > seen) this._magMax[key] = mag;
+    if (mag > (this._magMax[key] || 0)) this._magMax[key] = mag;
     return Math.max(6, this._magMax[key] || 12);
   }
 
   /**
-   * Normalised reload progress, or -1 when not reloading.
+   * Normalised reload progress, or -1 when not reloading. `WeaponSystem` publishes `reloading`
+   * plus the remaining seconds in `reloadLeft`; the total comes from the weapon table (the
+   * shotgun reloads shell by shell, so its per-shell time is the one that animates).
    * @param {object} w Weapon system.
+   * @param {string} key Weapon key.
    * @returns {number} 0..1 or -1.
    */
-  _reloadProgress(w) {
+  _reloadProgress(w, key) {
     if (!w) return -1;
-    if (Number.isFinite(w.reloadProgress)) {
-      const v = w.reloadProgress;
-      return v > 0 && v <= 1.0001 ? clamp(v, 0, 1) : -1;
-    }
-    const reloading = w.reloading === true || w.isReloading === true;
-    if (!reloading) return -1;
-    const total = num(w.reloadDuration, num(w.reloadTime, 0));
-    const left = num(w.reloadTimer, num(w.reloadLeft, -1));
+    if (w.reloading !== true && w.isReloading !== true) return -1;
+    const def = weaponDef(key);
+    const shell = num(def.shellTime, 0);
+    const total = num(w.reloadDuration, num(w.reloadTotal, shell > 0 ? shell : num(def.reloadTime, 0)));
+    const left = num(w.reloadLeft, num(w.reloadTimer, num(w.reloadRemaining, -1)));
     if (total > 0 && left >= 0) return clamp(1 - left / total, 0, 1);
+    if (Number.isFinite(w.reloadProgress)) return clamp(w.reloadProgress, 0, 1);
     return 0.5;
   }
 
@@ -1252,11 +1308,13 @@ export class HUD {
       }
     }
 
-    // Countdown from whichever field the mission system publishes.
+    // Countdown from whichever field the mission system publishes (reused scratch array).
     let timer = NaN;
-    const candidates = [active, active && active.state, mm];
-    for (let i = 0; i < candidates.length && !Number.isFinite(timer); i++) {
-      const c = candidates[i];
+    _timerSrc[0] = active;
+    _timerSrc[1] = active ? active.state : null;
+    _timerSrc[2] = mm;
+    for (let i = 0; i < _timerSrc.length && !Number.isFinite(timer); i++) {
+      const c = _timerSrc[i];
       if (!c) continue;
       const t = Number.isFinite(c.timeLeft) ? c.timeLeft
         : Number.isFinite(c.timer) ? c.timer
@@ -1306,7 +1364,11 @@ export class HUD {
   _applyMission(title, objective) {
     const list = objective === null || objective === undefined ? []
       : Array.isArray(objective) ? objective : [objective];
-    const sig = title ? `${title}${list.map(objSig).join('')}` : '';
+    let sig = '';
+    if (title) {
+      sig = title;
+      for (let i = 0; i < list.length; i++) sig += `\u0002${objSig(list[i])}`;
+    }
     if (sig === this._missionSig) return;
     this._missionSig = sig;
     setClass(this._e.mission, 'on', !!title);
@@ -1339,11 +1401,11 @@ export class HUD {
 
     const w = g.weapons;
     const key = w && typeof w.current === 'string' ? w.current : 'pistol';
-    let spread = num(w && w.currentSpread, NaN);
-    if (!Number.isFinite(spread)) {
-      const def = w && w.defs && w.defs[key] ? w.defs[key] : (w && w.def) || null;
-      spread = num(def && def.spread, WEAPON_SPREAD[key] !== undefined ? WEAPON_SPREAD[key] : 0.02);
-    }
+    // `spreadRadians` is the live value (base spread + firing bloom) published by WeaponSystem;
+    // the weapon table supplies the resting spread before the first shot.
+    let spread = num(w && w.spreadRadians, NaN);
+    if (!Number.isFinite(spread)) spread = num(w && w.currentSpread, NaN);
+    if (!Number.isFinite(spread)) spread = num(weaponDef(key).spread, 0.02);
     let mul = 1;
     if (p) {
       const vel = p.velocity;
@@ -1399,7 +1461,7 @@ export class HUD {
         continue;
       }
       const k = 1 - d.t / d.life;
-      const rel = (d.angle - camYaw) * 180 / Math.PI;
+      const rel = (d.angle + camYaw) * 180 / Math.PI;
       setStyle(d.el, 'transform', `rotate(${rel.toFixed(1)}deg)`);
       setStyle(d.el, 'opacity', (k * 0.9).toFixed(3));
     }
@@ -1542,8 +1604,11 @@ export class HUD {
     const dx = dir[0];
     const dz = dir[2];
     if (dx === 0 && dz === 0) return;
-    // Screen-space angle: 0 = straight ahead (world -Z under yaw 0).
-    const angle = Math.atan2(dx, dz) + Math.PI;
+    // `dir` points from the player TOWARDS the source of the damage (see player.damage()).
+    // The on-screen angle is measured clockwise from "up" (= the camera forward direction), so
+    // the stored value only needs the live camera yaw added each frame:
+    //   theta = PI - atan2(dx, dz) + cameraYaw
+    const angle = Math.PI - Math.atan2(dx, dz);
     let slot = null;
     for (let i = 0; i < this._dirs.length; i++) {
       if (this._dirs[i].life <= 0) { slot = this._dirs[i]; break; }
@@ -1563,7 +1628,9 @@ export class HUD {
    */
   hitMarker(kind = 'hit') {
     if (!this._e.hit) return;
-    setClass(this._e.hit, 'kill', kind === 'kill' || kind === 'headshot');
+    // `weapons.js` calls this with a boolean headshot flag, so accept both shapes.
+    const strong = kind === true || kind === 'kill' || kind === 'headshot';
+    setClass(this._e.hit, 'kill', strong);
     setClass(this._e.hit, 'on', true);
     pulseClass(this._e.hit);
     this._hitTimer = 0.22;

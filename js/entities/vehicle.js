@@ -137,6 +137,7 @@ const TYPE_DEFS = {
     name: 'Sports', nameKo: '스포츠카', shape: 'car',
     mass: 1300, enginePower: 353, redline: 8200, idleRpm: 900, maxSpeed: 83.3,
     brakeForce: 24000, grip: 1.44, drive: 'rwd', weightFront: 0.45, cdA: 0.60, clA: 0.34,
+    launchGrip: 0.45, launchSpeed: 22,
     steerMax: 0.56, steerSpeed: 5.0, driftFactor: 1.05,
     length: 4.42, width: 1.94, height: 1.21, wheelBase: 2.62, track: 1.68,
     wheelRadius: 0.33, wheelWidth: 0.28, restLength: 0.17, travel: 0.13,
@@ -167,6 +168,7 @@ const TYPE_DEFS = {
     name: 'Police Cruiser', nameKo: '순찰차', shape: 'car',
     mass: 1780, enginePower: 288, redline: 7000, idleRpm: 820, maxSpeed: 66.7,
     brakeForce: 22500, grip: 1.28, drive: 'rwd', weightFront: 0.53, cdA: 0.78, clA: 0.12,
+    launchGrip: 0.78, launchSpeed: 12,
     steerMax: 0.58, steerSpeed: 4.6, driftFactor: 0.94,
     length: 4.96, width: 1.94, height: 1.46, wheelBase: 2.94, track: 1.64,
     wheelRadius: 0.35, wheelWidth: 0.24, restLength: 0.23, travel: 0.18,
@@ -185,7 +187,7 @@ const TYPE_DEFS = {
   },
   truck: {
     name: 'Truck', nameKo: '트럭', shape: 'truck',
-    mass: 7200, enginePower: 268, redline: 3200, idleRpm: 620, maxSpeed: 33.3,
+    mass: 7200, enginePower: 340, redline: 3200, idleRpm: 620, maxSpeed: 33.3,
     brakeForce: 46000, grip: 0.90, drive: 'rwd', weightFront: 0.45, cdA: 2.40, clA: 0.0,
     steerMax: 0.50, steerSpeed: 2.6, driftFactor: 0.58,
     length: 7.60, width: 2.44, height: 2.92, wheelBase: 4.20, track: 2.00,
@@ -197,6 +199,7 @@ const TYPE_DEFS = {
     name: 'Muscle', nameKo: '머슬카', shape: 'car',
     mass: 1660, enginePower: 322, redline: 6600, idleRpm: 700, maxSpeed: 70.8,
     brakeForce: 19800, grip: 1.20, drive: 'rwd', weightFront: 0.54, cdA: 0.82, clA: 0.04,
+    launchGrip: 0.70, launchSpeed: 14,
     steerMax: 0.56, steerSpeed: 4.2, driftFactor: 1.18,
     length: 4.94, width: 1.96, height: 1.34, wheelBase: 2.82, track: 1.66,
     wheelRadius: 0.35, wheelWidth: 0.28, restLength: 0.20, travel: 0.16,
@@ -205,7 +208,7 @@ const TYPE_DEFS = {
   },
   bus: {
     name: 'Bus', nameKo: '버스', shape: 'bus',
-    mass: 11500, enginePower: 258, redline: 3000, idleRpm: 600, maxSpeed: 30.6,
+    mass: 11500, enginePower: 520, redline: 3000, idleRpm: 600, maxSpeed: 30.6,
     brakeForce: 60000, grip: 0.88, drive: 'rwd', weightFront: 0.40, cdA: 3.40, clA: 0.0,
     steerMax: 0.46, steerSpeed: 2.2, driftFactor: 0.52,
     length: 11.40, width: 2.55, height: 3.10, wheelBase: 5.90, track: 2.10,
@@ -216,7 +219,8 @@ const TYPE_DEFS = {
   sportsbike: {
     name: 'Sportsbike', nameKo: '스포츠바이크', shape: 'bike',
     mass: 218, enginePower: 141, redline: 13500, idleRpm: 1400, maxSpeed: 79.2,
-    brakeForce: 4600, grip: 1.30, drive: 'rwd', weightFront: 0.48, cdA: 0.42, clA: 0.0,
+    brakeForce: 4600, grip: 1.30, drive: 'rwd', weightFront: 0.48, cdA: 0.36, clA: 0.0,
+    launchGrip: 0.40, launchSpeed: 20,
     steerMax: 0.62, steerSpeed: 5.4, driftFactor: 1.10,
     length: 2.06, width: 0.76, height: 1.16, wheelBase: 1.42, track: 0.60,
     wheelRadius: 0.32, wheelWidth: 0.16, restLength: 0.17, travel: 0.14,
@@ -294,6 +298,12 @@ function completeType(key, d) {
     boundRadius: Math.hypot(d.length * 0.5, d.width * 0.5)
   };
   t.damperRate = 2 * Math.sqrt(t.springRate * (d.mass / 4)) * 0.44;
+  // Static sag: how far each spring compresses under a quarter of the kerb weight. The free
+  // length is the design ride height plus the sag, so a parked car settles at `comHeight`.
+  t.staticSag = (d.mass * GRAVITY * 0.25) / t.springRate;
+  t.susRest = d.restLength + t.staticSag;
+  t.susMin = Math.max(0.02, d.restLength - d.travel);
+  t.susSpan = d.travel + t.staticSag;
   return t;
 }
 
@@ -1602,6 +1612,13 @@ const _tint2 = new Float32Array(4);
 const _coneTint = new Float32Array(4);
 const _bodies = [];
 const _corner = new Float32Array(12);
+const _satAxes = new Float32Array(8);
+/** Reused particle option records: emission must never allocate. */
+const _pvel = [0, 0, 0];
+const _pdir = [0, 0, 0];
+const _popt = { power: 1, velocity: _pvel };
+const _poptDir = { power: 1, spread: 0.5, dir: _pdir };
+const _poptPower = { power: 1 };
 /** Shared per-vehicle spawn counter, used only to seed deterministic colour picks. */
 let _spawnSeq = 0;
 
@@ -1718,6 +1735,14 @@ export class Vehicle {
     this.input = { throttle: 0, brake: 0, steer: 0, handbrake: false, horn: false };
     /** @type {Object} Lamp state; see {@link Vehicle#setLights}. */
     this.lights = { head: false, brake: false, reverse: false, siren: false, indicator: 0 };
+    this._lightsForced = false;
+    this._inThrottle = 0;
+    this._inBrake = 0;
+    this._inSteer = 0;
+    this._inHandbrake = false;
+    this._drive = 0;
+    this._alphaF = 0;
+    this._alphaR = 0;
     /** @type {boolean} Whether the siren wails (police only). */
     this.sirenOn = false;
 
@@ -1910,8 +1935,8 @@ export class Vehicle {
     for (let i = 0; i < 4; i++) {
       const w = this.wheels[i];
       // Local (x, z) rotated into world: right = (c, -s), forward = (-s, -c).
-      const wx = this.position[0] + w.localX * c - w.localZ * s;
-      const wz = this.position[2] - w.localX * s - w.localZ * c;
+      const wx = this.position[0] + w.localX * c + w.localZ * s;
+      const wz = this.position[2] - w.localX * s + w.localZ * c;
       let g = collision.groundHeight(wx, wz, ceiling);
       if (!Number.isFinite(g)) g = py - t.comHeight;
       // Never let a stale sample teleport the car; limit the per-sample step.
@@ -1988,7 +2013,7 @@ export class Vehicle {
     // --- suspension ------------------------------------------------------------------------------
     let sumN = 0;
     let contacts = 0;
-    const rayMax = t.restLength + t.travel * 0.9;
+    const rayMax = t.susRest + t.travel * 0.55;
     for (let i = 0; i < 4; i++) {
       const w = this.wheels[i];
       const gy = this._groundY[i];
@@ -2003,11 +2028,11 @@ export class Vehicle {
         w.load = 0;
         continue;
       }
-      const minLen = t.restLength - t.travel;
+      const minLen = t.susMin;
       w.susLen = len < minLen ? minLen : len;
       w.contact = true;
       contacts++;
-      const compress = t.restLength - w.susLen;
+      const compress = t.susRest - w.susLen;
       const susVel = (w.prevSusLen - w.susLen) / h;
       const spring = t.springRate * compress;
       const damper = t.damperRate * clamp(susVel, -12, 12);
@@ -2015,7 +2040,7 @@ export class Vehicle {
       if (n < 0) n = 0;
       // Hard bump stop when the suspension bottoms out.
       if (len < minLen) n += (minLen - len) * t.springRate * 12;
-      w.compression = clamp(compress / t.travel, 0, 1.4);
+      w.compression = clamp(compress / t.susSpan, 0, 1.4);
       sumN += n;
       w.springN = n;
     }
@@ -2224,7 +2249,7 @@ export class Vehicle {
     let floor = -Infinity;
     for (let i = 0; i < 4; i++) if (this._groundY[i] > floor) floor = this._groundY[i];
     if (Number.isFinite(floor)) {
-      const minY = floor + t.wheelRadius + (t.restLength - t.travel) * 0.55;
+      const minY = floor + t.wheelRadius + t.susMin * 0.6;
       if (this.position[1] < minY) {
         this.position[1] = minY;
         if (this.velocity[1] < 0) this.velocity[1] = 0;
@@ -2341,8 +2366,8 @@ export class Vehicle {
         for (let k = 0; k < 4; k++) {
           const ox = _corner[k * 2];
           const oz = _corner[k * 2 + 1];
-          const wx = ox * c - oz * s;
-          const wz = -ox * s - oz * c;
+          const wx = ox * c + oz * s;
+          const wz = -ox * s + oz * c;
           _from[0] = this._prevX + wx;
           _from[1] = this._prevY + cy;
           _from[2] = this._prevZ + wz;
@@ -2374,50 +2399,110 @@ export class Vehicle {
       }
     }
 
-    // Depenetration: push out of anything the body is already inside (resting contact).
-    if (typeof collision.querySphere === 'function') {
-      for (let k = 0; k < 4; k++) {
-        const ox = _corner[k * 2];
-        const oz = _corner[k * 2 + 1];
-        const wx = ox * c - oz * s;
-        const wz = -ox * s - oz * c;
-        const px = this.position[0] + wx;
-        const py = this.position[1] + cy;
-        const pz = this.position[2] + wz;
-        _bodies.length = 0;
-        collision.querySphere(px, py, pz, r, _bodies);
-        for (let i = 0; i < _bodies.length; i++) {
-          const b = _bodies[i];
-          if (!b || b.tag === 'trigger' || b.userData === this) continue;
-          const dist = closestOnBody(b, px, py, pz, _pt);
-          let nx;
-          let ny;
-          let nz;
-          let depth;
-          if (dist > 1e-5) {
-            nx = (px - _pt[0]) / dist;
-            ny = (py - _pt[1]) / dist;
-            nz = (pz - _pt[2]) / dist;
-            depth = r - dist;
-          } else {
-            // Deeply inside: push out along the shallowest box axis.
-            nx = px - b.cx;
-            ny = 0;
-            nz = pz - b.cz;
-            const l = Math.hypot(nx, nz);
-            if (l < 1e-5) { nx = 0; nz = 1; } else { nx /= l; nz /= l; }
-            depth = r;
+    this._resolveOverlap(collision);
+  }
+
+  /**
+   * Resting-contact resolution: an exact 2D separating-axis test between the vehicle's oriented
+   * box and every nearby static body, pushing the car out along the minimum translation vector.
+   * The swept spheres above stop fast impacts; this keeps a car that is being driven into a wall
+   * from creeping through it.
+   * @param {Object} collision CollisionWorld.
+   * @returns {void}
+   * @private
+   */
+  _resolveOverlap(collision) {
+    if (typeof collision.queryAABB !== 'function') return;
+    const t = this.type;
+    const hw = t.width * 0.5;
+    const hl = t.length * 0.5;
+    const reach = Math.hypot(hw, hl);
+    const carBottom = this.position[1] - t.comHeight;
+    const carTop = carBottom + t.height;
+    _bodies.length = 0;
+    collision.queryAABB(this.position[0] - reach, carBottom + 0.30, this.position[2] - reach,
+      this.position[0] + reach, carTop, this.position[2] + reach, _bodies);
+    if (globalThis.__VDBG) console.log('resolve: bodies', _bodies.length, 'carBottom', carBottom.toFixed(2), 'carTop', carTop.toFixed(2));
+    if (_bodies.length === 0) return;
+
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    // Car axes in world space: right = (c, -s), back = (s, c).
+    const axx = c;
+    const axz = -s;
+    const azx = s;
+    const azz = c;
+
+    for (let i = 0; i < _bodies.length; i++) {
+      const b = _bodies[i];
+      if (!b || b.tag === 'trigger' || b.userData === this) continue;
+      const bodyTop = b.cy + b.hy;
+      const bodyBottom = b.cy - b.hy;
+      // Anything we drive over (kerbs, ramps) or duck under is the suspension's problem.
+      if (bodyTop <= carBottom + 0.34) { if (globalThis.__VDBG) console.log('  skip-over', b.tag); continue; }
+      if (bodyBottom >= carTop - 0.06) { if (globalThis.__VDBG) console.log('  skip-under', b.tag); continue; }
+
+      let nx = 0;
+      let nz = 0;
+      let depth = Infinity;
+      const dx = b.cx - this.position[0];
+      const dz = b.cz - this.position[2];
+
+      if (b.kind === 'cylinder') {
+        // Circle vs oriented box: closest point on the car, then push along the offset.
+        const lx = clamp(dx * axx + dz * axz, -hw, hw);
+        const lz = clamp(dx * azx + dz * azz, -hl, hl);
+        const px = this.position[0] + lx * axx + lz * azx;
+        const pz = this.position[2] + lx * axz + lz * azz;
+        const ox = px - b.cx;
+        const oz = pz - b.cz;
+        const dist = Math.hypot(ox, oz);
+        if (dist >= b.hx) continue;
+        if (dist > 1e-5) { nx = ox / dist; nz = oz / dist; } else { nx = -axz; nz = axx; }
+        depth = b.hx - dist;
+      } else {
+        const bxx = b.cos;
+        const bxz = -b.sin;
+        const bzx = b.sin;
+        const bzz = b.cos;
+        const axes = _satAxes;
+        axes[0] = axx; axes[1] = axz;
+        axes[2] = azx; axes[3] = azz;
+        axes[4] = bxx; axes[5] = bxz;
+        axes[6] = bzx; axes[7] = bzz;
+        let separated = false;
+        for (let k = 0; k < 4; k++) {
+          const ux = axes[k * 2];
+          const uz = axes[k * 2 + 1];
+          const ra = hw * Math.abs(axx * ux + axz * uz) + hl * Math.abs(azx * ux + azz * uz);
+          const rb = b.hx * Math.abs(bxx * ux + bxz * uz) + b.hz * Math.abs(bzx * ux + bzz * uz);
+          const d = dx * ux + dz * uz;
+          const overlap = ra + rb - Math.abs(d);
+          if (overlap <= 0) { separated = true; break; }
+          if (overlap < depth) {
+            depth = overlap;
+            // Point the normal away from the obstacle.
+            const sign = d > 0 ? -1 : 1;
+            nx = ux * sign;
+            nz = uz * sign;
           }
-          if (depth <= 0) continue;
-          // Only push horizontally when the contact is a wall; the suspension owns vertical.
-          if (ny > 0.7) continue;
-          this.position[0] += nx * depth;
-          this.position[2] += nz * depth;
-          if (depth > 0.02) this._applyWorldImpulse(nx, 0, nz, wx, wz);
         }
+        if (separated) continue;
       }
-      _bodies.length = 0;
+      if (globalThis.__VDBG) console.log('  body', b.tag, 'depth', depth, 'n', nx.toFixed(2), nz.toFixed(2));
+      if (!(depth > 1e-4) || !Number.isFinite(depth)) continue;
+      if (depth > 4) depth = 4;
+      this.position[0] += nx * depth;
+      this.position[2] += nz * depth;
+      // Kill the velocity component driving into the obstacle and book a light scrape.
+      const vn = this.velocity[0] * nx + this.velocity[2] * nz;
+      if (vn < 0) {
+        const rxx = -nx * (hw + hl) * 0.25;
+        const rzz = -nz * (hw + hl) * 0.25;
+        this._applyWorldImpulse(nx, 0, nz, rxx, rzz);
+      }
     }
+    _bodies.length = 0;
   }
 
   /**
@@ -2434,7 +2519,9 @@ export class Vehicle {
     const vn = this.velocity[0] * nx + this.velocity[1] * ny + this.velocity[2] * nz;
     if (vn >= 0) return;
     const impact = -vn;
-    const j = -(1 + WORLD_RESTITUTION) * vn;
+    // Rebound is capped: a 300 km/h shunt should crumple, not launch the car back down the road.
+    const bounce = Math.min(WORLD_RESTITUTION * impact, 7.5);
+    const j = impact + bounce;
     this.velocity[0] += nx * j;
     this.velocity[1] += ny * j * 0.35;
     this.velocity[2] += nz * j;
@@ -2478,18 +2565,24 @@ export class Vehicle {
     const parts = game.particles || (game.renderer && game.renderer.particles) || null;
     if (parts && this._viewDist < 140) {
       const n = Math.min(22, 3 + Math.round(impact * 1.4));
-      parts.burst('spark', point[0], point[1], point[2], n,
-        { dir: [nx, 0.35, nz], spread: 0.55, power: 0.6 + impact * 0.08 });
+      _pdir[0] = nx; _pdir[1] = 0.35; _pdir[2] = nz;
+      _poptDir.spread = 0.55;
+      _poptDir.power = 0.6 + impact * 0.08;
+      parts.burst('spark', point[0], point[1], point[2], n, _poptDir);
       if (impact > 7) {
-        parts.burst('debris', point[0], point[1], point[2], Math.min(10, Math.round(impact * 0.5)),
-          { dir: [nx, 0.6, nz], power: 0.5 + impact * 0.05 });
+        _pdir[1] = 0.6;
+        _poptDir.power = 0.5 + impact * 0.05;
+        parts.burst('debris', point[0], point[1], point[2],
+          Math.min(10, Math.round(impact * 0.5)), _poptDir);
       }
       if (impact > 11) {
-        parts.burst('glass', point[0], point[1] + 0.3, point[2], 8,
-          { dir: [nx, 0.5, nz], power: 0.8 });
+        _pdir[1] = 0.5;
+        _poptDir.power = 0.8;
+        parts.burst('glass', point[0], point[1] + 0.3, point[2], 8, _poptDir);
       }
       if (impact > 5) {
-        parts.burst('smoke', point[0], point[1], point[2], 3, { power: 0.5 });
+        _poptPower.power = 0.5;
+        parts.burst('smoke', point[0], point[1], point[2], 3, _poptPower);
       }
     }
     if (game.sfx) {
@@ -2551,8 +2644,9 @@ export class Vehicle {
     const rvz = other.velocity[2] - this.velocity[2];
     const vn = rvx * nx + rvz * nz;
     if (vn > 0) return true;   // already separating
+    const impact = -vn;
 
-    const j = -(1 + CAR_RESTITUTION) * vn / invSum;
+    const j = (impact + Math.min(CAR_RESTITUTION * impact, 8)) / invSum;
     this.velocity[0] -= nx * j * invA;
     this.velocity[2] -= nz * j * invA;
     other.velocity[0] += nx * j * invB;
@@ -2566,7 +2660,6 @@ export class Vehicle {
     other.yawRate = clamp(other.yawRate + armA * j / tb.yawInertia * 0.5,
       -MAX_YAW_RATE, MAX_YAW_RATE);
 
-    const impact = -vn;
     if (impact > DAMAGE_FLOOR) {
       _pt[0] = this.position[0] + nx * ra;
       _pt[1] = this.position[1] + ta.height * 0.15;
@@ -2654,22 +2747,23 @@ export class Vehicle {
 
     // --- visual suspension, pitch and roll -------------------------------------------------------
     const staticLoad = t.mass * GRAVITY * 0.25;
+    const springSpan = Math.max(1, t.springRate * t.susSpan);
     let cFront = 0;
     let cRear = 0;
     let cLeft = 0;
     let cRight = 0;
     for (let i = 0; i < 4; i++) {
       const w = this.wheels[i];
-      const extra = (w.load - staticLoad) / Math.max(1, t.springRate * t.travel);
+      const extra = (w.load - staticLoad) / springSpan;
       const target = w.contact ? clamp(w.compression + extra, 0, 1) : 0;
       w.visualComp = damp(w.visualComp, target, 16, dt);
       if (w.front) cFront += w.visualComp * 0.5; else cRear += w.visualComp * 0.5;
       if (w.localX < 0) cLeft += w.visualComp * 0.5; else cRight += w.visualComp * 0.5;
     }
-    const pitchTarget = clamp(-(cFront - cRear) * t.travel * 3.4 / t.wheelBase * 4.0,
-      -MAX_BODY_TILT, MAX_BODY_TILT);
-    const rollTarget = clamp((cLeft - cRight) * t.travel * 3.4 / t.track * 4.0,
-      -MAX_BODY_TILT * 1.3, MAX_BODY_TILT * 1.3);
+    // 0.17 rad per unit of compression difference: about 3.5 degrees of dive under a 1 g
+    // stop and 3 degrees of roll in a 1 g corner, which is what a road car actually does.
+    const pitchTarget = clamp(-(cFront - cRear) * 0.17, -MAX_BODY_TILT, MAX_BODY_TILT);
+    const rollTarget = clamp((cLeft - cRight) * 0.17, -MAX_BODY_TILT, MAX_BODY_TILT);
     this.pitch = damp(this.pitch, pitchTarget, 12, dt);
     this.roll = damp(this.roll, rollTarget, 12, dt);
 
@@ -2725,15 +2819,17 @@ export class Vehicle {
           if (this.rng.next() < 0.5) idx += 1;
           const w = this.wheels[idx];
           if (!w.contact) continue;
-          const wx = this.position[0] + w.localX * c - w.localZ * s;
-          const wz = this.position[2] - w.localX * s - w.localZ * c;
+          const wx = this.position[0] + w.localX * c + w.localZ * s;
+          const wz = this.position[2] - w.localX * s + w.localZ * c;
           const gy = w.groundY + 0.04;
-          parts.burst('tireSmoke', wx, gy + 0.1, wz, 1, {
-            power: 0.5 + skidSum * 0.45,
-            velocity: [this.velocity[0] * 0.18, 0.35, this.velocity[2] * 0.18]
-          });
+          _popt.power = 0.5 + skidSum * 0.45;
+          _pvel[0] = this.velocity[0] * 0.18;
+          _pvel[1] = 0.35;
+          _pvel[2] = this.velocity[2] * 0.18;
+          parts.burst('tireSmoke', wx, gy + 0.1, wz, 1, _popt);
           if (this.rng.next() < 0.45) {
-            parts.burst('skid', wx, gy, wz, 1, { power: 0.4 + skidSum * 0.3 });
+            _poptPower.power = 0.4 + skidSum * 0.3;
+            parts.burst('skid', wx, gy, wz, 1, _poptPower);
           }
         }
       } else {
@@ -2751,12 +2847,13 @@ export class Vehicle {
         const lx = a ? a[0] : t.width * 0.28;
         const ly = a ? a[1] : -t.comHeight + 0.14;
         const lz = a ? a[2] : t.length * 0.5;
-        const wx = this.position[0] + lx * c - lz * s;
-        const wz = this.position[2] - lx * s - lz * c;
-        parts.burst('exhaust', wx, this.position[1] + ly, wz, 1, {
-          power: 0.35 + this._drive * 0.3,
-          velocity: [this.velocity[0] * 0.6 + s * 1.6, 0.4, this.velocity[2] * 0.6 + c * 1.6]
-        });
+        const wx = this.position[0] + lx * c + lz * s;
+        const wz = this.position[2] - lx * s + lz * c;
+        _popt.power = 0.35 + this._drive * 0.3;
+        _pvel[0] = this.velocity[0] * 0.6 + s * 1.6;
+        _pvel[1] = 0.4;
+        _pvel[2] = this.velocity[2] * 0.6 + c * 1.6;
+        parts.burst('exhaust', wx, this.position[1] + ly, wz, 1, _popt);
       }
     }
 
@@ -2767,17 +2864,19 @@ export class Vehicle {
       const lx = 0;
       const ly = a ? a[1] : t.height * 0.3 - t.comHeight;
       const lz = a ? a[2] : -t.length * 0.25;
-      const wx = this.position[0] + lx * c - lz * s;
-      const wz = this.position[2] - lx * s - lz * c;
+      const wx = this.position[0] + lx * c + lz * s;
+      const wz = this.position[2] - lx * s + lz * c;
       const wy = this.position[1] + ly;
       while (this._smokeAccum >= 1) {
         this._smokeAccum -= 1;
-        parts.burst('smoke', wx, wy, wz, 1, {
-          power: this._burning ? 1.5 : 0.8,
-          velocity: [this.velocity[0] * 0.4, 1.2, this.velocity[2] * 0.4]
-        });
+        _popt.power = this._burning ? 1.5 : 0.8;
+        _pvel[0] = this.velocity[0] * 0.4;
+        _pvel[1] = 1.2;
+        _pvel[2] = this.velocity[2] * 0.4;
+        parts.burst('smoke', wx, wy, wz, 1, _popt);
         if (this._burning) {
-          parts.burst('fire', wx, wy, wz, 1, { power: 1.1 });
+          _poptPower.power = 1.1;
+          parts.burst('fire', wx, wy, wz, 1, _poptPower);
         }
       }
     }
@@ -2785,8 +2884,9 @@ export class Vehicle {
       this._smokeAccum += dt * 8;
       while (this._smokeAccum >= 1) {
         this._smokeAccum -= 1;
+        _poptPower.power = 1.7;
         parts.burst('smoke', this.position[0], this.position[1] + 0.4, this.position[2], 1,
-          { power: 1.7 });
+          _poptPower);
       }
     }
   }
@@ -2944,9 +3044,9 @@ export class Vehicle {
     const s = Math.sin(this.yaw);
     const c = Math.cos(this.yaw);
     const o = out || vec3.create();
-    o[0] = this.position[0] + lx * c - lz * s;
+    o[0] = this.position[0] + lx * c + lz * s;
     o[1] = this.position[1] + ly;
-    o[2] = this.position[2] - lx * s - lz * c;
+    o[2] = this.position[2] - lx * s + lz * c;
     return o;
   }
 
@@ -3085,20 +3185,22 @@ export class Vehicle {
     const src = detail === 2 ? assets.wheel : assets.wheelLod;
     const mesh = src.mesh || src.geometry;
     if (!mesh) return;
-    const count = this.model.wheelCount;
-    const bike = t.bike;
+    const bike = this.model.wheelCount === 2;
     for (let i = 0; i < 4; i++) {
       if (bike && (i === WHEEL_FR || i === WHEEL_RR)) continue;
       const w = this.wheels[i];
+      // A two-wheeler draws both wheels on the centreline even though the physics keeps a
+      // narrow virtual track for stability.
+      const lx = bike ? 0 : w.localX;
       // Attachment point through the full body transform, then straight down by susLen.
-      const ax = body[0] * w.localX + body[8] * w.localZ + body[12];
-      const ay = body[1] * w.localX + body[9] * w.localZ + body[13];
-      const az = body[2] * w.localX + body[10] * w.localZ + body[14];
+      const ax = body[0] * lx + body[8] * w.localZ + body[12];
+      const ay = body[1] * lx + body[9] * w.localZ + body[13];
+      const az = body[2] * lx + body[10] * w.localZ + body[14];
       let len = w.susLen;
       if (w.contact) {
         const want = ay - w.groundY - w.radius;
         if (Number.isFinite(want)) {
-          len = clamp(want, t.restLength - t.travel, t.restLength + t.travel * 0.4);
+          len = clamp(want, t.susMin, t.susRest + t.travel * 0.3);
         }
       }
       mat4.identity(_m2);
@@ -3107,9 +3209,8 @@ export class Vehicle {
       _m2[14] = az;
       mat4.rotateY(_m2, _m2, this.yaw - w.steerAngle);
       mat4.rotateX(_m2, _m2, w.spin);
-      mat4.scale(_m2, _m2, bike ? t.wheelWidth : t.wheelWidth, t.wheelRadius, t.wheelRadius);
+      mat4.scale(_m2, _m2, t.wheelWidth, t.wheelRadius, t.wheelRadius);
       renderer.submit(mesh, src.material, _m2, { tint: _tint2 });
-      void count;
     }
   }
 
@@ -3265,6 +3366,7 @@ function makeWheel(lx, lz, front, t) {
     travel: t.travel,
     susLen: t.restLength,
     prevSusLen: t.restLength,
+    springN: t.mass * GRAVITY * 0.25,
     compression: 0,
     visualComp: 0,
     contact: true,

@@ -52,6 +52,9 @@ const LEGEND = Object.freeze([
 const DASH_WP = [7, 6];
 const DASH_NONE = [];
 
+/** Reused police blip groups so `_drawDynamic` allocates nothing per frame. */
+const _policeGroups = [null, null];
+
 /**
  * Creates an element.
  * @param {string} tag Tag name.
@@ -100,6 +103,10 @@ export class MapScreen {
     this._drag = null;
     this._pinch = 0;
     this._pulse = 0;
+    this._clock = 0;
+    this._lastFrame = 0;
+    this._markers = null;
+    this._markerTime = -1;
     this._data = null;
 
     this._buildDom();
@@ -167,8 +174,9 @@ export class MapScreen {
     c.addEventListener('pointerdown', (ev) => this._onPointerDown(ev));
     c.addEventListener('pointermove', (ev) => this._onPointerMove(ev));
     c.addEventListener('pointerup', (ev) => this._onPointerUp(ev));
-    c.addEventListener('pointercancel', (ev) => this._onPointerUp(ev));
-    c.addEventListener('pointerleave', (ev) => this._onPointerUp(ev));
+    // Cancel/leave abandon the gesture — they must never place a waypoint.
+    c.addEventListener('pointercancel', (ev) => this._onPointerUp(ev, true));
+    c.addEventListener('pointerleave', (ev) => this._onPointerUp(ev, true));
     c.addEventListener('wheel', (ev) => this._onWheel(ev), { passive: false });
     c.addEventListener('contextmenu', (ev) => {
       if (ev && ev.preventDefault) ev.preventDefault();
@@ -206,7 +214,12 @@ export class MapScreen {
     if (g && g.input) g.input.blocked = true;
     this._needResize = true;
     this._baseKey = '';
+    // Measure first: `centerOnPlayer()` fits the city to the canvas, so it needs the real size.
+    // Without this the very first open uses the 1280x720 placeholder and lands at the wrong zoom.
+    this._resize();
     this.centerOnPlayer();
+    this._markerTime = -1;
+    this._lastFrame = 0;
     this._setInfo('');
     this.update();
   }
@@ -218,6 +231,8 @@ export class MapScreen {
     if (this._wrap && this._wrap.classList) this._wrap.classList.remove('open');
     this._pointers.clear();
     this._drag = null;
+    this._markers = null;
+    this._markerTime = -1;
     const g = this.game;
     if (g && g.input) g.input.blocked = !!g.paused;
   }
@@ -320,14 +335,19 @@ export class MapScreen {
     this._updateHoverInfo(p);
   }
 
-  /** @param {PointerEvent} ev Event. @returns {void} */
-  _onPointerUp(ev) {
+  /**
+   * @param {PointerEvent} ev Event.
+   * @param {boolean} [cancel] True for cancel/leave: end the gesture without placing a waypoint.
+   * @returns {void}
+   */
+  _onPointerUp(ev, cancel) {
     const id = ev && ev.pointerId !== undefined ? ev.pointerId : 0;
     const drag = this._drag;
     this._pointers.delete(id);
     if (this._pointers.size < 2) this._pinch = 0;
     if (!drag || drag.id !== id) { if (this._pointers.size === 0) this._drag = null; return; }
     this._drag = null;
+    if (cancel) return;
     if (drag.moved > 6) return;
     if (ev && ev.button === 2) return;
     const p = this._local(ev) || { x: drag.sx, y: drag.sy };
@@ -598,9 +618,38 @@ export class MapScreen {
       ctx.fillRect(0, 0, this._w, this._h);
     }
 
-    this._pulse = (this._pulse + 0.06) % (Math.PI * 2);
+    // Wall-clock driven so the blip pulse runs at the same speed on a 30 Hz and a 240 Hz display.
+    const nowMs = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now() : Date.now();
+    const step = this._lastFrame > 0 ? clamp((nowMs - this._lastFrame) / 1000, 0, 0.25) : 0;
+    this._lastFrame = nowMs;
+    this._clock += step;
+    this._pulse = (this._clock * 3.6) % (Math.PI * 2);
+    this._refreshMarkers(step);
     this._drawDynamic(ctx);
     this._drawScaleBar(ctx);
+  }
+
+  /**
+   * Refreshes the startable-mission marker list at 4 Hz. `getAvailable()` allocates a new array,
+   * so it must not be called from the per-frame draw path.
+   * @param {number} dt Seconds since the previous frame.
+   * @returns {void}
+   */
+  _refreshMarkers(dt) {
+    this._markerTime -= dt;
+    if (this._markerTime > 0 && this._markers !== null) return;
+    this._markerTime = 0.25;
+    const mm = this.game ? this.game.missions : null;
+    if (!mm) { this._markers = null; return; }
+    if (typeof mm.getAvailable === 'function') {
+      try {
+        const list = mm.getAvailable();
+        if (Array.isArray(list)) { this._markers = list; return; }
+      } catch (err) { /* a mission manager still booting must not break the map */ }
+    }
+    this._markers = Array.isArray(mm.markers) ? mm.markers
+      : Array.isArray(mm.available) ? mm.available : null;
   }
 
   /** Rasterises the static city plan into the offscreen canvas. @returns {void} */
@@ -791,10 +840,8 @@ export class MapScreen {
       }
     }
 
-    // Mission markers.
-    const mm = g.missions;
-    const markers = mm ? (Array.isArray(mm.markers) ? mm.markers
-      : Array.isArray(mm.available) ? mm.available : null) : null;
+    // Mission markers the player can actually start right now.
+    const markers = this._markers;
     if (markers) {
       for (let i = 0; i < markers.length; i++) {
         const m = markers[i];
@@ -817,6 +864,7 @@ export class MapScreen {
           ctx.fillStyle = MC.label;
           ctx.font = '600 12px system-ui, -apple-system, sans-serif';
           ctx.textAlign = 'center';
+          ctx.textBaseline = 'alphabetic';
           ctx.fillText(String(label), px, py - 12);
         }
       }
@@ -828,9 +876,10 @@ export class MapScreen {
       ctx.fillStyle = MC.police;
       const alpha = ctx.globalAlpha;
       ctx.globalAlpha = alpha * (num(police.wanted, 0) > 0 ? pulse : 0.9);
-      const groups = [police.cars, police.cops];
-      for (let gi = 0; gi < groups.length; gi++) {
-        const arr = groups[gi];
+      _policeGroups[0] = police.cars;
+      _policeGroups[1] = police.cops;
+      for (let gi = 0; gi < _policeGroups.length; gi++) {
+        const arr = _policeGroups[gi];
         if (!arr || !arr.length) continue;
         for (let i = 0; i < arr.length; i++) {
           const c = arr[i];
@@ -845,6 +894,8 @@ export class MapScreen {
           ctx.fill();
         }
       }
+      _policeGroups[0] = null;
+      _policeGroups[1] = null;
       ctx.globalAlpha = alpha;
     }
 

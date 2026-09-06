@@ -26,6 +26,10 @@ const START_COUNTDOWN = 3;
 const COOLDOWN_SUCCESS = 30;
 /** Cooldown after a failure / abort. */
 const COOLDOWN_FAIL = 15;
+/** Metres from the camera beyond which a start marker is not drawn. */
+const MARKER_DRAW_RANGE = 180;
+/** Seconds between objective-line refreshes (the HUD rebuilds its DOM whenever it changes). */
+const OBJECTIVE_INTERVAL = 0.25;
 
 /**
  * @param {*} v Candidate.
@@ -158,13 +162,20 @@ function placePed(ped, x, y, z, yaw = 0) {
 /**
  * Steers an AI-driven vehicle towards a world point by writing its input struct.
  * Works with the arcade vehicle controller: no physics is applied here.
+ *
+ * When an `ai` record is supplied the driver also notices that it has been pinned against a wall
+ * (barely moving while still far from the target) and reverses out of it for a moment, so a
+ * mission car can never park itself in a corner and stall the whole mission.
+ *
  * @param {Object} v Vehicle.
  * @param {number} tx Target x.
  * @param {number} tz Target z.
  * @param {number} [topSpeed=22] Desired speed in m/s.
+ * @param {Object|null} [ai=null] Per-driver scratch `{stuck, reverse}` (see {@link newDriver}).
+ * @param {number} [dt=0] Seconds, required for the stuck detector.
  * @returns {number} Distance to the target.
  */
-function driveTowards(v, tx, tz, topSpeed = 22) {
+function driveTowards(v, tx, tz, topSpeed = 22, ai = null, dt = 0) {
   if (!v || !v.input || !v.position) return Infinity;
   const dx = tx - fin(v.position[0], 0);
   const dz = tz - fin(v.position[2], 0);
@@ -179,6 +190,27 @@ function driveTowards(v, tx, tz, topSpeed = 22) {
   const wantYaw = Math.atan2(-dx, -dz);
   const diff = wrapAngle(wantYaw - fin(v.yaw, 0));
   const speed = Math.hypot(fin(v.velocity ? v.velocity[0] : 0, 0), fin(v.velocity ? v.velocity[2] : 0, 0));
+
+  if (ai) {
+    if (ai.reverse > 0) {
+      ai.reverse -= dt;
+      // Back up while steering the nose away from whatever we are wedged against.
+      v.input.throttle = -0.8;
+      v.input.steer = clamp(-diff * 1.4, -1, 1);
+      v.input.brake = 0;
+      v.input.handbrake = false;
+      if (v.engineOn === false) v.engineOn = true;
+      if (ai.reverse <= 0) { ai.reverse = 0; ai.stuck = 0; }
+      return d;
+    }
+    if (d > 6 && speed < 1.5) ai.stuck += dt;
+    else ai.stuck = 0;
+    if (ai.stuck > 1.2) {
+      ai.stuck = 0;
+      ai.reverse = 1.1;
+    }
+  }
+
   v.input.steer = clamp(diff * 1.8, -1, 1);
   // Slow down for hard turns and when arriving.
   const turnLimit = 1 - Math.min(0.75, Math.abs(diff) * 0.55);
@@ -189,6 +221,87 @@ function driveTowards(v, tx, tz, topSpeed = 22) {
   v.input.handbrake = false;
   if (v.engineOn === false) v.engineOn = true;
   return d;
+}
+
+/**
+ * Fresh scratch record for one AI driver.
+ * @returns {{stuck:number, reverse:number, leg:number, fireTimer:number}} Driver state.
+ */
+function newDriver() {
+  return { stuck: 0, reverse: 0, leg: 0, fireTimer: 0 };
+}
+
+/**
+ * Builds a coarse road-following route between two points by sampling the straight line and
+ * snapping every sample onto the road network. Cheap, deterministic and good enough to stop an
+ * escort car from driving straight through a city block.
+ * @param {Object} game Game.
+ * @param {number} fromX Start x.
+ * @param {number} fromZ Start z.
+ * @param {{x:number, z:number}} to Destination.
+ * @param {number} [spacing=70] Metres between samples.
+ * @returns {Array<{x:number, z:number}>} Route, always ending exactly on `to`.
+ */
+function buildRoute(game, fromX, fromZ, to, spacing = 70) {
+  const out = [];
+  const dx = to.x - fromX;
+  const dz = to.z - fromZ;
+  const total = Math.hypot(dx, dz);
+  const steps = Math.max(1, Math.min(24, Math.floor(total / spacing)));
+  const scratch = { x: 0, z: 0, laneId: -1 };
+  for (let i = 1; i <= steps; i++) {
+    const t = i / (steps + 1);
+    let x = fromX + dx * t;
+    let z = fromZ + dz * t;
+    if (typeof game.nearestRoadPoint === 'function') {
+      try {
+        const p = game.nearestRoadPoint(x, z, scratch);
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) { x = p.x; z = p.z; }
+      } catch (err) { /* keep the straight-line sample */ }
+    }
+    const prev = out.length ? out[out.length - 1] : { x: fromX, z: fromZ };
+    if (dist2(x, z, prev.x, prev.z) < 12) continue;
+    out.push({ x, z });
+  }
+  out.push({ x: to.x, z: to.z });
+  return out;
+}
+
+/**
+ * Drives a vehicle along a route built by {@link buildRoute}.
+ * @param {Object} v Vehicle.
+ * @param {Array<{x:number, z:number}>} route Waypoints.
+ * @param {Object} ai Driver scratch (`leg` is the current waypoint index).
+ * @param {number} topSpeed Desired speed in m/s.
+ * @param {number} dt Seconds.
+ * @returns {number} Straight-line distance left to the final waypoint.
+ */
+function driveRoute(v, route, ai, topSpeed, dt) {
+  if (!v || !v.position || !route || !route.length) return Infinity;
+  if (ai.leg >= route.length) ai.leg = route.length - 1;
+  const last = route[route.length - 1];
+  const leg = route[ai.leg];
+  const arrive = ai.leg === route.length - 1 ? 10 : 16;
+  const d = driveTowards(v, leg.x, leg.z, topSpeed, ai, dt);
+  if (d < arrive && ai.leg < route.length - 1) {
+    ai.leg++;
+    ai.stuck = 0;
+  }
+  return dist2(fin(v.position[0], 0), fin(v.position[2], 0), last.x, last.z);
+}
+
+/**
+ * Puts a spawned-but-unmanned mission vehicle on the handbrake so it cannot creep down a slope
+ * while the player walks over to it.
+ * @param {Object|null} v Vehicle.
+ * @returns {void}
+ */
+function parkVehicle(v) {
+  if (!v || !v.input) return;
+  v.input.throttle = 0;
+  v.input.steer = 0;
+  v.input.brake = 1;
+  v.input.handbrake = true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -260,8 +373,68 @@ function spawnVehicle(game, st, typeKey, x, z, yaw = 0, opts = undefined) {
   if (!v) return null;
   v.missionOwned = true;
   v.parked = false;
+  parkVehicle(v);
   st.vehicles.push(v);
   return v;
+}
+
+/**
+ * Muzzle position for a gunman leaning out of a moving car. Deliberately offset sideways and
+ * upwards so the bullet starts clear of its own bodywork.
+ * @param {Object} v Vehicle.
+ * @param {number} towardsX Target x (the shot leans towards it).
+ * @param {number} towardsZ Target z.
+ * @param {number[]} out Destination `[x,y,z]`.
+ * @returns {boolean} True when a finite muzzle was produced.
+ */
+function vehicleMuzzle(v, towardsX, towardsZ, out) {
+  if (!v || !v.position || !Number.isFinite(v.position[0])) return false;
+  const cx = v.position[0];
+  const cz = v.position[2];
+  let sx = towardsX - cx;
+  let sz = towardsZ - cz;
+  const l = Math.hypot(sx, sz);
+  if (l > 1e-4) { sx /= l; sz /= l; } else { sx = 1; sz = 0; }
+  const type = v.type || {};
+  const reach = fin(type.width, 1.9) * 0.5 + 0.55;
+  out[0] = cx + sx * reach;
+  out[1] = fin(v.position[1], 0) + fin(type.height, 1.45) * 0.72 + 0.35;
+  out[2] = cz + sz * reach;
+  return true;
+}
+
+/**
+ * A drive-by burst at the player from a mission vehicle.
+ * @param {Object} game Game.
+ * @param {Object} v Shooter vehicle.
+ * @param {Object} slot Per-vehicle scratch holding `fireTimer`.
+ * @param {number} dt Seconds.
+ * @param {Object} [opts] `{weapon, range, rate, spread, damageMul}`.
+ * @returns {void}
+ */
+function driveByFire(game, v, slot, dt, opts = {}) {
+  const player = game.player;
+  const weapons = game.weapons;
+  if (!player || player.dead || !player.position || !Number.isFinite(player.position[0])) return;
+  if (!weapons || typeof weapons.tryFire !== 'function') return;
+  if (!vehicleAlive(game, v)) return;
+  const d = dist2(fin(v.position[0], 0), fin(v.position[2], 0), player.position[0], player.position[2]);
+  if (d > fin(opts.range, 45)) { slot.fireTimer = Math.min(slot.fireTimer, 0.5); return; }
+  slot.fireTimer -= dt;
+  if (slot.fireTimer > 0) return;
+  slot.fireTimer = fin(opts.rate, 0.6);
+  if (!vehicleMuzzle(v, player.position[0], player.position[2], _muzzle)) return;
+  _dir[0] = player.position[0] - _muzzle[0];
+  _dir[1] = player.position[1] + 1 - _muzzle[1];
+  _dir[2] = player.position[2] - _muzzle[2];
+  const l = Math.hypot(_dir[0], _dir[1], _dir[2]);
+  if (!(l > 0.01)) return;
+  _dir[0] /= l; _dir[1] /= l; _dir[2] /= l;
+  weapons.tryFire(_muzzle, _dir, false, fin(opts.spread, 3), {
+    weapon: opts.weapon || 'smg',
+    shooter: v,
+    damageMul: fin(opts.damageMul, 0.35),
+  });
 }
 
 /**
@@ -656,8 +829,9 @@ export const MISSIONS = [
      * @returns {string} Korean objective line.
      */
     objectiveText(st) {
+      const n = st.drops.length;
       if (st.phase === 'toVehicle') return `배달 차량에 탑승 (${clockText(st.boardTime)})`;
-      return `배달 ${Math.min(st.index + 1, 3)}/3 · 남은 시간 ${clockText(st.timeLeft)}`;
+      return `배달 ${Math.min(st.index + 1, n)}/${n} · 남은 시간 ${clockText(st.timeLeft)}`;
     },
   },
 
@@ -720,7 +894,7 @@ export const MISSIONS = [
         v.driver = { missionAI: true, character: null };
         st.racers.push({
           vehicle: v, name: names[i], cp: 0, done: false, finish: 0,
-          skill: 17 + st.rng.range(0, 6) + i * 0.8,
+          skill: 17 + st.rng.range(0, 6) + i * 0.8, ai: newDriver(),
         });
       }
       if (!st.playerCar && !(game.player && game.player.vehicle)) {
@@ -732,6 +906,9 @@ export const MISSIONS = [
       st.phase = game.player && game.player.vehicle ? 'race' : 'toCar';
       st.boardTime = 45;
       st.raceTime = 0;
+      st.raceLimit = 420;
+      // `timeLeft` is the field ui/hud.js reads for the mission countdown.
+      st.timeLeft = st.raceLimit;
       st.finished = 0;
       return st;
     },

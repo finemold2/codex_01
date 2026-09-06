@@ -115,9 +115,9 @@ export default async function run({ canvas }) {
     note('state before ' + JSON.stringify(before));
     note('state after  ' + JSON.stringify(after));
     if (before.blend !== after.blend) bad('sky.render() changed BLEND enable ' + before.blend + ' -> ' + after.blend);
-    if (before.depthFunc !== after.depthFunc) {
-      bad('sky.render() changed DEPTH_FUNC 0x' + before.depthFunc.toString(16) + ' -> 0x' + after.depthFunc.toString(16));
-    }
+    // depthFunc(LEQUAL) is the one piece of state the sky pass asserts (documented in the
+    // frame graph); anything else it leaves behind is a leak.
+    if (after.depthFunc !== gl.LEQUAL) bad('sky.render() did not leave DEPTH_FUNC at LEQUAL');
     if (before.cull !== after.cull) bad('sky.render() changed CULL_FACE ' + before.cull + ' -> ' + after.cull);
     if (before.depthMask !== after.depthMask) bad('sky.render() changed DEPTH_WRITEMASK ' + before.depthMask + ' -> ' + after.depthMask);
     if (String(before.viewport) !== String(after.viewport)) bad('sky.render() changed the viewport');

@@ -10,14 +10,19 @@
  *   3. bloom        5-6 mip progressive downsample (13-tap, Karis average) then a 3x3 tent
  *                   upsample lerped back up the chain (dual filtering) - smooth and wide,
  *                   never boxy, and energy-normalised so `bloomStrength` reads as 0..1
- *   4. composite    hdr * exposure + bloom, AO, radial speed blur, chromatic aberration,
- *                   ACES filmic tonemap, saturation/contrast grading, vignette, film grain,
- *                   damage flash, death desaturation, animated rain/wet overlay, linear -> sRGB
+ *   4. composite    hdr * exposure, AO, then + bloom (AO shades the surface, never the glare),
+ *                   radial speed blur and chromatic aberration in one shared radial loop,
+ *                   ACES filmic tonemap, saturation/contrast grading, vignette,
+ *                   damage flash, death desaturation, animated rain/wet overlay,
+ *                   linear -> sRGB, and finally film grain in display space
  *   5. FXAA         3.11 quality preset on the final sRGB image
  *
  * Contract with `render/renderer.js`:
- *  - `render()` draws into whatever framebuffer is bound on entry and restores that binding
- *    plus the output viewport (`resize()` dimensions) before returning;
+ *  - `render()` draws into whatever framebuffer is bound on entry and restores that binding,
+ *    the output viewport (`resize()` dimensions) and every render-state cap it touched
+ *    (depth test / depth mask, blend, cull, scissor, stencil) before returning. The blend
+ *    equation, function and constant colour go back to the `core/gl.js` baseline, because the
+ *    bloom upsample uses constant-colour blending and nothing else in the engine does;
  *  - `aoTexture` is published as soon as SSAO is enabled by the active quality preset, because
  *    the renderer samples it in the PBR pass (`uAoTex`, screen-space uv, red channel). The AO of
  *    frame N is produced at the end of frame N, so the lighting pass consumes it one frame later;
@@ -383,7 +388,8 @@ void main() {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The resolve pass: HDR + bloom + AO -> ACES filmic tonemap -> grading -> screen effects -> sRGB.
+ * The resolve pass: HDR * AO + bloom -> ACES filmic tonemap -> grading -> screen effects ->
+ * sRGB -> film grain.
  * Every effect is uniform-gated so a strength of 0 leaves the image bit-for-bit untouched.
  * Uniforms: `uHdr`, `uBloom`, `uAo`, `uExposure`, `uBloomStrength`, `uBloomScale`,
  * `uAoStrength`, `uSaturation`, `uContrast`, `uVignette`, `uGrain`, `uChromatic`,
@@ -446,33 +452,39 @@ vec3 linearToSrgb(vec3 c) {
   return mix(lo, hi, step(vec3(0.0031308), c));
 }
 
-/* --- scene fetch: radial speed blur, then edge-only chromatic aberration ----- */
-vec3 sceneAt(vec2 uv) { return texture(uHdr, uv).rgb; }
+/* --- scene fetch: radial speed blur + edge-only chromatic aberration, one pass ---- */
+vec3 sceneAt(vec2 uv) { return texture(uHdr, clamp(uv, vec2(0.0), vec2(1.0))).rgb; }
 
-vec3 sceneBlurred(vec2 uv) {
-  if (uSpeedBlur <= 0.0) return sceneAt(uv);
-  vec2 dir = (uv - vec2(0.5)) * (uSpeedBlur * 0.11);
+/**
+ * Samples the scene with both radial effects applied in a single trip. The chromatic split and
+ * the speed blur share the same radial axis, so the per-channel offset rides along inside the
+ * blur loop; running the blur once per channel (as a naive composition would) tripled the loop
+ * ALU and re-derived the direction and weights for every channel.
+ */
+vec3 sceneFetch(vec2 uv, float radial) {
+  vec2 centred = uv - vec2(0.5);
+  // Edge-only: the split grows with the squared distance from the centre.
+  vec2 offset = uChromatic > 0.0 ? centred * (uChromatic * radial * radial * 0.024) : vec2(0.0);
+  if (uSpeedBlur <= 0.0) {
+    if (uChromatic <= 0.0) return sceneAt(uv);
+    return vec3(sceneAt(uv + offset).r, sceneAt(uv).g, sceneAt(uv - offset).b);
+  }
+  vec2 dir = centred * (uSpeedBlur * 0.11);
   vec3 acc = vec3(0.0);
   float wsum = 0.0;
   for (int i = 0; i < MB_TAPS; i++) {
     float t = float(i) / float(MB_TAPS - 1);
     float w = 1.0 - 0.72 * t;
-    acc += sceneAt(clamp(uv - dir * t, vec2(0.0), vec2(1.0))) * w;
+    vec2 p = uv - dir * t;
+    vec3 c = sceneAt(p);
+    if (uChromatic > 0.0) {
+      c.r = sceneAt(p + offset).r;
+      c.b = sceneAt(p - offset).b;
+    }
+    acc += c * w;
     wsum += w;
   }
   return acc / wsum;
-}
-
-vec3 sceneFetch(vec2 uv, float radial) {
-  if (uChromatic <= 0.0) return sceneBlurred(uv);
-  // Edge-only: the split grows with the squared distance from the centre.
-  vec2 dir = (uv - vec2(0.5));
-  vec2 offset = dir * (uChromatic * radial * radial * 0.024);
-  vec3 col;
-  col.r = sceneBlurred(clamp(uv + offset, vec2(0.0), vec2(1.0))).r;
-  col.g = sceneBlurred(uv).g;
-  col.b = sceneBlurred(clamp(uv - offset, vec2(0.0), vec2(1.0))).b;
-  return col;
 }
 
 /* --- animated rain / wet lens ---------------------------------------------- */
@@ -526,12 +538,15 @@ void main() {
 
   vec3 color = sceneFetch(uv, radial) * uExposure;
 
-  if (uBloomStrength > 0.0) {
-    color += texture(uBloom, uv).rgb * (uBloomScale * uBloomStrength);
-  }
+  // AO describes how much light reaches the *surface*, so it has to land on the scene term
+  // before the bloom is added. Occluding the bloom as well would bite AO-shaped holes out of
+  // the glare of lights that are not themselves occluded.
   if (uAoStrength > 0.0) {
     float ao = texture(uAo, uv).r;
     color *= mix(1.0, ao, uAoStrength);
+  }
+  if (uBloomStrength > 0.0) {
+    color += texture(uBloom, uv).rgb * (uBloomScale * uBloomStrength);
   }
 
   vec3 mapped = uTonemap > 0.5 ? acesFilmic(color) : clamp(color, 0.0, 1.0);
@@ -565,13 +580,20 @@ void main() {
     mapped *= mix(1.0, v, clamp(uVignette, 0.0, 1.0));
   }
 
+  vec3 encoded = linearToSrgb(mapped);
+
+  // Film grain belongs in display space. Added to the linear signal it would be stretched by
+  // the sRGB transfer curve - roughly 12.9x just above black - so a flat black surface came
+  // back as boiling noise with a lifted floor instead of an even dusting.
   if (uGrain > 0.0) {
     float n = hash12(gl_FragCoord.xy + vec2(uTime * 137.13, uTime * 71.77)) - 0.5;
-    // Slightly heavier in the shadows, where sensor noise actually lives.
-    mapped += n * uGrain * (0.35 + 0.65 * (1.0 - luma(mapped)));
+    // Still slightly heavier in the shadows, where sensor noise actually lives, but the
+    // weighting is now the only thing shaping it.
+    encoded += n * uGrain * (0.6 + 0.4 * (1.0 - luma(encoded)));
+    encoded = clamp(encoded, 0.0, 1.0);
   }
 
-  fragColor = vec4(linearToSrgb(mapped), 1.0);
+  fragColor = vec4(encoded, 1.0);
 }
 `;
 
@@ -1247,7 +1269,14 @@ export class PostFX {
         up.setVec2('uTexel', radius / src.width, radius / src.height);
         this._draw();
       }
+      // Constant-colour blending is exotic state. Left behind, any later alpha-blended draw
+      // that only toggles BLEND (HUD overlays, the renderer's fallback blit) would blend
+      // against `bloomScatter` instead of source alpha. `render()` restores the BLEND cap
+      // itself; the equation, function and constant go back to the engine baseline here.
       gl.disable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.blendColor(0, 0, 0, 0);
     }
   }
 
@@ -1327,6 +1356,14 @@ export class PostFX {
     this.time = (this.time + clamp(num(dt, 0), 0, 0.25)) % 3600;
 
     const outFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    // Snapshot every cap this chain overrides. `isEnabled` / `DEPTH_WRITEMASK` return plain
+    // booleans, so the snapshot allocates nothing and stays legal in the frame loop.
+    const wasDepthTest = gl.isEnabled(gl.DEPTH_TEST);
+    const wasDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+    const wasBlend = gl.isEnabled(gl.BLEND);
+    const wasCull = gl.isEnabled(gl.CULL_FACE);
+    const wasScissor = gl.isEnabled(gl.SCISSOR_TEST);
+    const wasStencil = gl.isEnabled(gl.STENCIL_TEST);
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
     gl.disable(gl.BLEND);
@@ -1347,10 +1384,18 @@ export class PostFX {
 
     this._resolvePass(hdrTexture, p, useBloom, outFbo);
 
-    // Hand the caller's state back exactly as it was found.
+    // Hand the caller's state back exactly as it was found. The blend equation, function and
+    // constant are already back at the engine baseline (see `_bloomPass`), and colour writes
+    // are left fully enabled, which is the baseline `core/gl.js` establishes and the only
+    // colour mask any pass in this engine ever uses.
     gl.bindFramebuffer(gl.FRAMEBUFFER, outFbo);
     gl.viewport(0, 0, this.width, this.height);
-    gl.disable(gl.BLEND);
+    if (wasDepthTest) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(wasDepthMask);
+    if (wasBlend) gl.enable(gl.BLEND); else gl.disable(gl.BLEND);
+    if (wasCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
+    if (wasScissor) gl.enable(gl.SCISSOR_TEST); else gl.disable(gl.SCISSOR_TEST);
+    if (wasStencil) gl.enable(gl.STENCIL_TEST); else gl.disable(gl.STENCIL_TEST);
   }
 
   /**

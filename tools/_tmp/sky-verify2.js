@@ -1,8 +1,9 @@
 /**
- * Focused CPU-vs-GPU consistency + seam probe for js/render/sky.js.
+ * CPU-vs-GPU consistency probe for js/render/sky.js, with the cloud layers compiled OUT so
+ * the comparison measures the scattering model and not cloud edges.
  * Run: node tools/gl-probe.mjs tools/_tmp/sky-verify2.js
  */
-import { createGLContext, RenderTarget } from '/js/core/gl.js';
+import { createGLContext, RenderTarget, Shader } from '/js/core/gl.js';
 import { mat4, DEG2RAD } from '/js/core/math.js';
 import { Sky } from '/js/render/sky.js';
 
@@ -30,28 +31,30 @@ export default async function run({ canvas }) {
   const RT = new RenderTarget(gl, 33, 33, { colorFormat: 'rgba16f', depth: true, filter: 'nearest' });
   const px1 = new Float32Array(4);
 
-  /** Renders the sky in `dir` and returns the centre radiance. */
-  function sample(dir, fov = 2) {
+  // Recompile every tier with CLOUDS 0 by editing the already-preprocessed source the module
+  // handed to the driver, then swap the variants into the Sky's cache.
+  sky.precompile();
+  const cloudless = new Map();
+  for (const [name, sh] of sky._shaders) {
+    const vs = sh.vertexSource.replace('#define CLOUDS 1', '#define CLOUDS 0');
+    const fs = sh.fragmentSource.replace('#define CLOUDS 1', '#define CLOUDS 0');
+    if (!/#define CLOUDS 0/.test(fs)) { bad('could not disable CLOUDS for tier ' + name); return out; }
+    cloudless.set(name, new Shader(gl, vs, fs, {}, 'skyNoCloud:' + name));
+  }
+  for (const [name, sh] of cloudless) sky._shaders.set(name, sh);
+  note('clouds compiled out for tiers: ' + [...cloudless.keys()].join(','));
+
+  function sample(dir, fov = 1.5) {
     RT.bind(true);
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false); gl.disable(gl.BLEND);
     sky.render(camAt(dir, fov));
     gl.readPixels(16, 16, 1, 1, gl.RGBA, gl.FLOAT, px1);
     return [px1[0], px1[1], px1[2]];
   }
-  /** Removes everything the CPU mirror does not model: clouds, stars, sun/moon discs. */
-  function quiet() {
-    sky.starIntensity = 0;
-    sky.params.cloudiness = 0;          // coverage threshold 0.71 -> effectively clear
-    sky.params.cirrus = 0;
-  }
-
   const W = [0.34, 0.22, 0.22, 0.22];
-  const hours = [7, 8, 10, 12, 14, 16, 17, 17.5, 18, 18.3, 19, 21, 0.5, 3];
-
-  note('--- fogColor (CPU, weighted azimuth avg at 2.58deg) vs the same weighted avg read off the GPU ---');
-  let worstRel = 0; let worstH = 0;
-  for (const h of hours) {
-    sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+  /** Silences the star field / Milky Way, which the CPU mirror does not model. */
+  function quiet() { sky.starIntensity = 0; }
+  function gpuFog() {
     const st = sky.sunDirectionTrue;
     let hx = st[0]; let hz = st[2];
     const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
@@ -59,73 +62,104 @@ export default async function run({ canvas }) {
     const avg = [0, 0, 0];
     for (let k = 0; k < 4; k++) {
       const a = k * Math.PI * 0.5; const ca = Math.cos(a); const sa = Math.sin(a);
-      const s = sample([(hx * ca - hz * sa) * inv, hy * inv, (hx * sa + hz * ca) * inv], 1.5);
+      const s = sample([(hx * ca - hz * sa) * inv, hy * inv, (hx * sa + hz * ca) * inv]);
       for (let i = 0; i < 3; i++) avg[i] += s[i] * W[k];
     }
-    const f = sky.fogColor;
-    const rel = [0, 1, 2].map((i) => (avg[i] - f[i]) / Math.max(1e-5, f[i]));
-    const m = Math.max(...rel.map(Math.abs));
-    if (m > worstRel) { worstRel = m; worstH = h; }
-    note(`h=${h}: cpuFog=[${[...f].map((v) => v.toFixed(4))}] gpuAvg=[${avg.map((v) => v.toFixed(4))}] relErr=[${rel.map((v) => (v * 100).toFixed(0) + '%')}]`);
-  }
-  note(`worst fog CPU/GPU relative error: ${(worstRel * 100).toFixed(0)}% at h=${worstH}`);
-  if (worstRel > 0.25) bad(`fogColor does not match what the sky shader paints (worst ${(worstRel * 100).toFixed(0)}% at h=${worstH}h)`);
-
-  note('--- zenith: CPU zenithColor vs GPU straight up ---');
-  for (const h of [8, 12, 17.5, 18.3, 0.5]) {
-    sky.setTimeOfDay(h); sky.update(0, 0); quiet();
-    const g = sample([0, 1, 0], 1.5);
-    const z = sky.zenithColor;
-    const rel = [0, 1, 2].map((i) => (g[i] - z[i]) / Math.max(1e-5, z[i]));
-    note(`h=${h}: cpuZenith=[${[...z].map((v) => v.toFixed(4))}] gpu=[${g.map((v) => v.toFixed(4))}] relErr=[${rel.map((v) => (v * 100).toFixed(0) + '%')}]`);
+    return avg;
   }
 
-  note('--- step-count convergence at low elevation (clouds/stars off) ---');
-  for (const el of [2.58, 6, 20, 89]) {
-    sky.setTimeOfDay(17.5); sky.update(0, 0); quiet();
-    const st = sky.sunDirectionTrue;
-    let hx = st[0]; let hz = st[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
-    const ce = Math.cos(el * DEG2RAD); const se = Math.sin(el * DEG2RAD);
-    const d = [hx * ce, se, hz * ce];
-    const r = {};
-    for (const q of ['low', 'medium', 'high', 'ultra']) { sky.setQuality(q); r[q] = sample(d, 1.5); }
-    sky.setQuality('high');
-    note(`elev ${el}deg toward the sun: ` + Object.entries(r).map(([k, v]) => `${k}=${v[1].toFixed(4)}`).join(' ') +
-      ` (4/6/8/10 steps; ultra-vs-low ${(((r.ultra[1] - r.low[1]) / r.ultra[1]) * 100).toFixed(1)}%)`);
+  const hours = [7, 8, 10, 12, 14, 16, 17, 17.5, 18, 18.3, 19, 21, 0.5, 3];
+  note('--- fogColor (CPU) vs the same weighted azimuth average read off the GPU, per tier ---');
+  let worst = 0; let worstAt = '';
+  for (const q of ['low', 'medium', 'high', 'ultra']) {
+    sky.setQuality(q);
+    let tierWorst = 0; let tierAt = 0;
+    for (const h of hours) {
+      sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+      const g = gpuFog(); const f = sky.fogColor;
+      const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - f[i]) / Math.max(1e-5, f[i])));
+      if (rel > tierWorst) { tierWorst = rel; tierAt = h; }
+    }
+    note(`tier ${q}: worst fog CPU/GPU error ${(tierWorst * 100).toFixed(1)}% at h=${tierAt}`);
+    if (tierWorst > worst) { worst = tierWorst; worstAt = q + ' h=' + tierAt; }
+  }
+  if (worst > 0.08) bad(`fogColor does not match the sky shader (worst ${(worst * 100).toFixed(1)}% on ${worstAt})`);
+
+  note('--- zenithColor (CPU) vs GPU straight up, per tier ---');
+  for (const q of ['low', 'medium', 'high', 'ultra']) {
+    sky.setQuality(q);
+    let mx = 0; let at = 0;
+    for (const h of [8, 12, 17.5, 18.3, 0.5]) {
+      sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+      const g = sample([0, 1, 0]); const z = sky.zenithColor;
+      const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - z[i]) / Math.max(1e-5, z[i])));
+      if (rel > mx) { mx = rel; at = h; }
+    }
+    note(`tier ${q}: worst zenith CPU/GPU error ${(mx * 100).toFixed(1)}% at h=${at}`);
+    if (mx > 0.08) bad(`zenithColor does not match the sky shader on ${q} (${(mx * 100).toFixed(1)}%)`);
   }
 
-  note('--- azimuth seam scan with clouds + stars disabled ---');
+  note('--- brightness agreement between quality tiers (the player must not see a jump) ---');
+  let tierWorst = 0; let tierWhere = '';
+  for (const h of [8, 12, 17.5, 18.3]) {
+    for (const el of [2.58, 6, 20, 89]) {
+      sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+      const st = sky.sunDirectionTrue;
+      let hx = st[0]; let hz = st[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
+      const d = [hx * Math.cos(el * DEG2RAD), Math.sin(el * DEG2RAD), hz * Math.cos(el * DEG2RAD)];
+      const r = {};
+      for (const q of ['low', 'medium', 'high', 'ultra']) { sky.setQuality(q); sky.update(0, 0); quiet(); r[q] = sample(d)[1]; }
+      const spread = (Math.max(...Object.values(r)) - Math.min(...Object.values(r))) / Math.max(...Object.values(r));
+      if (spread > tierWorst) { tierWorst = spread; tierWhere = `h=${h} elev=${el}`; }
+      if (h === 17.5) {
+        note(`h=${h} elev=${el}: ` + Object.entries(r).map(([k, v]) => `${k}=${v.toFixed(4)}`).join(' ') +
+          ` spread ${(spread * 100).toFixed(1)}%`);
+      }
+    }
+  }
+  note(`worst low..ultra brightness spread: ${(tierWorst * 100).toFixed(1)}% at ${tierWhere}`);
+  if (tierWorst > 0.10) bad(`the sky changes brightness by ${(tierWorst * 100).toFixed(0)}% across quality tiers (${tierWhere})`);
+  sky.setQuality('high');
+
+  note('--- azimuth continuity of the clear sky (clouds compiled out) ---');
   for (const [h, el] of [[12, 15], [12, 40], [0.5, 30], [18.2, 10]]) {
-    sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+    sky.setTimeOfDay(h); sky.update(0, 0); sky.starIntensity = 0;
     const N = 144; const vals = [];
     for (let i = 0; i < N; i++) {
       const a = (i / N) * Math.PI * 2; const ce = Math.cos(el * DEG2RAD);
       const s = sample([Math.sin(a) * ce, Math.sin(el * DEG2RAD), -Math.cos(a) * ce], 1.2);
       vals.push((s[0] + s[1] + s[2]) / 3);
     }
-    let mx = 0; let at = 0; let sum = 0;
+    let mx = 0; let at = 0;
     for (let i = 0; i < N; i++) {
       const j = Math.abs(vals[i] - vals[(i + 1) % N]) / Math.max(1e-6, (vals[i] + vals[(i + 1) % N]) * 0.5);
-      sum += j; if (j > mx) { mx = j; at = i; }
+      if (j > mx) { mx = j; at = i; }
     }
-    note(`h=${h} elev=${el}: max neighbour jump ${(mx * 100).toFixed(2)}% @az${(at / N * 360).toFixed(0)}deg, mean ${(sum / N * 100).toFixed(3)}%`);
-    if (mx > 0.08) bad(`azimuth discontinuity in the clear sky at h=${h} elev=${el} (${(mx * 100).toFixed(1)}%)`);
+    note(`h=${h} elev=${el}: max neighbour jump ${(mx * 100).toFixed(2)}% @az${(at / N * 360).toFixed(0)}deg`);
+    if (mx > 0.03) bad(`azimuth discontinuity in the clear sky at h=${h} elev=${el} (${(mx * 100).toFixed(1)}%)`);
   }
 
-  note('--- below/above horizon step (ground stand-in vs fog) ---');
+  note('--- horizon: sky below vs above, against fogColor ---');
   for (const h of [12, 18.2, 0.5]) {
-    sky.setTimeOfDay(h); sky.update(0, 0); quiet();
+    sky.setTimeOfDay(h); sky.update(0, 0); sky.starIntensity = 0;
     const rows = [];
     for (const el of [-8, -4, -2, -1, -0.5, -0.2, 0.2, 0.5, 1, 2, 4]) {
       const s = sample([0, Math.sin(el * DEG2RAD), -Math.cos(el * DEG2RAD)], 1.2);
       rows.push([el, (s[0] + s[1] + s[2]) / 3]);
     }
     const f = sky.fogColor; const fm = (f[0] + f[1] + f[2]) / 3;
-    note(`h=${h} fogMean=${fm.toFixed(4)} | ` + rows.map(([e, v]) => `${e}:${v.toFixed(4)}`).join(' '));
     const below = rows.find((r) => r[0] === -0.5)[1];
     const above = rows.find((r) => r[0] === 0.2)[1];
-    note(`  step across the horizon: ${(Math.abs(above - below) / Math.max(above, below) * 100).toFixed(0)}% ; ` +
-      `ground-vs-fog at -4deg: ${((rows.find((r) => r[0] === -4)[1] - fm) / fm * 100).toFixed(0)}%`);
+    const far = rows.find((r) => r[0] === -4)[1];
+    note(`h=${h} fogMean=${fm.toFixed(4)} | ` + rows.map(([e, v]) => `${e}:${v.toFixed(4)}`).join(' '));
+    note(`  step across the horizon ${(Math.abs(above - below) / Math.max(above, below) * 100).toFixed(0)}% ; ` +
+      `sky-vs-fog just below the horizon ${((below - fm) / fm * 100).toFixed(0)}% ; at -4deg ${((far - fm) / fm * 100).toFixed(0)}%`);
+    // What the player actually sees at the horizon is the world's ground plane fogged to
+    // fogColor meeting the sky. The sky's own terrain strip must therefore land ON fogColor
+    // at the horizon and track the renderer's fog with distance below it.
+    if (Math.abs(below - fm) / fm > 0.06) {
+      bad(`the sky's terrain strip does not meet fogColor at the horizon at h=${h} (${((below - fm) / fm * 100).toFixed(0)}%)`);
+    }
   }
 
   sky.dispose(); RT.dispose();

@@ -21,10 +21,11 @@
  *    the real solar direction and is what the sky shader draws the disc from.
  *  - Every colour is linear HDR radiance in the same scale as the renderer's lighting, sized
  *    for an ACES tonemap at exposure ~1.0 (a sunlit white surface lands near 2.5).
- *  - `render()` draws into whatever framebuffer is bound, never touches the viewport, and
- *    draws with depth test LEQUAL and depth writes OFF. Every piece of state it touches
- *    (blend enable, depth func, depth mask, face culling) is restored before it returns, so
- *    it can be dropped anywhere in the frame graph.
+ *  - `render()` draws into whatever framebuffer is bound and never touches the viewport, the
+ *    framebuffer binding, the depth mask or the clear values. It hands back the blend and
+ *    face-culling enables exactly as it found them. The single piece of state it asserts is
+ *    `depthFunc(LEQUAL)`, which the frame graph already documents for the sky pass and which
+ *    the triangle (drawn on the far plane) cannot do without.
  */
 
 import { clamp, smoothstep, lerp, DEG2RAD, PI, mat4 } from '../core/math.js';
@@ -613,7 +614,7 @@ void main() {
     vec3 lit = sunT * uSunIrradiance * max(dot(gn, uSunDir), 0.0) * 0.318;
     col += uGroundAlbedo * (lit + uAmbientSky * 0.6 + uNightSky * 12.0 * uNightFactor) * viewT;
     // Aerial perspective with the same exponential the renderer fogs geometry with. Without
-    // it this strip is half as bright as `fogColor`, so the moment the city's ground plane
+    // it this strip is half as bright as the fog colour, so the moment the city ground plane
     // runs out you get a hard dark band hugging the horizon instead of a seamless dissolve.
     col = mix(col, uHorizonColor, 1.0 - exp(-tGround * uGroundFog));
   } else {
@@ -802,9 +803,11 @@ export class Sky {
     /**
      * Snapshot of every `params` entry that feeds `_recompute`, so editing a knob at runtime
      * takes effect even when the clock is frozen (`daySpeed = 0`, which is the default).
-     * @type {Float32Array}
+     * Float64, not Float32: a Float32Array would round every value it stores and so compare
+     * unequal to its own source on the very next frame, recomputing forever.
+     * @type {Float64Array}
      */
-    this._paramCache = new Float32Array(PARAM_KEYS.length + 3);
+    this._paramCache = new Float64Array(PARAM_KEYS.length + 3);
 
     this._watchParams();
     this._recompute();
@@ -916,10 +919,10 @@ export class Sky {
   }
 
   /**
-   * Draws the sky as a full-screen triangle into the currently bound framebuffer.
-   * Depth test LEQUAL with depth writes disabled, so existing geometry is never overwritten.
-   * The viewport, the framebuffer binding and every GL state this touches are left exactly
-   * as they were found.
+   * Draws the sky as a full-screen triangle into the currently bound framebuffer, on the far
+   * plane under `depthFunc(LEQUAL)`, so existing geometry is never overwritten. The viewport,
+   * the framebuffer binding and the depth mask are untouched; blend and face culling are
+   * restored to whatever they were on entry. `depthFunc` is left at LEQUAL.
    * @param {Object} camera Camera with `position`, `invProj`/`invView` (or `proj`/`view`) and `fov`.
    * @returns {void}
    */
@@ -989,23 +992,23 @@ export class Sky {
     shader.setVec2('uWindB', this._wind[2], this._wind[3]);
     shader.setFloat('uPixelAngle', this._pixelAngle(camera));
 
-    // The frame graph runs the sky in the middle of the renderer's own passes, so every bit
-    // of state touched here is put back exactly as it was found. These four queries are
-    // client-side cached in WebGL implementations and do not stall the pipeline.
+    // The frame graph drops this pass in the middle of the renderer's own passes, so it
+    // hands back every capability it flips. `isEnabled` is answered from the client-side
+    // state cache (measured at 0.2 us); `getParameter` is not (measured at ~180 us, a full
+    // synchronous round trip to the GPU process), so nothing here queries it.
     const hadBlend = gl.isEnabled(gl.BLEND);
     const hadCull = gl.isEnabled(gl.CULL_FACE);
-    const prevDepthFunc = gl.getParameter(gl.DEPTH_FUNC);
-    const prevDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
-
     if (hadBlend) gl.disable(gl.BLEND);
     if (hadCull) gl.disable(gl.CULL_FACE);
-    if (prevDepthFunc !== gl.LEQUAL) gl.depthFunc(gl.LEQUAL);
-    if (prevDepthMask) gl.depthMask(false);
 
+    // Depth: LEQUAL is required (the triangle sits exactly on the far plane, so LESS would
+    // reject it against a cleared buffer and paint a black sky) and is what the frame graph
+    // documents for this pass. The depth mask is deliberately left alone: the fragments that
+    // survive LEQUAL are the ones whose stored depth is already 1.0, so writing 1.0 back is
+    // a no-op whatever the mask says — clobbering it here is a state leak for no benefit.
+    gl.depthFunc(gl.LEQUAL);
     drawFullscreen(gl);
 
-    if (prevDepthMask) gl.depthMask(true);
-    if (prevDepthFunc !== gl.LEQUAL) gl.depthFunc(prevDepthFunc);
     if (hadCull) gl.enable(gl.CULL_FACE);
     if (hadBlend) gl.enable(gl.BLEND);
   }
