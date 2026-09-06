@@ -2632,14 +2632,16 @@ export class Character {
   }
 
   /**
-   * Cancels an active ragdoll and hands the body back to the animation system, cross-fading
-   * out of the pose the corpse is actually in and letting the toppled root stand back up over
-   * the next fraction of a second (no pop).
+   * Cancels an active ragdoll and hands the body back to the animation system: the root is
+   * upright at once, and the limbs cross-fade out of the pose the corpse had collapsed into
+   * rather than snapping to the new state.
    *
    * This is the counterpart to {@link Character#playRagdoll}. Without it a killed character
    * was a dead end: a respawned player stayed face-down for the rest of the session, and
    * `ped.js` / `police.js` had to drop every killed body on the floor instead of recycling it
-   * into their character pools.
+   * into their character pools. Callers normally teleport the body first (respawn point, pool
+   * reuse); `setState` also reaches this on its own once an owner has driven the character for
+   * a few consecutive frames.
    * @param {string} [state='idle'] State to wake up in.
    * @returns {void}
    */

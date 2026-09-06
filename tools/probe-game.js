@@ -239,6 +239,8 @@ export default async function run({ canvas }) {
     game.player.aiming = false;
     if (mode.includes('turn')) game.camera.yaw += Math.PI;
     if (mode.includes('nomark')) game.missions.submit = () => {};
+    if (mode.includes('night')) game.time.hours = 22.5;
+    if (mode.includes('dusk')) game.time.hours = 18.3;
     if (mode.includes('nopick')) game._submitPickups = () => {};
     if (mode.includes('move')) {
       const p = game.city.spawns.missionPoints[3] || game.city.spawns.missionPoints[0];
