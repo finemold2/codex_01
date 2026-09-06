@@ -129,6 +129,22 @@ export default async function run({ canvas }) {
   // anything else shows the HUD over the game.
   window.__shot = async (arg) => {
     const mode = String(arg || '');
+    if (mode.includes('menu')) {
+      game.menu.showMain();
+      dom.menuRoot.style.display = '';
+      game.hud.hide();
+      await new Promise((r) => setTimeout(r, 700));
+      game.render(1 / 60);
+      return;
+    }
+    if (mode.includes('settings')) {
+      game.menu.showSettings();
+      dom.menuRoot.style.display = '';
+      game.hud.hide();
+      await new Promise((r) => setTimeout(r, 700));
+      game.render(1 / 60);
+      return;
+    }
     if (mode.includes('map')) {
       game.mapScreen.show();
       for (let i = 0; i < 6; i++) { game.update(1 / 60); game.mapScreen.update(); }
