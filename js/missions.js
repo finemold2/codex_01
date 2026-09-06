@@ -1027,7 +1027,9 @@ export const MISSIONS = [
      */
     objectiveText(st) {
       if (st.phase === 'toCar') return `경주용 차량에 탑승 (${clockText(st.boardTime)})`;
-      return `체크포인트 ${Math.min(st.cp + 1, 8)}/8 · 순위 ${st.place}/4`;
+      const total = st.checkpoints.length;
+      const field = st.racers.length + 1;
+      return `체크포인트 ${Math.min(st.cp + 1, total)}/${total} · 순위 ${Math.min(st.place, field)}/${field}`;
     },
   },
 
@@ -1970,6 +1972,7 @@ export class MissionManager {
     this.active = { id, def, state };
     this.countdown = START_COUNTDOWN;
     this._lastObjective = '';
+    this._objectiveTimer = 0;
 
     if (def.wantedOnStart > 0 && game.police && typeof game.police.addWanted === 'function') {
       game.police.addWanted(def.wantedOnStart, `mission:${id}`);

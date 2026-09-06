@@ -455,13 +455,15 @@ export class PoliceSystem {
   }
 
   /**
-   * Removes a cruiser: stops its siren, releases its cops and returns the vehicle.
+   * Removes a cruiser: stops its siren, releases its cops and disposes of the vehicle.
    * @param {object} unit Unit record.
    * @param {boolean} [immediate=false] Also drop cops that are still alive.
+   * @param {boolean} [keepVehicle=false] Leave the vehicle in the world (the player took it,
+   *   or it is a wreck the traffic manager will stream out).
    * @returns {void}
    * @private
    */
-  _removeUnit(unit, immediate = false) {
+  _removeUnit(unit, immediate = false, keepVehicle = false) {
     if (!unit) return;
     const i = this.cars.indexOf(unit);
     if (i >= 0) this.cars.splice(i, 1);
@@ -473,8 +475,16 @@ export class PoliceSystem {
     unit.vehicle = null;
     if (v) {
       v.policeUnit = null;
-      if (typeof this.game.removeVehicle === 'function') {
-        try { this.game.removeVehicle(v); } catch (err) { /* already gone */ }
+      if (!keepVehicle) {
+        // Hand a wreck to the traffic streamer so it fades out with everything else, instead of
+        // vanishing the instant it stops burning.
+        const traffic = this.game.traffic;
+        const wrecks = traffic && Array.isArray(traffic.wrecks) ? traffic.wrecks : null;
+        if (v.isDestroyed && wrecks && wrecks.length < 24 && wrecks.indexOf(v) < 0) {
+          wrecks.push(v);
+        } else if (typeof this.game.removeVehicle === 'function') {
+          try { this.game.removeVehicle(v); } catch (err) { /* already gone */ }
+        }
       }
     }
     if (immediate) {
@@ -981,9 +991,15 @@ export class PoliceSystem {
         continue;
       }
       if (v.driver === player || v.isPlayer) {
-        // Player stole a cruiser: it is no longer ours.
+        // Player stole a cruiser: hand the car over rather than deleting it under him.
         this._bailOut(unit);
-        this._removeUnit(unit, false);
+        this._removeUnit(unit, false, true);
+        v.isPolice = true;
+        const traffic = game.traffic;
+        if (traffic && Array.isArray(traffic.orphans) && traffic.orphans.indexOf(v) < 0
+          && traffic.orphans.length < 24) {
+          traffic.orphans.push(v);
+        }
         this.reportCrime('carjack', v.position);
         continue;
       }
@@ -1115,8 +1131,8 @@ export class PoliceSystem {
       }
       steer = pursuitSteer(v, ix, iz);
       target = maxSpeed * (0.55 + plan.aggression * 0.45);
-      // Ramming: line up on the target and keep the power on.
-      if (plan.ram && dist < 16) {
+      // Ramming only makes sense against another vehicle; a suspect on foot is boxed in.
+      if (plan.ram && dist < 16 && player && player.vehicle) {
         unit.ramTimer += dt;
         target = maxSpeed * 0.8;
       } else {
@@ -1165,6 +1181,11 @@ export class PoliceSystem {
         if (bend > 0.5) target = Math.min(target, 14);
         else if (bend > 0.25) target = Math.min(target, 24);
       }
+    }
+
+    // Pull up short of a suspect on foot: the cruiser becomes cover and the crew gets out.
+    if (player && !player.vehicle && !player.dead && dist < 30) {
+      target = Math.min(target, Math.max(0, (dist - 8.5) * 0.85));
     }
 
     // Do not plough through the traffic in front.
@@ -1455,7 +1476,22 @@ export class PoliceSystem {
       const los = this._lineOfSight(cop.position[0], cop.position[1] + 1.5, cop.position[2],
         px, fin(player.position[1], 0) + 1.1, pz);
 
-      if (cop.reloadTimer > 0) {
+      // Arrest: a suspect who has stopped running (and is not putting up a fight at maximum
+      // heat) gets closed on and cuffed instead of shot. This is what feeds the busted timer.
+      const pSpeed = Math.hypot(fin(player.velocity ? player.velocity[0] : 0, 0),
+        fin(player.velocity ? player.velocity[2] : 0, 0));
+      const hurt = fin(player.health, 100) < fin(player.maxHealth, 100) * 0.35;
+      const arrest = pSpeed < 1.3 && dist < 18 && (this.wanted <= 3 || hurt);
+
+      if (arrest) {
+        cop.state = 'arrest';
+        cop.hasCover = false;
+        if (dist > 1.7) {
+          moveX = dx / l;
+          moveZ = dz / l;
+          desired = COP_SPEED * (dist > 6 ? 0.95 : 0.55);
+        }
+      } else if (cop.reloadTimer > 0) {
         cop.state = 'reload';
         // Back off a little while reloading.
         if (dist < COP_RANGE * 0.8) { moveX = -dx / l; moveZ = -dz / l; desired = COP_SPEED * 0.6; }
@@ -1723,7 +1759,7 @@ export class PoliceSystem {
     if (!cop.dead) {
       let state = 'idle';
       if (cop.state === 'reload') state = 'reload';
-      else if (cop.state === 'fire') state = 'aim';
+      else if (cop.state === 'fire' || cop.state === 'arrest') state = 'aim';
       else if (speed > 5.4) state = 'sprint';
       else if (speed > 2.8) state = 'run';
       else if (speed > 0.28) state = 'walk';
@@ -1732,7 +1768,7 @@ export class PoliceSystem {
     }
     _ctx.moveSpeed = speed;
     _ctx.grounded = cop.grounded;
-    _ctx.aiming = cop.state === 'fire' || cop.state === 'cover';
+    _ctx.aiming = cop.state === 'fire' || cop.state === 'cover' || cop.state === 'arrest';
     _ctx.aimPitch = 0;
     _ctx.crouching = cop.state === 'cover';
     _ctx.lookYaw = 0;
@@ -1874,15 +1910,23 @@ export class PoliceSystem {
     const speed = Math.hypot(fin(player.velocity ? player.velocity[0] : 0, 0),
       fin(player.velocity ? player.velocity[2] : 0, 0));
     let close = 0;
+    let arresting = 0;
+    let alive = 0;
     for (let i = 0; i < this.cops.length; i++) {
       const cop = this.cops[i];
       if (cop.dead) continue;
+      alive++;
       const dx = cop.position[0] - px;
       const dz = cop.position[2] - pz;
-      if (dx * dx + dz * dz < BUST_RADIUS * BUST_RADIUS) close++;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < BUST_RADIUS * BUST_RADIUS) {
+        close++;
+        if (cop.state === 'arrest' && d2 < 9) arresting++;
+      }
     }
     const hurt = fin(player.health, 100) < fin(player.maxHealth, 100) * 0.3;
-    const surrounded = close >= 2 || (close >= 1 && hurt);
+    const surrounded = close >= 2 || (close >= 1 && hurt)
+      || (arresting >= 1 && alive === 1);
     if (surrounded && speed < BUST_SPEED) {
       this._bustTimer += dt;
       if (this._bustTimer >= BUST_TIME) this.bustPlayer();

@@ -1186,8 +1186,10 @@ export class HUD {
     } else {
       setText(this._e.wmag, String(mag));
       setText(this._e.wres, reserve >= 0 ? `/ ${reserve}` : '');
+      // Thrown/single-shot weapons (grenades) have a magazine of 1, so the ratio rule would
+      // keep the warning permanently lit — only real magazines get a low-ammo banner.
       const capacity = this._magCapacity(key, mag);
-      const low = mag <= Math.max(1, Math.ceil(capacity * 0.25)) && mag >= 0;
+      const low = capacity >= 4 && mag <= Math.max(1, Math.ceil(capacity * 0.25));
       setClass(this._e.lowammo, 'on', low && !inCar);
       setClass(this._e.wmag, 'low', low);
     }

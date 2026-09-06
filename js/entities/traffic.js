@@ -649,6 +649,8 @@ export class TrafficManager {
     this.vehicles = [];
     /** @type {object[]} Destroyed cars this manager spawned, kept until they stream out. */
     this.wrecks = [];
+    /** @type {object[]} Cars this manager spawned that lost their driver (jacked / abandoned). */
+    this.orphans = [];
     /** @type {number} Hard cap on live AI cars. */
     this.maxVehicles = MAX_VEHICLES;
     /** @type {boolean} Set false to freeze streaming (used by missions / cut-scenes). */
@@ -1086,6 +1088,12 @@ export class TrafficManager {
     if (vehicle) {
       vehicle.ai = null;
       vehicle.isTraffic = false;
+      // Keep owning the abandoned shell so it streams out instead of piling up in the world.
+      if (this.orphans.indexOf(vehicle) < 0) {
+        if (this.orphans.length < 24) this.orphans.push(vehicle);
+        else this._releaseVehicle(this.orphans.shift(), false);
+        if (this.orphans.indexOf(vehicle) < 0) this.orphans.push(vehicle);
+      }
     }
     if (!rec) return;
     // Drop the driver out of the door and let the ped manager panic it.
@@ -1195,17 +1203,36 @@ export class TrafficManager {
       if (dx * dx + dz * dz > far2) { this._dropIndex(i, false); continue; }
     }
 
-    // --- wrecks ---------------------------------------------------------------------
+    // --- wrecks and abandoned cars ----------------------------------------------------
     const wreckFar = WRECK_DIST * WRECK_DIST;
+    const playerVehicle = this.game.player ? this.game.player.vehicle : null;
     for (let i = this.wrecks.length - 1; i >= 0; i--) {
       const v = this.wrecks[i];
       if (!v || !v.position) { this.wrecks.splice(i, 1); continue; }
-      if (v === (this.game.player && this.game.player.vehicle)) { this.wrecks.splice(i, 1); continue; }
+      if (v === playerVehicle) { this.wrecks.splice(i, 1); continue; }
       const dx = v.position[0] - px;
       const dz = v.position[2] - pz;
       if (dx * dx + dz * dz > wreckFar) {
         this.wrecks.splice(i, 1);
         this._releaseVehicle(v, true);
+      }
+    }
+    for (let i = this.orphans.length - 1; i >= 0; i--) {
+      const v = this.orphans[i];
+      if (!v || !v.position) { this.orphans.splice(i, 1); continue; }
+      if (v === playerVehicle) continue;
+      if (v.isDestroyed) {
+        this.orphans.splice(i, 1);
+        if (this.wrecks.length < 24) this.wrecks.push(v);
+        else this._releaseVehicle(v, true);
+        continue;
+      }
+      const dx = v.position[0] - px;
+      const dz = v.position[2] - pz;
+      if (dx * dx + dz * dz > wreckFar) {
+        this.orphans.splice(i, 1);
+        // Police cruisers are not part of the civilian mix, so never pool one.
+        this._releaseVehicle(v, !!v.isPolice);
       }
     }
 
@@ -1536,6 +1563,8 @@ export class TrafficManager {
     for (let i = this.vehicles.length - 1; i >= 0; i--) this._dropIndex(i, true);
     for (let i = this.wrecks.length - 1; i >= 0; i--) this._releaseVehicle(this.wrecks[i], true);
     this.wrecks.length = 0;
+    for (let i = this.orphans.length - 1; i >= 0; i--) this._releaseVehicle(this.orphans[i], true);
+    this.orphans.length = 0;
     this._pool.forEach((pool) => {
       for (let i = 0; i < pool.length; i++) {
         if (typeof this.game.removeVehicle === 'function') {

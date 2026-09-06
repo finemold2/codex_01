@@ -131,7 +131,8 @@ const TYPE_DEFS = {
     length: 4.52, width: 1.84, height: 1.45, wheelBase: 2.70, track: 1.56,
     wheelRadius: 0.34, wheelWidth: 0.22, restLength: 0.24, travel: 0.19,
     seats: 4, sirens: false, price: 14000,
-    colorOptions: ['white', 'silver', 'grey', 'black', 'red', 'blue', 'navy', 'teal', 'beige', 'wine']
+    colorOptions: ['white', 'silver', 'grey', 'black', 'red', 'blue', 'navy', 'teal', 'beige',
+      'wine']
   },
   sports: {
     name: 'Sports', nameKo: '스포츠카', shape: 'car',
@@ -142,7 +143,8 @@ const TYPE_DEFS = {
     length: 4.42, width: 1.94, height: 1.21, wheelBase: 2.62, track: 1.68,
     wheelRadius: 0.33, wheelWidth: 0.28, restLength: 0.17, travel: 0.13,
     seats: 2, sirens: false, price: 145000,
-    colorOptions: ['red', 'yellow', 'black', 'white', 'silver', 'orange', 'skyBlue', 'purple', 'green']
+    colorOptions: ['red', 'yellow', 'black', 'white', 'silver', 'orange', 'skyBlue', 'purple',
+      'green']
   },
   suv: {
     name: 'SUV', nameKo: 'SUV', shape: 'wagon',
@@ -660,7 +662,7 @@ function addCarDetails(L, S) {
     putPair(L.chrome, box(0.03, 0.035, 0.14), hw - 0.005, beltY - 0.14, 0.85, { color: C_CHROME });
   }
 
-  /* --- exhaust ------------------------------------------------------------------------------ */
+  /* --- exhaust ---------------------------------------------------------------------------- */
   const exX = hw * 0.55;
   put(L.chrome, cylinder(0.048, 0.052, 0.18, 8, true), exX, ground + 0.14, zRear - 0.06,
     { rx: Math.PI * 0.5, color: C_CHROME });
@@ -669,7 +671,7 @@ function addCarDetails(L, S) {
       { rx: Math.PI * 0.5, color: C_CHROME });
   }
 
-  /* --- interior ------------------------------------------------------------------------------- */
+  /* --- interior --------------------------------------------------------------------------- */
   const seatY = ground + S.height * 0.36;
   const seatBackY = seatY + 0.30;
   const seatX = w * 0.24;
@@ -754,9 +756,9 @@ function buildCarBody(t, k) {
   put(L.paint, box(w * 0.92, sillY - ground - 0.06, bodyLen * 0.9),
     0, (ground + 0.06 + sillY) * 0.5, 0, { color: C_WHITE });
 
-  /* --- bonnet ------------------------------------------------------------------------------- */
+  /* --- bonnet ----------------------------------------------------------------------------- */
   const hoodLen = cabinFrontZ - zFront;
-  const noseDrop = S.height * k.noseDrop;
+  const noseDrop = S.height * (k.noseDrop === undefined ? 0.05 : k.noseDrop);
   put(L.paint, roundedBox(w * 0.95, 0.13, hoodLen * 0.98, 0.05, 2),
     0, beltY - 0.03 - noseDrop * 0.5, zFront + hoodLen * 0.5,
     { rx: -Math.atan2(noseDrop, hoodLen), color: C_WHITE });
@@ -764,7 +766,7 @@ function buildCarBody(t, k) {
   putPair(L.paint, roundedBox(0.16, 0.20, hoodLen * 0.9, 0.06, 2),
     hw - 0.07, beltY - 0.09, zFront + hoodLen * 0.5, { color: C_WHITE });
 
-  /* --- boot / tail ----------------------------------------------------------------------------- */
+  /* --- boot / tail ------------------------------------------------------------------------ */
   if (S.hasBoot) {
     const bootLen = zRear - cabinRearZ;
     put(L.paint, roundedBox(w * 0.95, 0.14, bootLen * 0.98, 0.05, 2),
@@ -777,7 +779,7 @@ function buildCarBody(t, k) {
     }
   }
 
-  /* --- cabin ------------------------------------------------------------------------------------ */
+  /* --- cabin ------------------------------------------------------------------------------ */
   const cw = w - S.cabinInset * 2;
   const roofFrontZ = cabinFrontZ + S.wsRun;
   const roofRearZ = cabinRearZ - S.bsRun;
@@ -803,7 +805,7 @@ function buildCarBody(t, k) {
   putPair(L.trim, box(0.05, 0.035, Math.max(0.2, roofRearZ - roofFrontZ)), (cw - 0.05) * 0.5,
     roofY - 0.03, (roofFrontZ + roofRearZ) * 0.5, { color: C_DARK });
 
-  /* --- glass -------------------------------------------------------------------------------------- */
+  /* --- glass ------------------------------------------------------------------------------ */
   putPanel(L.glass, cw - 0.10, 0.035, 0, beltY + 0.01, cabinFrontZ, roofY - 0.06, roofFrontZ,
     C_WHITE);
   putPanel(L.glass, cw - 0.12, 0.035, 0, beltY + 0.01, cabinRearZ, roofY - 0.06, roofRearZ,
@@ -813,7 +815,7 @@ function buildCarBody(t, k) {
   putPair(L.glass, box(0.03, roofY - beltY - 0.12, sideLen), (cw - 0.02) * 0.5,
     (beltY + roofY) * 0.5 - 0.02, sideZ, { color: C_WHITE });
 
-  /* --- wheel arches -------------------------------------------------------------------------------- */
+  /* --- wheel arches ----------------------------------------------------------------------- */
   const archR = t.wheelRadius * 1.20;
   const arch = torus(archR, 0.055, 5, 12);
   putPair(L.paint, arch, hw - 0.03, ground + t.wheelRadius, S.axleF,
@@ -960,11 +962,16 @@ function buildTruckBody(t) {
   const bedFloorY = frameY + 0.20;
   put(L.paint, box(w * 0.98, 0.10, zRear - bedFrontZ), 0, bedFloorY, (bedFrontZ + zRear) * 0.5,
     { color: C_WHITE });
-  putPair(L.paint, box(0.08, 0.66, zRear - bedFrontZ), hw - 0.04, bedFloorY + 0.36,
+  putPair(L.paint, box(0.08, 0.98, zRear - bedFrontZ), hw - 0.04, bedFloorY + 0.52,
     (bedFrontZ + zRear) * 0.5, { color: C_WHITE });
-  put(L.paint, box(w * 0.98, 0.66, 0.08), 0, bedFloorY + 0.36, zRear - 0.04, { color: C_WHITE });
-  put(L.paint, box(w * 0.98, 0.90, 0.08), 0, bedFloorY + 0.48, bedFrontZ + 0.04,
+  put(L.paint, box(w * 0.98, 0.98, 0.08), 0, bedFloorY + 0.52, zRear - 0.04, { color: C_WHITE });
+  put(L.paint, box(w * 0.98, 1.30, 0.08), 0, bedFloorY + 0.68, bedFrontZ + 0.04,
     { color: C_WHITE });
+  // Side stake pockets break up the long flank.
+  for (let i = 0; i < 4; i++) {
+    const z = bedFrontZ + 0.5 + i * ((zRear - bedFrontZ - 1.0) / 3);
+    putPair(L.trim, box(0.05, 1.02, 0.10), hw - 0.02, bedFloorY + 0.52, z, { color: C_DARK });
+  }
   // Mud flaps.
   putPair(L.trim, box(0.30, 0.34, 0.03), w * 0.34, ground + 0.20, zRear - 0.10, { color: C_DARK });
 
@@ -1117,6 +1124,11 @@ function buildBikeBody(t) {
     { color: C_STEEL });
   putPair(L.chrome, cylinder(0.028, 0.028, 0.62, 8, true), 0.12,
     ground + t.wheelRadius + 0.30, axleF + 0.06, { rx: -0.42, color: C_CHROME });
+  // Bubble screen over the nose fairing.
+  putPanel(L.glass, 0.30, 0.03, 0, frameY + 0.46, zFront + 0.20, frameY + 0.68, zFront + 0.40,
+    C_WHITE);
+  put(L.paint, box(0.34, 0.05, 0.14), 0, frameY + 0.44, zFront + 0.19,
+    { rx: -0.6, color: C_WHITE });
   // Handlebars and mirrors.
   put(L.trim, box(0.58, 0.035, 0.035), 0, frameY + 0.58, zFront + 0.22, { color: C_DARK });
   putPair(L.chrome, box(0.03, 0.08, 0.12), 0.28, frameY + 0.66, zFront + 0.20,
@@ -1619,6 +1631,9 @@ const _pdir = [0, 0, 0];
 const _popt = { power: 1, velocity: _pvel };
 const _poptDir = { power: 1, spread: 0.5, dir: _pdir };
 const _poptPower = { power: 1 };
+/** Reused renderer submit options: drawing must never allocate either. */
+const _sopt = { tint: null, emissiveBoost: 1 };
+const _soptCone = { tint: null, castShadow: false };
 /** Shared per-vehicle spawn counter, used only to seed deterministic colour picks. */
 let _spawnSeq = 0;
 
@@ -1796,6 +1811,10 @@ export class Vehicle {
     this._safeYaw = this.yaw;
     this._groundY = new Float32Array(4);
     this._groundValid = false;
+    this._gsX = this.position[0];
+    this._gsY = this.position[1];
+    this._gsZ = this.position[2];
+    this._gsYaw = this.yaw;
     this._prevX = this.position[0];
     this._prevY = this.position[1];
     this._prevZ = this.position[2];
@@ -1932,6 +1951,26 @@ export class Vehicle {
       return;
     }
     if (!force && !this._groundValid) return;
+    // A car that has barely moved since the last sample keeps the cached column heights.
+    // Most of the fleet is parked or crawling, so this removes the bulk of the world queries.
+    if (this._groundValid) {
+      const mdx = this.position[0] - this._gsX;
+      const mdz = this.position[2] - this._gsZ;
+      const mdy = this.position[1] - this._gsY;
+      if (mdx * mdx + mdz * mdz < 0.0144 && mdy < 0.12 && mdy > -0.12 &&
+        Math.abs(wrapAngle(this.yaw - this._gsYaw)) < 0.025) {
+        for (let i = 0; i < 4; i++) {
+          const w = this.wheels[i];
+          w.worldX = this.position[0] + w.localX * c + w.localZ * s;
+          w.worldZ = this.position[2] - w.localX * s + w.localZ * c;
+        }
+        return;
+      }
+    }
+    this._gsX = this.position[0];
+    this._gsY = this.position[1];
+    this._gsZ = this.position[2];
+    this._gsYaw = this.yaw;
     for (let i = 0; i < 4; i++) {
       const w = this.wheels[i];
       // Local (x, z) rotated into world: right = (c, -s), forward = (-s, -c).
@@ -2047,13 +2086,13 @@ export class Vehicle {
     this.airborne = contacts === 0;
     this._contacts = contacts;
 
-    // --- vertical integration ---------------------------------------------------------------------
+    // --- vertical integration ----------------------------------------------------------------
     let vy = this.velocity[1] + (sumN / mass - GRAVITY) * h;
     if (vy < -70) vy = -70;
     if (vy > 70) vy = 70;
     this.velocity[1] = vy;
 
-    // --- load distribution with weight transfer -----------------------------------------------------
+    // --- load distribution with weight transfer ----------------------------------------------
     const downforce = 0.5 * AIR_DENSITY * t.clA * speedAbs * speedAbs;
     const weight = mass * GRAVITY + downforce;
     const dLong = mass * this._accelLong * t.comHeight / t.wheelBase;
@@ -2066,6 +2105,8 @@ export class Vehicle {
     const wFR = this.wheels[WHEEL_FR];
     const wRL = this.wheels[WHEEL_RL];
     const wRR = this.wheels[WHEEL_RR];
+    // Half of the textbook lateral transfer is applied to each side pair: the softer response
+    // still changes the handling under cornering but keeps an arcade car forgiving.
     wFL.load = Math.max(0, frontTotal * 0.5 + dLat * 0.25) * (wFL.contact ? 1 : 0);
     wFR.load = Math.max(0, frontTotal * 0.5 - dLat * 0.25) * (wFR.contact ? 1 : 0);
     wRL.load = Math.max(0, rearTotal * 0.5 + dLat * 0.25) * (wRL.contact ? 1 : 0);
@@ -2073,7 +2114,7 @@ export class Vehicle {
     const loadF = wFL.load + wFR.load;
     const loadR = wRL.load + wRR.load;
 
-    // --- gearbox and engine ---------------------------------------------------------------------------
+    // --- gearbox and engine ------------------------------------------------------------------
     this._shiftTimer = Math.max(0, this._shiftTimer - h);
     const ratio = this.gear === -1 ? -t.reverseRatio
       : this.gear > 0 ? t.gearRatios[this.gear - 1] : 0;
@@ -2115,14 +2156,14 @@ export class Vehicle {
     }
     this.engineLoad = clamp(this._drive * 0.75 + Math.abs(driveForce) / (mass * 22), 0, 1);
 
-    // --- brakes --------------------------------------------------------------------------------------
+    // --- brakes ------------------------------------------------------------------------------
     const uSign = u > 0.02 ? 1 : u < -0.02 ? -1 : 0;
     const handbrake = this._inHandbrake && !this.isDestroyed;
     let brakeF = -uSign * t.brakeForce * 0.60 * this._inBrake;
     let brakeR = -uSign * t.brakeForce * 0.40 * this._inBrake;
     if (handbrake) brakeR += -uSign * t.brakeForce * 0.55;
 
-    // --- drive split ------------------------------------------------------------------------------------
+    // --- drive split -------------------------------------------------------------------------
     let driveF = 0;
     let driveR = 0;
     if (t.drive === 'fwd') driveF = driveForce;
@@ -2131,7 +2172,7 @@ export class Vehicle {
     driveF += engineBrake * 0.5;
     driveR += engineBrake * 0.5;
 
-    // --- tyre forces ---------------------------------------------------------------------------------------
+    // --- tyre forces -------------------------------------------------------------------------
     const muBase = t.grip;
     const muF = muBase;
     let muR = muBase;
@@ -2182,13 +2223,13 @@ export class Vehicle {
     const bodyLongR = flongR;
     const bodyLatR = fyR;
 
-    // --- resistance ------------------------------------------------------------------------------------------
+    // --- resistance --------------------------------------------------------------------------
     const drag = 0.5 * AIR_DENSITY * t.cdA * u * Math.abs(u);
     const roll = CRR * (loadF + loadR) * uSign;
     const totalLong = bodyLongF + bodyLongR - drag - roll;
     const totalLat = bodyLatF + bodyLatR;
 
-    // --- yaw ---------------------------------------------------------------------------------------------------
+    // --- yaw ---------------------------------------------------------------------------------
     let mz = -this._a * bodyLatF + this._b * bodyLatR;
     mz -= this.yawRate * t.yawInertia * YAW_DAMP;
     let yawAcc = mz / t.yawInertia;
@@ -2209,7 +2250,7 @@ export class Vehicle {
     this.yawRate = yawRate;
     this.yaw = wrapAngle(this.yaw + yawRate * h);
 
-    // --- linear integration ---------------------------------------------------------------------------------------
+    // --- linear integration ------------------------------------------------------------------
     const aLong = contacts > 0 ? totalLong / mass : (-drag / mass);
     const aLat = contacts > 0 ? totalLat / mass : 0;
     this._accelLong = damp(this._accelLong, aLong, 22, h);
@@ -2245,7 +2286,7 @@ export class Vehicle {
     this.position[1] += this.velocity[1] * h;
     this.position[2] += this.velocity[2] * h;
 
-    // --- ground floor: the body can never sink through the road ---------------------------------------------------
+    // --- ground floor: the body can never sink through the road ------------------------------
     let floor = -Infinity;
     for (let i = 0; i < 4; i++) if (this._groundY[i] > floor) floor = this._groundY[i];
     if (Number.isFinite(floor)) {
@@ -2259,7 +2300,7 @@ export class Vehicle {
     this.forwardSpeed = u;
     this.lateralSpeed = vlat;
 
-    // --- drift bookkeeping -----------------------------------------------------------------------------------------
+    // --- drift bookkeeping -------------------------------------------------------------------
     const rearSlip = Math.abs(alphaR) / PEAK_SLIP;
     const slipping = Math.max(rearSlip - 1, 0) + slipDriveR * 1.4 + slipDriveF * 0.5;
     this.driftAmount = clamp(slipping * 0.55, 0, 1);
@@ -2277,7 +2318,7 @@ export class Vehicle {
     wRL.locked = handbrake || (this._inBrake > 0.85 && skidR > 0.4);
     wRR.locked = wRL.locked;
 
-    // --- wheel spin ---------------------------------------------------------------------------------------------------
+    // --- wheel spin --------------------------------------------------------------------------
     for (let i = 0; i < 4; i++) {
       const w = this.wheels[i];
       let omega = u / t.wheelRadius;
@@ -2294,7 +2335,7 @@ export class Vehicle {
       w.steerAngle = w.front ? sigma : 0;
     }
 
-    // --- NaN guard -------------------------------------------------------------------------------------------------------
+    // --- NaN guard ---------------------------------------------------------------------------
     if (!Number.isFinite(this.position[0]) || !Number.isFinite(this.position[1]) ||
       !Number.isFinite(this.position[2]) || !Number.isFinite(this.yaw) ||
       !Number.isFinite(this.velocity[0]) || !Number.isFinite(this.velocity[1]) ||
@@ -2769,8 +2810,8 @@ export class Vehicle {
     const g = this.game;
     const night = g && typeof g.isNight === 'function' ? g.isNight() : false;
     if (!this._lightsForced) {
-      this.lights.head = !this.isDestroyed && this.engineOn &&
-        (night || (g && g.weather && g.weather.rain > 0.3));
+      const wet = !!(g && g.weather && g.weather.rain > 0.3);
+      this.lights.head = !this.isDestroyed && this.engineOn && (night || wet);
       this.lights.brake = !this.isDestroyed &&
         (this._inBrake > 0.05 || (this._inHandbrake && this.speedMs > 0.4));
       this.lights.reverse = !this.isDestroyed && this.gear === -1 && this._drive > 0.03;
@@ -2779,7 +2820,7 @@ export class Vehicle {
     this._sirenPhase += dt * 3.1;
     if (this._sirenPhase > 1e6) this._sirenPhase = 0;
 
-    // --- destruction fuse ---------------------------------------------------------------------------
+    // --- destruction fuse --------------------------------------------------------------------
     if (this._fuse > 0) {
       this._fuse -= dt;
       if (this._fuse <= 0) this.explode();
@@ -2835,7 +2876,7 @@ export class Vehicle {
       }
     }
 
-    // --- exhaust puffs on hard throttle -----------------------------------------------------------
+    // --- exhaust puffs on hard throttle ------------------------------------------------------
     if (near < 48 && this.engineOn && !this.isDestroyed && this._drive > 0.55 &&
       this.rpm > t.redline * 0.42) {
       this._exhaustAccum += dt * (6 + this._drive * 10);
@@ -2855,7 +2896,7 @@ export class Vehicle {
       }
     }
 
-    // --- damage smoke and fire ----------------------------------------------------------------------
+    // --- damage smoke and fire ---------------------------------------------------------------
     if ((this._smoking || this._burning) && near < 160) {
       this._smokeAccum += dt * (this._burning ? 26 : 9);
       const a = this.model ? this.model.lampLocal.bonnet : null;
@@ -3118,8 +3159,9 @@ export class Vehicle {
 
     if (detail === 0) {
       if (model.lodMesh || model.lod) {
-        renderer.submit(model.lodMesh || model.lod, this.assets.materials.paint, body,
-          { tint: _tint });
+        _sopt.tint = _tint;
+        _sopt.emissiveBoost = 1;
+        renderer.submit(model.lodMesh || model.lod, this.assets.materials.paint, body, _sopt);
       }
     } else {
       for (let i = 0; i < model.parts.length; i++) {
@@ -3130,8 +3172,9 @@ export class Vehicle {
           boost = this._lampBoost(p.id);
           if (boost <= 0.001) continue;
         }
-        renderer.submit(p.mesh || p.geometry, p.material, body,
-          { tint: p.tinted ? _tint : _tint2, emissiveBoost: boost });
+        _sopt.tint = p.tinted ? _tint : _tint2;
+        _sopt.emissiveBoost = boost;
+        renderer.submit(p.mesh || p.geometry, p.material, body, _sopt);
       }
     }
 
@@ -3208,7 +3251,9 @@ export class Vehicle {
       mat4.rotateY(_m2, _m2, this.yaw - w.steerAngle);
       mat4.rotateX(_m2, _m2, w.spin);
       mat4.scale(_m2, _m2, t.wheelWidth, t.wheelRadius, t.wheelRadius);
-      renderer.submit(mesh, src.material, _m2, { tint: _tint2 });
+      _sopt.tint = _tint2;
+      _sopt.emissiveBoost = 1;
+      renderer.submit(mesh, src.material, _m2, _sopt);
     }
   }
 
@@ -3255,8 +3300,8 @@ export class Vehicle {
           _m2[14] = _v[2];
           mat4.rotateY(_m2, _m2, this.yaw);
           mat4.rotateX(_m2, _m2, -0.11);
-          renderer.submit(this.model.coneMesh, this.assets.materials.cone, _m2,
-            { tint: _coneTint, castShadow: false });
+          _soptCone.tint = _coneTint;
+          renderer.submit(this.model.coneMesh, this.assets.materials.cone, _m2, _soptCone);
         }
       }
     }

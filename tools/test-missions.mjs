@@ -495,6 +495,17 @@ function makeGame(opts = {}) {
 
   game.weapons = new WeaponSystem(game);
   game.missions = new MissionManager(game);
+
+  // Mirror ui/hud.js's own `missionEnded` wiring verbatim, so the payload missions.js emits is
+  // tested against the code that actually consumes it.
+  game.on('missionEnded', (payload) => {
+    game.hud.setMissionText(null, null);
+    if (payload && payload.success === true) {
+      game.hud.showMissionResult(true, payload.name || payload.nameKo || '');
+    } else if (payload && payload.success === false) {
+      game.hud.showMissionResult(false, payload.reason || '');
+    }
+  });
   return game;
 }
 
@@ -834,6 +845,24 @@ for (const def of MISSIONS) {
   if (g.missions.active) g.missions.abort();
 }
 
+section('missions — escort objective is quantised');
+{
+  const escort = MISSIONS.find((m) => m.id === 'protect');
+  const st = { remaining: 240.0, vipHealth: 1 };
+  const a = escort.objectiveText(st);
+  st.remaining = 243.4;
+  const b = escort.objectiveText(st);
+  eq(a, b, 'a few metres of driving does not rewrite the objective line');
+  st.remaining = 120;
+  ok(escort.objectiveText(st) !== a, 'a real change still updates the objective line');
+  st.vipHealth = 0.5;
+  ok(/50%/.test(escort.objectiveText(st)),
+    `escort renders vehicle health as a percentage (${escort.objectiveText(st)})`);
+  st.vipHealth = 1;
+  ok(/100%/.test(escort.objectiveText(st)),
+    `a healthy escort car reads 100%, not the raw hit points (${escort.objectiveText(st)})`);
+}
+
 section('missions — determinism');
 for (const def of MISSIONS) {
   /**
@@ -957,6 +986,43 @@ section('missions — completion pays out and reports success');
   for (let i = 0; i < 60 * 3 && g2.missions.active; i++) step(g2);
   eq(g2.missions.active, null, 'getaway completes once the heat is gone');
   eq(g2.player.money, 3000, 'getaway paid its reward');
+}
+
+{
+  // protect: the client must actually drive itself to the destination and finish the escort.
+  const g = makeGame();
+  ok(g.missions.start('protect'), 'escort starts');
+  const st = g.missions.active.state;
+  ok(Array.isArray(st.route) && st.route.length > 0, 'the escort follows a road route');
+  const start = st.remaining;
+  for (let i = 0; i < 60 * 360 && g.missions.active; i++) {
+    step(g);
+    // Keep the player near the client so the attackers behave, but never touch the client.
+    if (st.vip && st.vip.position) teleportPlayer(g, st.vip.position[0] + 8, st.vip.position[2] + 8);
+  }
+  eq(g.missions.active, null, 'escort finished');
+  ok(st.remaining < start, `the client made progress (${start.toFixed(0)}m -> ${st.remaining.toFixed(0)}m)`);
+  eq(g.player.money, 3600, 'escort paid its reward');
+  eq(g.vehicles.length, 0, 'escort removed the client car and every attacker');
+}
+
+{
+  // street race: drive the player's car through all eight checkpoints.
+  const g = makeGame();
+  ok(g.missions.start('street_race'), 'race starts');
+  const st = g.missions.active.state;
+  for (let i = 0; i < 60 * 4; i++) step(g);
+  g.player.enterVehicle(st.playerCar);
+  for (let i = 0; i < 5; i++) step(g);
+  ok(Number.isFinite(st.timeLeft), 'the race publishes timeLeft for the HUD countdown');
+  for (const cp of st.checkpoints) {
+    teleportPlayer(g, cp.x, cp.z);
+    step(g);
+    if (!g.missions.active) break;
+  }
+  eq(g.missions.active, null, 'race finished');
+  eq(g.player.money, 3200, 'winning the race paid its reward');
+  eq(g.vehicles.length, 0, 'race removed the rivals');
 }
 
 section('missions — failure path');

@@ -330,6 +330,24 @@ export default async function run() {
   game.weapons.ammo.rifle.mag = 30;
   hud.update(step);
 
+  // A grenade holds one per "magazine": the low-ammo banner must not latch on permanently.
+  game.weapons.current = 'grenade';
+  game.weapons.ammo.grenade = { mag: 1, reserve: 4 };
+  hud.update(step);
+  if (dom.hudRoot.querySelector('[data-r="lowammo"]').classList.contains('on')) {
+    bad('hud: low-ammo banner is permanently lit for single-shot weapons (grenade)');
+  }
+  if (dom.hudRoot.querySelector('[data-r="wname"]').textContent !== WEAPONS.grenade.nameKo) {
+    bad('hud: grenade label does not come from WEAPONS');
+  }
+  game.weapons.current = 'fist';
+  hud.update(step);
+  if (dom.hudRoot.querySelector('[data-r="wmag"]').textContent !== '\u221e') {
+    bad('hud: melee weapon does not show an infinity ammo glyph');
+  }
+  game.weapons.current = 'rifle';
+  hud.update(step);
+
   /* ---------------------------------------------------------------- reload arc animates */
   const arc = dom.hudRoot.querySelector('[data-r="reloadarc"]');
   const arcSamples = [];

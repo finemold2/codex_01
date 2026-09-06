@@ -409,7 +409,9 @@ export class PedManager {
    * @returns {object|null} The ped record, or null when the crowd is full.
    */
   spawnPed(x, y, z, opts) {
-    if (this.peds.length >= this.maxPeds + 12) return null;
+    // The cap is hard: an out-of-band spawn (an ejected driver, a mission ped) evicts the
+    // pedestrian furthest from the player rather than growing the crowd.
+    if (this.peds.length >= this.maxPeds && !this._makeRoom(x, z)) return null;
     const o = opts || {};
     const rng = this.rng;
     const ped = this._acquireRecord();
@@ -480,6 +482,36 @@ export class PedManager {
     }
     this.peds.push(ped);
     return ped;
+  }
+
+  /**
+   * Evicts the pedestrian furthest from the player so a forced spawn stays inside the cap.
+   * Mission-owned and no-despawn peds are never evicted.
+   * @param {number} x Where the new ped wants to appear (x).
+   * @param {number} z Where the new ped wants to appear (z).
+   * @returns {boolean} True when a slot was freed.
+   * @private
+   */
+  _makeRoom(x, z) {
+    const pl = this.game.player;
+    const px = pl && pl.position ? fin(pl.position[0], x) : x;
+    const pz = pl && pl.position ? fin(pl.position[2], z) : z;
+    let worst = -1;
+    let worstD = -1;
+    for (let i = 0; i < this.peds.length; i++) {
+      const p = this.peds[i];
+      if (p.missionOwned || p.noDespawn || p.persistent) continue;
+      const dx = p.position[0] - px;
+      const dz = p.position[2] - pz;
+      // Corpses go first, then whoever is furthest away.
+      const d = dx * dx + dz * dz + (p.dead ? 1e6 : 0);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst < 0) return false;
+    const ped = this.peds[worst];
+    this.peds.splice(worst, 1);
+    this._retire(ped);
+    return true;
   }
 
   /**

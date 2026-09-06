@@ -287,7 +287,27 @@ export default async function run({ canvas }) {
     sky.setTimeOfDay(12); sky.update(0, 0);
     const nShaders = sky._shaders.size;
     const cam = camAt([0, 0.2, -1], 62, 1, V3(0, 20, 0));
+    // Count CPU lighting rebuilds: the frame graph must trigger at most one per frame.
+    let recomputes = 0;
+    const realRecompute = sky._recompute.bind(sky);
+    sky._recompute = () => { recomputes++; realRecompute(); };
+
+    const bigRt = new RenderTarget(gl, 1280, 720, { colorFormat: 'rgba16f', depth: true });
+    for (const q of ['low', 'high', 'ultra']) {
+      sky.setQuality(q);
+      bigRt.bind(true);
+      sky.render(cam); gl.finish();
+      const t0 = performance.now();
+      for (let i = 0; i < 12; i++) { sky.render(cam); }
+      gl.finish();
+      const t1 = performance.now();
+      note(`fill rate ${q}: ${((t1 - t0) / 12).toFixed(2)} ms/frame at 1280x720 (SwiftShader CPU raster)`);
+    }
+    sky.setQuality('high');
+    bigRt.dispose();
+
     RT.bind(true);
+    recomputes = 0;
     const t0 = performance.now();
     for (let i = 0; i < 240; i++) {
       sky.setTimeOfDay(12 + i * 0.001);
@@ -296,7 +316,17 @@ export default async function run({ canvas }) {
     }
     gl.finish();
     const t1 = performance.now();
-    note(`240 update+render: ${(t1 - t0).toFixed(1)} ms total, ${((t1 - t0) / 240).toFixed(3)} ms/frame (33x33 target)`);
+    note(`240 update+render: ${(t1 - t0).toFixed(1)} ms total, ${((t1 - t0) / 240).toFixed(3)} ms/frame (33x33), ` +
+      `${recomputes} CPU lighting rebuilds`);
+    if (recomputes > 240) bad(`_recompute ran ${recomputes} times in 240 frames (should be <= 1 per frame)`);
+
+    // Frozen clock, untouched params: nothing may recompute at all.
+    recomputes = 0;
+    for (let i = 0; i < 60; i++) { sky.update(1 / 60, 0); sky.render(cam); }
+    note(`60 frames with a frozen clock: ${recomputes} CPU lighting rebuilds`);
+    if (recomputes !== 0) bad(`_recompute ran ${recomputes} times with nothing changed`);
+
+    sky._recompute = realRecompute;
     if (sky._shaders.size !== nShaders) bad('sky compiled a new shader inside the frame loop');
     const er = gl.getError();
     if (er) bad('gl error in frame loop: 0x' + er.toString(16));

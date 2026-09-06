@@ -244,6 +244,8 @@ const _hit = {
   body: null,
   headshot: false,
   surface: 'concrete',
+  /** True when the player pulled the trigger — gates hit markers and the player's own stats. */
+  byPlayer: true,
 };
 
 /** Normal produced by the last vehicle / player ray test. */
@@ -714,7 +716,7 @@ export class WeaponSystem {
     this._fireHeld = true; // require a fresh trigger pull after a switch
     const g = this.game;
     if (g) {
-      if (g.sfx && g.sfx.uiClick) g.sfx.uiClick('weapon');
+      if (g.sfx && g.sfx.uiClick) g.sfx.uiClick('select');
       if (g.player && g.player.character) this._setCharacterState('equip');
       if (g.ext) g.ext.weaponZoom = 1;
     }
@@ -971,6 +973,7 @@ export class WeaponSystem {
       if (game.shakeCamera) game.shakeCamera(def.shake, 0.12);
     }
     const hit = this._castBullet(_origin, _dir, def, ownerIsPlayer, damageMul, shooter, true);
+    if (hit) hit.byPlayer = !!ownerIsPlayer;
     if (game.sfx && game.sfx.punch) game.sfx.punch(_origin, !!hit);
     if (!hit) {
       burstDir(game.particles, 'dust', _origin[0] + _dir[0] * 0.8, _origin[1] + _dir[1] * 0.8,
@@ -1052,6 +1055,9 @@ export class WeaponSystem {
       for (let i = 0; i < list.length; i++) {
         const v = list[i];
         if (!v || v === ownVehicle || v.isDestroyed) continue;
+        // Never let a shooter hit the car it is shooting from (or riding in): a drive-by muzzle
+        // sits right at the roof line, so without this the gunman shoots his own bodywork.
+        if (shooter && (v === shooter || v.driver === shooter)) continue;
         const t = rayVehicle(v, origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], bestT);
         if (t > 0 && t < bestT) {
           bestT = t;
@@ -1093,7 +1099,7 @@ export class WeaponSystem {
     }
 
     if (!melee && def.tracer > 0 && this.rng.chance(def.tracer)) {
-      this._spawnTracer(origin, dir, Math.min(bestT, maxDist), def);
+      this._spawnTracer(origin, dir, Math.min(bestT, maxDist), def, ownerIsPlayer);
     }
 
     if (kind === 'none') return null;
@@ -1108,12 +1114,14 @@ export class WeaponSystem {
     _hit.vehicle = vehicle;
     _hit.body = body;
     _hit.headshot = headshot;
+    _hit.byPlayer = !!ownerIsPlayer;
     _hit.surface = kind === 'ped' || kind === 'player' ? 'flesh'
       : kind === 'vehicle' ? 'metal' : surfaceForBody(body);
 
     const damage = def.damage * damageMul * damageFalloff(def, bestT);
     this.applyHit(_hit, damage, dir);
-    if (ownerIsPlayer) this.shotsHit++;
+    // Accuracy counts targets, not scenery: hitting a wall is a miss.
+    if (ownerIsPlayer && (kind === 'ped' || kind === 'vehicle' || kind === 'player')) this.shotsHit++;
     return _hit;
   }
 
@@ -1127,6 +1135,9 @@ export class WeaponSystem {
   applyHit(hit, damage, dir3) {
     const game = this.game;
     if (!game || !hit) return 0;
+    // `applyHit` is public: an external caller that omits the flag is treated as the player,
+    // which is what the contract's `applyHit(hit, damage, dir3)` has always meant.
+    const byPlayer = hit.byPlayer === undefined ? true : !!hit.byPlayer;
     const p = hit.point || _hitPoint;
     const x = fin(p[0], 0);
     const y = fin(p[1], 0);
@@ -1147,8 +1158,14 @@ export class WeaponSystem {
       burstDir(parts, 'blood', x, y, z, hit.headshot ? 14 : 8, dx, dy, dz,
         hit.headshot ? 1.6 : 1.1);
       if (sfx && sfx.bulletImpact) sfx.bulletImpact('flesh', p);
-      if (game.hud && game.hud.hitMarker) game.hud.hitMarker(!!hit.headshot);
-      if (game.player) game.player.damageDealt = fin(game.player.damageDealt, 0) + dmg;
+      if (byPlayer) {
+        // hud.hitMarker() takes 'hit' | 'kill' | 'headshot', never a boolean.
+        if (game.hud && game.hud.hitMarker) {
+          const dead = !pedAlive(hit.ped);
+          game.hud.hitMarker(hit.headshot ? 'headshot' : dead ? 'kill' : 'hit');
+        }
+        if (game.player) game.player.damageDealt = fin(game.player.damageDealt, 0) + dmg;
+      }
       return dmg;
     }
 
@@ -1176,6 +1193,9 @@ export class WeaponSystem {
       burstDir(parts, 'debris', x, y, z, 2, fin(vn[0], 0), fin(vn[1], 1), fin(vn[2], 0), 0.6);
       if (sfx && sfx.bulletImpact) sfx.bulletImpact('metal', p);
       if (sfx && sfx.ricochet && this.rng.chance(0.25)) sfx.ricochet(p);
+      if (byPlayer && game.player) {
+        game.player.damageDealt = fin(game.player.damageDealt, 0) + dmg;
+      }
       this._requestDecal(x, y, z, hit.normal, 'metal');
       return dmg;
     }
@@ -1317,7 +1337,7 @@ export class WeaponSystem {
     if (a.reserve > 0) {
       this.reload();
     } else {
-      if (game.sfx && game.sfx.uiClick) game.sfx.uiClick('deny');
+      if (game.sfx && game.sfx.uiClick) game.sfx.uiClick('error');
       if (game.hud && game.hud.notify) game.hud.notify(`${def.nameKo} 탄약 없음`, 'warn', 2);
     }
   }
@@ -1369,7 +1389,7 @@ export class WeaponSystem {
    * @param {Object} def Weapon definition.
    * @private
    */
-  _spawnTracer(origin, dir, dist, def) {
+  _spawnTracer(origin, dir, dist, def, ownerIsPlayer = true) {
     const list = this._tracers;
     let t = null;
     for (let i = 0; i < list.length; i++) {
@@ -1379,7 +1399,9 @@ export class WeaponSystem {
     let x = origin[0];
     let y = origin[1];
     let z = origin[2];
-    if (this._playerMuzzle(_muzzle) && this.game.player && !this.game.player.dead) {
+    // Only the player's own rounds start at the player's barrel; an AI shot streaks from wherever
+    // that shooter is, which is the origin it handed us.
+    if (ownerIsPlayer && this.game.player && !this.game.player.dead && this._playerMuzzle(_muzzle)) {
       // Start the visible streak at the barrel, not at the camera.
       x = _muzzle[0]; y = _muzzle[1]; z = _muzzle[2];
     }
@@ -1469,7 +1491,7 @@ export class WeaponSystem {
         if (a.mag + a.reserve <= 0) game.hud.notify('수류탄 소진', 'warn', 2);
       }
     }
-    if (game.sfx && game.sfx.uiClick) game.sfx.uiClick('throw');
+    if (game.sfx && game.sfx.uiClick) game.sfx.uiClick('toggle');
     // Pull the next grenade off the belt (a "reload" for a thrown weapon).
     if (ownerIsPlayer) this.reload();
   }
@@ -1577,6 +1599,9 @@ export class WeaponSystem {
     this.bloom = Math.max(0, damp(this.bloom, 0, def.bloomRecover > 0 ? 1 / def.bloomRecover : 8, step));
     this.viewKick.pitch = damp(this.viewKick.pitch, 0, def.recoilRecover, step);
     this.viewKick.yaw = damp(this.viewKick.yaw, 0, def.recoilRecover, step);
+
+    // Live aiming cone for the HUD reticle: stance, movement and the decaying bloom.
+    this.currentSpread = Math.max(0, def.spread * this._playerSpreadMul() + this.bloom);
 
     // Scope zoom, published for the camera / HUD.
     const wantZoom = this.isScoped() ? def.zoom : 1;
