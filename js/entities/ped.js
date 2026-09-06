@@ -29,10 +29,12 @@ import { PathGraph } from './traffic.js';
 
 /** Hard cap on live pedestrians. */
 const MAX_PEDS = 60;
-/** Inner radius of the spawn annulus (metres). */
-const SPAWN_MIN = 62;
-/** Outer radius of the spawn annulus (metres). */
-const SPAWN_MAX = 96;
+/** Inner radius of the preferred spawn annulus (metres). */
+const SPAWN_MIN = 68;
+/** Outer radius of the preferred spawn annulus (metres). */
+const SPAWN_MAX = 102;
+/** Inner radius of the fallback annulus, which only accepts hidden spots (metres). */
+const SPAWN_NEAR = 26;
 /** Peds beyond this distance are recycled (metres). */
 const DESPAWN_DIST = 140;
 /** Spawn attempts allowed per frame. */
@@ -555,10 +557,12 @@ export class PedManager {
    * @param {number} pz Centre z.
    * @param {number} rMin Inner radius.
    * @param {number} rMax Outer radius.
+   * @param {boolean} [requireHidden=false] Reject any spot the player can actually see. Used for
+   *   the close-in fallback ring, so a ped never materialises in plain sight.
    * @returns {boolean} True when a ped was created.
    * @private
    */
-  _trySpawn(px, pz, rMin, rMax) {
+  _trySpawn(px, pz, rMin, rMax, requireHidden = false) {
     const g = this.walks;
     if (g.sampleCount === 0) return false;
     const n = g.queryRing(px, pz, rMin, rMax, _cand);
@@ -566,6 +570,7 @@ export class PedManager {
     const camera = this.game.camera;
     let bestSample = -1;
     let bestScore = -Infinity;
+    let rayBudget = 4;
     for (let t = 0; t < SPAWN_TRIES; t++) {
       this._spawnCursor = (this._spawnCursor + 1 + this.rng.int(0, 5)) % n;
       const s = _cand[this._spawnCursor];
@@ -579,8 +584,13 @@ export class PedManager {
       if (camera && typeof camera.frustumContainsSphere === 'function') {
         let visible = false;
         try { visible = camera.frustumContainsSphere(x, 1.0, z, 1.2); } catch (err) { visible = false; }
-        if (visible) score = this._occluded(camera, x, z) ? 6 : 0;
+        if (visible) {
+          const hidden = rayBudget > 0 && this._occluded(camera, x, z);
+          if (rayBudget > 0) rayBudget--;
+          score = hidden ? 6 : 0;
+        }
       }
+      if (requireHidden && score < 6) continue;
       if (score > bestScore) { bestScore = score; bestSample = s; }
       if (score >= 10 && t >= 2) break;
     }
