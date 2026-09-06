@@ -138,22 +138,33 @@ const AI = (() => {
     let weapon = WEAPONS[me.weapons[wIdx]];
 
     const fuel = me.fuel;
-    const candidates = [0];
+    // { dx, bonus } — bonus 가 클수록 그 자리로 가려고 합니다
+    const candidates = [{ dx: 0, bonus: 0 }];
     if (Math.random() < d.moveChance && fuel > 20) {
-      candidates.push(-fuel * 0.95, fuel * 0.95, -fuel * 0.5, fuel * 0.5);
+      for (const dx of [-fuel * 0.95, fuel * 0.95, -fuel * 0.5, fuel * 0.5]) candidates.push({ dx, bonus: 0 });
+    }
+    // 손이 닿는 보급 상자는 주우러 갑니다
+    if (game.crates && game.crates.length) {
+      for (const c of game.crates) {
+        if (!c.landed) continue;
+        const dx = c.x - me.x;
+        if (Math.abs(dx) <= fuel) candidates.push({ dx, bonus: 70 });
+      }
     }
 
     let best = null;
-    for (const dx of candidates) {
+    for (const cand of candidates) {
+      const dx = cand.dx;
       const pos = dx === 0 ? { x: me.x, y: me.y } : game.probeWalk(me, dx);
       const ghost = {
         id: me.id, team: me.team, alive: true, x: pos.x, y: pos.y,
         cx: pos.x, cy: pos.y - 12 * me.type.size, hitR: me.hitR,
       };
       const simTanks = tanks.map((t) => (t === me ? ghost : t));
-      const s = solve(ghost, target, game.wind, game.ground, simTanks, weapon, d, me.type.power, me.type.minElev, me.type.maxElev);
+      const s = solve(ghost, target, game.wind, game.ground, simTanks, weapon, d, me.type.power * (me.buffs.power || 1), me.type.minElev, me.type.maxElev);
       s.dx = pos.x - me.x;
-      if (!best || s.err < best.err - 9) best = s;
+      s.adj = s.err - cand.bonus;
+      if (!best || s.adj < best.adj - 9) best = s;
       if (best.err < 3 && dx === 0) break;
     }
 

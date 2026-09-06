@@ -22,6 +22,8 @@
       <div class="menu-grid">
         <div class="panel">
           <h2 class="panel-title">전투 설정</h2>
+          <div class="form-row"><label>진행 방식</label><div class="seg seg--wrap" id="segRun"></div></div>
+          <p id="runDesc" class="run-desc"></p>
           <div class="form-row"><label>플레이어</label><div class="seg" id="segCount"></div></div>
           <div class="form-row"><label>대전 방식</label><div class="seg" id="segMode"></div></div>
           <div class="form-row"><label>AI 실력</label><div class="seg" id="segDiff"></div></div>
@@ -36,6 +38,14 @@
           <div id="slots" class="slots"></div>
           <p id="menuError" class="error" hidden></p>
         </div>
+      </div>
+
+      <div class="wallet-bar">
+        <div class="wallet">
+          <span class="w-coin">◈</span><b id="walletVal">0</b><span class="w-unit">크레딧</span>
+        </div>
+        <div class="wallet-stats" id="walletStats"></div>
+        <button id="btnToShop" class="btn btn--ghost">보급 상점 <span id="invCount" class="inv-count">0</span></button>
       </div>
 
       <div class="menu-actions">
@@ -53,6 +63,7 @@
           <div><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>Tab</kbd><span>무기 교체</span></div>
           <div><kbd>M</kbd><span>음소거 (🔊 버튼에서 볼륨 조절)</span></div>
           <div><kbd>N</kbd><span>다음 곡</span></div>
+          <div><kbd>Z</kbd><kbd>X</kbd><kbd>C</kbd><kbd>V</kbd><span>아이템 사용</span></div>
         </div>
         <p class="help-note">
           바람이 탄도를 휘게 합니다. 화면 상단 화살표로 세기와 방향을 확인하세요.
@@ -95,7 +106,43 @@
     </div>
   </section>
 
-  <!-- ═══════════════ 3. 게임 ═══════════════ -->
+  <!-- ═══════════════ 3. 보급 상점 ═══════════════ -->
+  <section id="shop" class="screen">
+    <header class="garage-top">
+      <button id="btnShopBack" class="btn btn--ghost">← 뒤로</button>
+      <div class="shop-title">
+        <span class="shop-h">보급 상점</span>
+        <span id="shopStage" class="shop-stage"></span>
+      </div>
+      <div class="garage-tools">
+        <div class="wallet wallet--sm"><span class="w-coin">◈</span><b id="shopWallet">0</b></div>
+        <button id="btnRestock" class="btn btn--ghost">재입고 <span class="cost">◈60</span></button>
+        <button id="btnShopGo" class="btn btn--primary">출격 →</button>
+      </div>
+    </header>
+
+    <div class="shop-body">
+      <div class="shop-main">
+        <h3 class="sub-head">보급품 <span class="head-note">이번 판에만 쓰입니다</span></h3>
+        <div class="shop-grid" id="shopGrid"></div>
+
+        <h3 class="sub-head sub-head--mod">영구 장착 모듈 <span class="head-note">한 번 사면 매 판 자동으로 적용됩니다</span></h3>
+        <div class="shop-grid" id="modGrid"></div>
+
+        <p class="shop-note">상자는 전장에서도 얻을 수 있습니다 — 보급기가 떨어뜨리거나, 격파된 전차가 남깁니다.<br />
+          같은 아이템이라도 나올 때마다 성능이 다르게 굴려지고, 값도 그에 따라 달라집니다.</p>
+      </div>
+      <aside class="shop-side">
+        <h3 class="sub-head">장착 모듈 <span id="modSlots" class="inv-slots">0/4</span></h3>
+        <div class="inv-list" id="modList"></div>
+        <h3 class="sub-head">출격 장비 <span id="invSlots" class="inv-slots">0/10</span></h3>
+        <div class="inv-list" id="invList"></div>
+        <p class="shop-note">보급품은 전투가 시작되면 적용되고 소모됩니다. 모듈은 남습니다.<br />사용형 아이템은 전투 중 <b>Z X C V</b> 키로 씁니다.</p>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 4. 게임 ═══════════════ -->
   <section id="game" class="screen">
     <header class="hud-top">
       <div class="hud-turn">
@@ -104,6 +151,7 @@
         <span id="hudTank" class="tank-tag">-</span>
         <span id="hudTeam" class="badge" hidden></span>
         <span id="hudYou" class="you" hidden>YOU</span>
+        <span id="hudStage" class="stage-tag" hidden></span>
       </div>
 
       <div class="hud-center">
@@ -134,11 +182,15 @@
         <canvas id="canvas" width="1600" height="800"></canvas>
         <div id="banner" class="banner" hidden></div>
         <aside id="roster" class="roster"></aside>
+        <div id="buffBar" class="buff-bar"></div>
       </div>
     </div>
 
     <footer class="hud-bottom">
-      <div class="weapons" id="weapons"></div>
+      <div class="loadout">
+        <div class="weapons" id="weapons"></div>
+        <div class="items" id="itemBar"></div>
+      </div>
 
       <div class="gauges">
         <div class="gauge">
@@ -189,15 +241,25 @@
     <div class="modal-card">
       <h2 id="goTitle">승리</h2>
       <p id="goSub" class="sub"></p>
-      <div class="result-wrap">
-        <table class="result">
-          <thead><tr><th>#</th><th>이름</th><th>전차</th><th>팀</th><th>HP</th><th>격파</th><th>누적피해</th></tr></thead>
-          <tbody id="goBody"></tbody>
-        </table>
+      <div class="result-cols">
+        <div class="result-wrap">
+          <table class="result">
+            <thead><tr><th>#</th><th>이름</th><th>전차</th><th>팀</th><th>HP</th><th>격파</th><th>피해</th></tr></thead>
+            <tbody id="goBody"></tbody>
+          </table>
+        </div>
+        <div class="payout">
+          <h3 class="sub-head">전투 수당</h3>
+          <div id="payoutLines" class="payout-lines"></div>
+          <div class="payout-total">
+            <span>합계</span><b id="payoutTotal">◈0</b>
+          </div>
+          <div class="payout-wallet">보유 <b id="payoutWallet">◈0</b></div>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="goMenu" class="btn btn--ghost">메뉴로</button>
-        <button id="goGarage" class="btn btn--ghost">전차 변경</button>
+        <button id="goShop" class="btn btn--ghost">보급 상점</button>
         <button id="goAgain" class="btn btn--primary">다시하기</button>
       </div>
     </div>
@@ -211,6 +273,8 @@
   <script src="js/tankart_set2.js"></script>
   <script src="js/tankart_set3.js"></script>
   <script src="js/entities.js"></script>
+  <script src="js/items.js"></script>
+  <script src="js/profile.js"></script>
   <script src="js/sfx.js"></script>
   <script src="js/musiclib1.js"></script>
   <script src="js/musiclib2.js"></script>

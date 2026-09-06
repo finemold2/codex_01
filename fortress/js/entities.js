@@ -96,6 +96,27 @@ class Tank {
     this.lastPower = null;
     this.fallFrom = null;
     this.charge = 0;
+
+    // 아이템
+    this.buffs = {};        // items.js 의 효과가 여기에 쌓입니다
+    this.items = [];        // 전투 중 사용하는 아이템 [{id, uses}]
+    this.oiled = 0;         // 유막 — 이동력 절반
+    this.acid = 0;          // 산성비 — 매 턴 피해
+    this.pickups = 0;       // 주운 보급 상자 수
+  }
+
+  /** 아이템으로 늘어난 최대 체력·이동력을 반영 */
+  get climb() { return Math.max(this.type.climb, this.buffs.climb || 0); }
+  get powerCap() { return this.buffs.overcharge ? 135 : 100; }
+  addItem(inst) {
+    const id = typeof inst === 'string' ? inst : inst.id;
+    const def = ITEMS[id];
+    if (!def || def.kind !== 'active') return;
+    const roll = typeof inst === 'string' ? 1 : (inst.roll != null ? inst.roll : 1);
+    const uses = itemUses({ id, roll });
+    const slot = this.items.find((s) => s.id === id && s.roll === roll);
+    if (slot) slot.uses += uses;
+    else this.items.push({ id, roll, uses });
   }
 
   get hitR() { return BASE_HIT_R * this.type.size; }
@@ -128,14 +149,15 @@ class Tank {
   weaponId(i) { return this.weapons[i != null ? i : this.weapon]; }
   weaponDef(i) { return WEAPONS[this.weaponId(i)]; }
   hasAmmo(i) { const id = this.weapons[i]; return id != null && this.ammo[id] > 0; }
-  muzzleSpeed() { return this.power * PHYS.SPEED * this.type.power; }
+  muzzleSpeed() { return this.power * PHYS.SPEED * this.type.power * (this.buffs.power || 1); }
 }
 
 /* ───────────────────────── 발사체 ───────────────────────── */
 
 function makeProjectile(sx, sy, angleDeg, power, ownerId, weapon, opts) {
+  opts = opts || {};
   const a = (angleDeg * Math.PI) / 180;
-  const sp = power * PHYS.SPEED * ((opts && opts.powerMul) || 1) * (weapon ? weapon.speed : 1);
+  const sp = power * PHYS.SPEED * (opts.powerMul || 1) * (weapon ? weapon.speed : 1);
   return {
     x: sx, y: sy,
     vx: Math.cos(a) * sp,
@@ -143,18 +165,25 @@ function makeProjectile(sx, sy, angleDeg, power, ownerId, weapon, opts) {
     t: 0,
     owner: ownerId,
     weapon,
-    child: (opts && opts.child) || null,   // 분열탄 자식 설정
-    split: !!(weapon && weapon.behavior === 'split') && !(opts && opts.child),
-    airburst: !!(weapon && weapon.behavior === 'airburst') && !(opts && opts.child),
+    child: opts.child || null,             // 분열탄 자식 설정
+    split: !!(weapon && weapon.behavior === 'split') && !opts.child,
+    airburst: !!(weapon && weapon.behavior === 'airburst') && !opts.child,
     rolling: false,
     rollT: 0,
     trail: [],
+    // 아이템 효과
+    windK: opts.windK != null ? opts.windK : 1,
+    g: opts.g != null ? opts.g : PHYS.G,
+    homing: opts.homing || 0,
+    pierce: opts.pierce || 0,
+    bounce: opts.bounce || 0,
+    splitFuse: opts.splitFuse || 0,
   };
 }
 
 function stepProjectile(p, wind) {
-  p.vx += wind * PHYS.WIND;
-  p.vy += PHYS.G;
+  p.vx += wind * PHYS.WIND * (p.windK != null ? p.windK : 1);
+  p.vy += p.g != null ? p.g : PHYS.G;
   p.x += p.vx;
   p.y += p.vy;
   p.t++;

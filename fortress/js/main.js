@@ -15,9 +15,11 @@
     { id: 'hard', label: '어려움' },
   ];
 
-  const setup = { count: 4, mode: 'ffa', difficulty: 'normal', theme: 'random', slots: [] };
+  const setup = { count: 4, mode: 'ffa', difficulty: 'normal', theme: 'random', runMode: 'single', slots: [] };
   let game = null;
   let lastCfg = null;
+  let run = null;          // { mode, stage, cfg, done }
+  let shopStock = null;
   let activePilot = 0;
   let detailId = TANK_TYPES[0].id;
   let clsFilter = 'all';
@@ -139,8 +141,20 @@
     $('#slotsHint').textContent = txt;
   }
 
+  function renderWallet() {
+    $('#walletVal').textContent = Profile.credits.toLocaleString();
+    $('#invCount').textContent = Profile.inventory.length;
+    const s = Profile.stats;
+    const parts = [`전적 ${s.wins}승 / ${s.matches}판`, `격파 ${s.kills}`, `모듈 ${Profile.modules.length}/${Profile.MOD_MAX}`];
+    if (s.bestEndless) parts.push(`무한 최고 ${s.bestEndless}판`);
+    $('#walletStats').textContent = parts.join(' · ');
+  }
+
   function renderMenu() {
     syncSlots();
+    const modes = Object.keys(Profile.MODES).map((k) => ({ id: k, label: Profile.MODES[k].label }));
+    seg($('#segRun'), modes, () => setup.runMode, (v) => { setup.runMode = v; });
+    $('#runDesc').textContent = Profile.MODES[setup.runMode].desc;
     seg($('#segCount'), [2, 3, 4, 5, 6].map((n) => ({ id: n, label: `${n}인` })), () => setup.count,
       (v) => { setup.count = v; syncSlots(); assignTeamsRoundRobin(); });
     seg($('#segMode'), MODES, () => setup.mode,
@@ -148,6 +162,7 @@
     seg($('#segDiff'), DIFFS, () => setup.difficulty, (v) => { setup.difficulty = v; });
     seg($('#segTheme'), themeOptions(), () => setup.theme, (v) => { setup.theme = v; });
     renderSlots();
+    renderWallet();
   }
 
   function validate() {
@@ -404,10 +419,181 @@
   /* ═══════════════ 화면 전환 ═══════════════ */
 
   function showScreen(id) {
-    for (const s of ['menu', 'garage', 'game']) {
+    for (const s of ['menu', 'garage', 'shop', 'game']) {
       $('#' + s).classList.toggle('is-active', s === id);
     }
     if (id !== 'garage') cancelAnimationFrame(detailRaf);
+    $('#audioPanel').hidden = true;
+  }
+
+  /* ═══════════════ 진행(런) ═══════════════ */
+
+  function stageLabel() {
+    if (!run) return '';
+    const total = Profile.MODES[run.mode].total;
+    return Number.isFinite(total) ? `${run.stage + 1} / ${total}판` : `${run.stage + 1}판째`;
+  }
+
+  function startRun() {
+    run = { mode: setup.runMode, stage: 0, cfg: buildConfig(), done: false };
+    startStage();
+  }
+
+  function startStage() {
+    if (!run) { startRun(); return; }
+    const sc = Profile.scaling(run.stage);
+    const cfg = Object.assign({}, run.cfg, {
+      difficulty: Profile.tierUp(run.cfg.difficulty, sc.tier),
+      theme: setup.theme === 'random' ? null : setup.theme,
+      scaling: run.stage > 0 ? sc : null,
+      loadout: Profile.inventory.slice(),
+      modules: Profile.modules.slice(),
+      stage: run.stage,
+    });
+    Profile.consumeAll();     // 출전과 함께 장비를 소모합니다
+    startGame(cfg);
+  }
+
+  /* ═══════════════ 보급 상점 ═══════════════ */
+
+  function ensureStock(force) {
+    if (force || !shopStock) {
+      const st = run ? run.stage : 0;
+      shopStock = { supply: rollShopStock(6, st), mods: rollModuleStock(3, st) };
+    }
+    return shopStock;
+  }
+
+  function openShop() {
+    ensureStock(false);
+    showScreen('shop');
+    $('#shopStage').textContent = run && !run.done
+      ? `${Profile.MODES[run.mode].label} · 다음은 ${stageLabel()}`
+      : Profile.MODES[setup.runMode].label;
+    $('#btnShopGo').textContent = run && !run.done ? `다음 판 출격 →` : '전차 선택 →';
+    renderShop();
+  }
+
+  function shopCard(entry, opts) {
+    const def = itemDef(entry.id);
+    if (!def) return null;
+    const r = RARITY[def.rarity];
+    const q = qualityOf(entry.roll);
+    const dur = durationOf(entry);
+    const card = document.createElement('div');
+    card.className = 'shop-card' + (entry.bought ? ' is-bought' : '') + (entry.perm ? ' is-perm' : '');
+    card.style.borderLeftColor = entry.perm ? '#c07bff' : r.color;
+    card.innerHTML =
+      `<div class="sc-head"><div class="sc-icon">${def.icon}</div><div>` +
+      `<div class="sc-name">${esc(itemName(entry))}</div>` +
+      `<div class="sc-tags">` +
+      `<span class="tag" style="background:${r.color}">${r.label}</span>` +
+      `<span class="tag" style="background:${q.color}">${q.label}</span>` +
+      `<span class="tag ${entry.perm ? 'tag--perm' : 'tag--dur'}">${DURATION_LABEL[dur]}</span>` +
+      `<span class="tag tag--cat">${ITEM_CATS[def.cat] || ''}</span>` +
+      `${def.kind === 'active' ? `<span class="tag tag--cat">사용 ${itemUses(entry)}회</span>` : ''}` +
+      `</div></div></div>` +
+      `<div class="sc-desc">${esc(itemDesc(entry))}</div>`;
+
+    const buy = document.createElement('button');
+    buy.type = 'button';
+    buy.className = 'sc-buy';
+    const afford = Profile.credits >= entry.price;
+    const room = opts.room();
+    buy.disabled = !!entry.bought || !afford || !room;
+    buy.innerHTML = entry.bought ? '구매함'
+      : !room ? opts.fullText
+        : `<span class="w-coin" style="color:var(--brass)">◈</span> ${entry.price}`;
+    buy.addEventListener('click', () => {
+      if (entry.bought || !opts.room()) return;
+      if (!Profile.spend(entry.price)) return;
+      opts.take(entry);
+      entry.bought = true;
+      if (typeof Sfx !== 'undefined' && Sfx.select) Sfx.select();
+      renderShop(); renderWallet();
+    });
+    card.appendChild(buy);
+    return card;
+  }
+
+  function invRow(inst, opts) {
+    const def = itemDef(inst.id);
+    if (!def) return null;
+    const r = RARITY[def.rarity];
+    const q = qualityOf(inst.roll);
+    const row = document.createElement('div');
+    row.className = 'inv-row' + (inst.perm ? ' is-perm' : '');
+    row.style.borderLeftColor = inst.perm ? '#c07bff' : r.color;
+    row.innerHTML =
+      `<span class="i-ico">${def.icon}</span>` +
+      `<span><b>${esc(itemName(inst))}</b>` +
+      `<small style="color:${q.color}">${q.label} · ${DURATION_LABEL[durationOf(inst)]}</small>` +
+      `<small>${esc(itemDesc(inst))}</small></span>`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'inv-sell';
+    btn.textContent = `${opts.label} ◈${opts.back}`;
+    btn.addEventListener('click', opts.onClick);
+    row.appendChild(btn);
+    return row;
+  }
+
+  function renderShop() {
+    $('#shopWallet').textContent = Profile.credits.toLocaleString();
+    $('#invSlots').textContent = `${Profile.inventory.length}/${Profile.INV_MAX}`;
+    $('#modSlots').textContent = `${Profile.modules.length}/${Profile.MOD_MAX}`;
+
+    const stock = ensureStock(false);
+
+    const grid = $('#shopGrid');
+    grid.innerHTML = '';
+    for (const entry of stock.supply) {
+      const card = shopCard(entry, {
+        room: () => Profile.canHold(),
+        fullText: '장비 칸 가득',
+        take: (e) => Profile.addItem(e),
+      });
+      if (card) grid.appendChild(card);
+    }
+
+    const mgrid = $('#modGrid');
+    mgrid.innerHTML = '';
+    for (const entry of stock.mods) {
+      const card = shopCard(entry, {
+        room: () => Profile.canInstall(),
+        fullText: '슬롯 가득',
+        take: (e) => Profile.installModule(e),
+      });
+      if (card) mgrid.appendChild(card);
+    }
+
+    const mlist = $('#modList');
+    mlist.innerHTML = '';
+    if (!Profile.modules.length) {
+      mlist.innerHTML = '<p class="inv-empty">장착된 모듈이 없습니다. 비싸지만 한 번 사면 계속 쓸 수 있습니다.</p>';
+    }
+    Profile.modules.forEach((inst, i) => {
+      const back = Math.round((inst.price || itemDef(inst.id).price) * 0.5);
+      const row = invRow(inst, {
+        label: '해체', back,
+        onClick: () => { Profile.removeModule(i); Profile.addCredits(back); renderShop(); renderWallet(); },
+      });
+      if (row) mlist.appendChild(row);
+    });
+
+    const inv = $('#invList');
+    inv.innerHTML = '';
+    if (!Profile.inventory.length) {
+      inv.innerHTML = '<p class="inv-empty">아직 보급품이 없습니다. 재고에서 사거나 전장에서 상자를 주우세요.</p>';
+    }
+    Profile.inventory.forEach((inst, i) => {
+      const back = Math.round((inst.price || itemDef(inst.id).price) * 0.4);
+      const row = invRow(inst, {
+        label: '판매', back,
+        onClick: () => { Profile.removeItem(i); Profile.addCredits(back); renderShop(); renderWallet(); },
+      });
+      if (row) inv.appendChild(row);
+    });
   }
 
   function buildConfig() {
@@ -434,11 +620,21 @@
     fitCanvas();
     game = new Game($('#canvas'), cfg, ui);
     window.__game = game;
+    const tag = $('#hudStage');
+    if (run && Profile.MODES[run.mode].total !== 1) {
+      tag.hidden = false;
+      tag.textContent = `${Profile.MODES[run.mode].label} ${stageLabel()}`;
+    } else {
+      tag.hidden = true;
+    }
+    shopStock = null;   // 판이 바뀌면 상점 재고도 새로 뽑습니다
     renderWeapons();
+    renderItems();
   }
 
   function quitToMenu() {
     if (game) { game.destroy(); game = null; }
+    run = null;
     $('#gameover').hidden = true;
     showScreen('menu');
     renderMenu();
@@ -475,9 +671,11 @@
       $('#pmark').style.left = `${t.lastPower != null ? t.lastPower : -10}%`;
       $('#pad').classList.toggle('is-disabled', t.isAI);
       renderWeapons();
+      renderItems();
+      renderBuffs();
       renderRoster();
     },
-    refresh() { renderWeapons(); renderRoster(); },
+    refresh() { renderWeapons(); renderItems(); renderBuffs(); renderRoster(); },
     frame(g) {
       const t = g.cur;
       if (!t) return;
@@ -520,6 +718,79 @@
       b.addEventListener('click', () => game && game.selectWeapon(i));
       wrap.appendChild(b);
     });
+  }
+
+  const ITEM_KEYS = ['Z', 'X', 'C', 'V'];
+
+  function renderItems() {
+    const bar = $('#itemBar');
+    bar.innerHTML = '';
+    const t = game && game.cur;
+    if (!t || t.isAI || !t.items.length) return;
+    t.items.slice(0, 4).forEach((slot, i) => {
+      const def = itemDef(slot.id);
+      if (!def) return;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'item-btn';
+      b.title = `${itemName(slot)} — ${itemDesc(slot)}`;
+      b.disabled = game.state !== 'aim';
+      b.style.borderLeftColor = RARITY[def.rarity].color;
+      b.innerHTML =
+        `<span class="i-key">${ITEM_KEYS[i]}</span>` +
+        `<span class="i-ico">${def.icon}</span>` +
+        `<span class="i-name">${esc(itemName(slot))}</span>` +
+        `<span class="i-use">×${slot.uses}</span>`;
+      b.addEventListener('click', () => { if (game) game.useItem(i); });
+      bar.appendChild(b);
+    });
+  }
+
+  const BUFF_CHIPS = [
+    ['shield', '🔵', (v) => `방어막 ×${v}`],
+    ['dodge', '💨', (v) => `회피 ×${v}`],
+    ['reactive', '🧱', (v) => `반응장갑 ×${v}`],
+    ['phoenix', '🔥', (v) => `부활 ×${v}`],
+    ['smoke', '🌫', (v) => `연막 ${v}턴`],
+    ['overcharge', '🔋', () => '과충전'],
+    ['pierce', '🔻', (v) => `관통 ×${v}`],
+    ['bounce', '🔄', (v) => `도탄 ×${v}`],
+    ['splitFuse', '✳', (v) => `분열 ×${v}`],
+    ['homing', '📶', (v) => `유도 ×${v}`],
+    ['lowGrav', '🌙', (v) => `저중력 ×${v}`],
+    ['extraShot', '⏩', (v) => `추가 사격 ×${v}`],
+    ['regen', '💠', (v) => `재생 +${v}`],
+    ['leech', '🩸', () => '흡혈'],
+    ['thorns', '🌵', () => '반사'],
+    ['scope', '🎯', () => '탄도 예측'],
+    ['chute', '🪂', () => '낙하 무효'],
+    ['magnet', '🧲', () => '수집기'],
+    ['dupe', '♊', () => '복제'],
+  ];
+
+  function renderBuffs() {
+    const bar = $('#buffBar');
+    bar.innerHTML = '';
+    const t = game && game.cur;
+    if (!t) return;
+    const add = (icon, text, color) => {
+      const d = document.createElement('div');
+      d.className = 'buff-chip';
+      d.style.color = color || 'var(--text-dim)';
+      d.innerHTML = `<span>${icon}</span><span>${esc(text)}</span>`;
+      bar.appendChild(d);
+    };
+    for (const [key, icon, fmt] of BUFF_CHIPS) {
+      const v = t.buffs[key];
+      if (v) add(icon, fmt(v), '#e9ecf4');
+    }
+    if ((t.buffs.armor || 1) !== 1) add('🛡', `방어 ${Math.round((1 - t.buffs.armor) * 100)}%`, '#7fd8ff');
+    if ((t.buffs.damage || 1) !== 1) add('🔺', `화력 +${Math.round((t.buffs.damage - 1) * 100)}%`, '#ffcc2e');
+    if ((t.buffs.radius || 1) !== 1) add('💥', `반경 +${Math.round((t.buffs.radius - 1) * 100)}%`, '#ff9a5a');
+    if ((t.buffs.power || 1) !== 1) add('🧨', `사거리 +${Math.round((t.buffs.power - 1) * 100)}%`, '#ffcc2e');
+    if (t.acid > 0) add('🌧', `산성비 ${t.acid}턴`, '#a8e05f');
+    if (t.oiled > 0) add('🛢', `유막 ${t.oiled}턴`, '#c9a227');
+    if (t.frozen > 0) add('❄', `빙결 ${t.frozen}턴`, '#9fe8ff');
   }
 
   function renderRoster() {
@@ -577,6 +848,40 @@
   function showGameOver(g) {
     const m = $('#gameover');
     const title = $('#goTitle'), sub = $('#goSub');
+
+    /* ── 전투 수당 정산 ── */
+    const me = g.tanks.find((t) => !t.isAI) || null;
+    const rw = Profile.reward(g, me, { stage: run ? run.stage : 0 });
+    Profile.addCredits(rw.total);
+    Profile.recordMatch(g, me, rw.won);
+
+    const lines = $('#payoutLines');
+    lines.innerHTML = '';
+    for (const [label, v] of rw.lines) {
+      const d = document.createElement('div');
+      d.innerHTML = `<span>${esc(label)}</span><b class="${v < 0 ? 'neg' : ''}">${v > 0 ? '+' : ''}${v}</b>`;
+      lines.appendChild(d);
+    }
+    $('#payoutTotal').textContent = `◈${rw.total.toLocaleString()}`;
+    $('#payoutWallet').innerHTML = `보유 <b>◈${Profile.credits.toLocaleString()}</b>`;
+
+    /* ── 진행 상태 ── */
+    const again = $('#goAgain');
+    if (run) {
+      if (rw.won) {
+        run.stage++;
+        const total = Profile.MODES[run.mode].total;
+        if (run.mode === 'endless') Profile.recordEndless(run.stage);
+        run.done = run.stage >= total;
+      } else {
+        if (run.mode === 'endless') Profile.recordEndless(run.stage);
+        run.done = true;
+      }
+      again.textContent = run.done ? '새 판 시작' : `다음 판 (${stageLabel()}) →`;
+    } else {
+      again.textContent = '다시하기';
+    }
+    renderWallet();
     if (g.winnerTeam == null) {
       title.textContent = '무승부';
       sub.textContent = '모든 전차가 파괴되었습니다.';
@@ -584,8 +889,14 @@
       const winners = g.tanks.filter((t) => t.team === g.winnerTeam);
       const humanWon = winners.some((t) => !t.isAI);
       title.textContent = g.teamMode ? `${TEAM_LABELS[g.winnerTeam]}팀 승리` : `${winners[0].name} 승리`;
-      sub.textContent = (g.teamMode ? winners.map((t) => `${t.name}(${t.type.name})` ).join(', ') + ' · ' : '')
-        + (humanWon ? '축하합니다!' : 'AI가 이겼습니다. 다시 도전해보세요.');
+      let extra = humanWon ? '축하합니다!' : 'AI가 이겼습니다. 다시 도전해보세요.';
+      if (run && humanWon) {
+        const total = Profile.MODES[run.mode].total;
+        extra = run.done && Number.isFinite(total)
+          ? `${total}판 원정 완주! 🏆`
+          : `${Profile.MODES[run.mode].label} — ${stageLabel()} 돌파`;
+      }
+      sub.textContent = (g.teamMode ? winners.map((t) => `${t.name}(${t.type.name})`).join(', ') + ' · ' : '') + extra;
     }
     const body = $('#goBody');
     body.innerHTML = '';
@@ -616,14 +927,36 @@
   $('#btnBackMenu').addEventListener('click', () => { showScreen('menu'); renderMenu(); });
   $('#btnRandomAll').addEventListener('click', randomizeAll);
   $('#btnPick').addEventListener('click', () => pickTank(detailId, true));
-  $('#btnStart').addEventListener('click', () => startGame(buildConfig()));
+  $('#btnStart').addEventListener('click', () => startRun());
   $('#goMenu').addEventListener('click', quitToMenu);
-  $('#goGarage').addEventListener('click', () => {
+  $('#goShop').addEventListener('click', () => {
     if (game) { game.destroy(); game = null; }
     $('#gameover').hidden = true;
-    openGarage();
+    openShop();
   });
-  $('#goAgain').addEventListener('click', () => { if (lastCfg) startGame(lastCfg); });
+  $('#goAgain').addEventListener('click', () => {
+    if (game) { game.destroy(); game = null; }
+    $('#gameover').hidden = true;
+    if (run && !run.done) startStage();
+    else { run = null; startRun(); }
+  });
+
+  $('#btnToShop').addEventListener('click', () => {
+    const err = validate();
+    if (err) { const e = $('#menuError'); e.textContent = err; e.hidden = false; return; }
+    openShop();
+  });
+  $('#btnShopBack').addEventListener('click', () => { showScreen('menu'); renderMenu(); });
+  $('#btnRestock').addEventListener('click', () => {
+    if (!Profile.spend(60)) return;
+    ensureStock(true);
+    if (typeof Sfx !== 'undefined' && Sfx.click) Sfx.click();
+    renderShop(); renderWallet();
+  });
+  $('#btnShopGo').addEventListener('click', () => {
+    if (run && !run.done) startStage();
+    else openGarage();
+  });
   $('#btnNextTrack').addEventListener('click', (e) => {
     e.stopPropagation();
     bootAudio();
@@ -783,6 +1116,8 @@
     if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) game.startCharge(); return; }
     if (e.key === 'Enter') { e.preventDefault(); game.fireNow(); return; }
     if (e.key === 'Tab') { e.preventDefault(); if (game.state === 'aim' && !game.cur.isAI) game.cycleWeapon(); return; }
+    const ik = ITEM_KEYS.indexOf(e.key.toUpperCase());
+    if (ik >= 0) { e.preventDefault(); if (!game.cur.isAI) game.useItem(ik); return; }
     if (/^[1-9]$/.test(e.key)) game.selectWeapon(+e.key - 1);
   });
 

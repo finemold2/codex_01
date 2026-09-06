@@ -37,6 +37,7 @@ class Game {
     this.cfg = cfg;
     this.ui = ui;
     this.difficulty = cfg.difficulty || 'normal';
+    this.stage = cfg.stage || 0;
     this.teamMode = !!cfg.teamMode;
 
     const themes = gfxThemes();
@@ -46,10 +47,29 @@ class Game {
 
     this.seed = (Math.random() * 1e9) >>> 0;
     this.ground = Terrain.generate(W, H, this.seed, terrainStyleFor(this.themeKey, this.theme));
+    this.ground0 = Float32Array.from(this.ground);   // 지형 복원기용 원본
     this.scene = HAS_GFX ? Gfx.createScene(this.seed, this.themeKey) : null;
     if (HAS_FX) { FX.reset(); FX.setWind && FX.setWind(0); }
 
     this.tanks = this.placeTanks(cfg.players);
+
+    // 원정 · 무한 모드 — 판이 올라갈수록 적이 강해집니다
+    const sc = cfg.scaling;
+    if (sc) {
+      for (const t of this.tanks) {
+        if (!t.isAI) continue;
+        t.maxHp = Math.round(t.maxHp * sc.hp);
+        t.hp = t.maxHp;
+        t.buffs.damage = (t.buffs.damage || 1) * sc.dmg;
+      }
+    }
+
+    // 영구 장착 모듈 → 출전 장비 순으로 적용
+    const me = this.tanks.find((t) => !t.isAI);
+    if (me) {
+      if (cfg.modules && cfg.modules.length) for (const inst of cfg.modules) this.grantItem(me, inst, true);
+      if (cfg.loadout && cfg.loadout.length) for (const inst of cfg.loadout) this.grantItem(me, inst, true);
+    }
 
     this.turnIdx = -1;
     this.round = 1;
@@ -58,6 +78,11 @@ class Game {
     this.pending = [];        // 지연 폭발 (연쇄탄 등)
     this.burns = [];          // 네이팜 불바다
     this.floaters = [];
+    this.crates = [];         // 보급 상자
+    this.mines = [];          // 매설된 지뢰
+    this.planes = [];         // 보급기 / 폭격기
+    this.bonusCredits = 0;    // 전리품 상자로 얻은 크레딧
+    this.supplyIn = 2 + Math.floor(Math.random() * 3);   // 몇 라운드 뒤 보급기가 오는지
     this.time = 0;
     this.stateT = 0;
     this.turnLeft = TURN_SECONDS;
@@ -138,11 +163,47 @@ class Game {
       }
     }
 
+    // 라운드가 넘어갈 때 보급기 등장
+    if (wrapped) {
+      if (--this.supplyIn <= 0) {
+        this.callSupplyPlane(1 + (Math.random() < 0.45 ? 1 : 0));
+        this.supplyIn = 2 + Math.floor(Math.random() * 3);
+      }
+    }
+
     this.turnIdx = i;
     this.cur = this.tanks[i];
     const t = this.cur;
-    t.fuel = t.frozen > 0 ? Math.round(t.maxFuel * 0.3) : t.maxFuel;
-    if (t.frozen > 0) t.frozen--;
+
+    // 턴 시작 시 지속 효과
+    if (t.buffs.regen) {
+      const before = t.hp;
+      t.hp = Math.min(t.maxHp, t.hp + t.buffs.regen);
+      if (t.hp > before) this.floaters.push({ x: t.x, y: t.y - 60, text: `+${t.hp - before}`, t: 0, color: '#4fe07f' });
+    }
+    if (t.acid > 0 && !t.buffs.heatsink) {
+      t.acid--;
+      this.damage(t, 12, null, true);
+      this.floaters.push({ x: t.x, y: t.y - 70, text: '산성비', t: 0, color: '#a8e05f' });
+      if (!t.alive) { if (this.checkWin()) return; }
+    } else if (t.acid > 0) {
+      t.acid--;
+    }
+    if (t.buffs.smoke > 0) t.buffs.smoke--;
+
+    let fuelMul = 1;
+    if (t.frozen > 0) { fuelMul *= 0.3; t.frozen--; }
+    if (t.oiled > 0) { fuelMul *= 0.5; t.oiled--; }
+    t.fuel = Math.round(t.maxFuel * fuelMul);
+    // 한 턴짜리 사격 강화는 턴이 시작될 때 초기화
+    t.buffs.extraShot = 0;
+    t.movedThisTurn = false;
+    if (t.buffs.dome > 0) t.buffs.dome--;
+    if (t.buffs.heatsink) {
+      const before = t.hp;
+      t.hp = Math.min(t.maxHp, t.hp + t.buffs.heatsink);
+      if (t.hp > before) this.floaters.push({ x: t.x, y: t.y - 68, text: `+${t.hp - before}`, t: 0, color: '#ff9a5a' });
+    }
     if (!t.hasAmmo(t.weapon)) {
       t.weapon = 0;
       for (let k = 0; k < t.weapons.length; k++) if (t.hasAmmo(k)) { t.weapon = k; break; }
@@ -201,18 +262,19 @@ class Game {
   }
 
   probeWalk(t, dx) {
-    const r = this.walk(t.x, t.y, Math.sign(dx), Math.min(Math.abs(dx), t.fuel), t.type.climb);
+    const r = this.walk(t.x, t.y, Math.sign(dx), Math.min(Math.abs(dx), t.fuel), t.climb);
     return { x: r.x, y: r.y };
   }
 
   moveTank(t, dir, dt) {
     t.facing = dir;
     if (t.fuel <= 0) return 0;
-    const r = this.walk(t.x, t.y, dir, Math.min(MOVE_SPEED * dt, t.fuel), t.type.climb);
+    const r = this.walk(t.x, t.y, dir, Math.min(MOVE_SPEED * dt, t.fuel), t.climb);
     const moved = r.used;
     t.x = r.x; t.y = r.y; t.fuel -= moved;
     t.roll += moved * dir;
     if (moved > 0.01 && HAS_FX) FX.dust(t.x - dir * 14 * t.type.size, t.y, -dir);
+    if (moved > 0.01) { t.movedThisTurn = true; this.checkCratePickup(t); this.checkMineStep(t); }
     return moved;
   }
 
@@ -258,6 +320,19 @@ class Game {
     this.fire(this.cur);
   }
 
+  /** 아이템 효과가 반영된 발사체 옵션 */
+  shotOpts(t) {
+    return {
+      powerMul: t.type.power * (t.buffs.power || 1),
+      windK: t.buffs.wind != null ? t.buffs.wind : 1,
+      g: t.buffs.lowGrav ? PHYS.G * 0.55 : PHYS.G,
+      homing: t.buffs.homing ? 1 : 0,
+      pierce: t.buffs.pierce || 0,
+      bounce: t.buffs.bounce || 0,
+      splitFuse: t.buffs.splitFuse || 0,
+    };
+  }
+
   /** 전차의 지면 기울기 (라디안) */
   tiltOf(t) {
     const s = t.type.size;
@@ -277,10 +352,15 @@ class Game {
     if (t.ammo[id] !== Infinity) t.ammo[id]--;
 
     const tip = t.barrelTip;
-    const offsets = w.count === 1 ? [0] : Array.from({ length: w.count }, (_, i) => (i - (w.count - 1) / 2) * w.spread);
+    let offsets = w.count === 1 ? [0] : Array.from({ length: w.count }, (_, i) => (i - (w.count - 1) / 2) * w.spread);
+    if (t.buffs.twinBarrel) offsets = offsets.concat(offsets.map((o) => o + 2.2));
+    const opts = this.shotOpts(t);
     for (const off of offsets) {
-      const p = makeProjectile(tip.x, tip.y, t.angle + off, t.power, t.id, w, { powerMul: t.type.power });
-      this.projectiles.push(p);
+      this.projectiles.push(makeProjectile(tip.x, tip.y, t.angle + off, t.power, t.id, w, opts));
+    }
+    // 한 발짜리 아이템 효과 소모
+    for (const k of ['pierce', 'bounce', 'splitFuse', 'homing', 'lowGrav', 'overcharge']) {
+      if (t.buffs[k]) t.buffs[k]--;
     }
     t.lastPower = t.power;
     t.lastTrail = [];
@@ -378,7 +458,10 @@ class Game {
   }
 
   explode(x, y, w, ownerId) {
-    const r = w.radius;
+    const owner = ownerId != null && ownerId >= 0 ? this.tanks[ownerId] : null;
+    const r = Math.round(w.radius * ((owner && owner.buffs.radius) || 1));
+    let dmgMul = (owner && owner.buffs.damage) || 1;
+    if (owner && owner.buffs.siege && !owner.movedThisTurn) dmgMul *= 1 + owner.buffs.siege / 100;
     if (r > 0) Terrain.crater(this.ground, x, y, r, H - 4);
     if (HAS_FX) {
       FX.explosion(x, y, r, w.kind || 'normal');
@@ -386,6 +469,10 @@ class Game {
       if (r > 60) FX.flash(clamp((r - 50) / 90, 0, 0.7), w.kind === 'nuke' ? '#fff3d0' : '#ffd9a0');
     }
     if (typeof Sfx !== 'undefined' && Sfx.explode) Sfx.explode(r, w.kind || 'normal');
+
+    // 폭발은 지뢰와 보급 상자에도 영향을 줍니다
+    this.blastCrates(x, y, r * 1.2);
+    this.blastMines(x, y, r * 1.1, ownerId);
 
     const R = r * 1.35;
     if (R <= 0) return;
@@ -395,16 +482,42 @@ class Game {
       if (d < R) {
         let dmg = w.damage * (1 - d / R);
         if (d < r * 0.5) dmg = Math.max(dmg, w.damage * 0.88);
-        this.damage(t, Math.round(dmg * t.type.armor), ownerId);
+        dmg = dmg * dmgMul * t.type.armor * (t.buffs.armor || 1);
+        if (t.buffs.bulwark) dmg *= 1 - t.buffs.bulwark;
+        if (t.buffs.dome > 0) dmg *= 0.3;
+        this.damage(t, Math.round(dmg), ownerId);
       }
     }
   }
 
   damage(t, dmg, srcId, silent) {
     if (dmg <= 0 || !t.alive) return;
-    t.hp = Math.max(0, t.hp - dmg);
     const src = srcId != null && srcId >= 0 ? this.tanks[srcId] : null;
     const friendly = src && src !== t && src.team === t.team;
+
+    // ── 아이템 방어 단계 ──
+    if (t.buffs.dodge > 0) {
+      t.buffs.dodge--;
+      this.floaters.push({ x: t.x, y: t.y - 62, text: '회피!', t: 0, color: '#9fe8ff' });
+      if (typeof Sfx !== 'undefined' && Sfx.armorGraze) Sfx.armorGraze();
+      this.ui.refresh(this);
+      return;
+    }
+    if (t.buffs.shield > 0) {
+      t.buffs.shield--;
+      this.floaters.push({ x: t.x, y: t.y - 62, text: '방어막', t: 0, color: '#6fc8ff' });
+      if (HAS_FX) FX.explosion(t.cx, t.cy, 26, 'ice');
+      if (typeof Sfx !== 'undefined' && Sfx.armorGraze) Sfx.armorGraze();
+      this.ui.refresh(this);
+      return;
+    }
+    if (t.buffs.reactive > 0) {
+      t.buffs.reactive--;
+      dmg = Math.round(dmg * 0.5);
+      this.floaters.push({ x: t.x + 24, y: t.y - 70, text: '반응장갑', t: 0, color: '#ffcc2e' });
+    }
+
+    t.hp = Math.max(0, t.hp - dmg);
     if (src && src !== t && !friendly) { src.damageDealt += dmg; src.hits++; }
     this.stats.totalDamage += dmg;
     this.floaters.push({
@@ -413,14 +526,303 @@ class Game {
       big: dmg >= 40,
     });
     if (!silent && typeof Sfx !== 'undefined' && Sfx.metalHit) Sfx.metalHit(clamp(dmg / 60, 0.2, 1));
-    if (t.hp <= 0) {
-      t.alive = false;
-      if (HAS_FX) { FX.explosion(t.x, t.cy, 44, 'tank'); FX.shake(0.8); }
-      if (typeof Sfx !== 'undefined' && Sfx.destroy) Sfx.destroy();
-      if (src && src !== t && !friendly) src.kills++;
-      this.ui.banner(`💥 ${t.name} 격파!`, 1300);
+
+    // 흡혈 · 반사
+    if (src && src !== t && !friendly && src.alive && src.buffs.leech) {
+      const heal = Math.round(dmg * src.buffs.leech);
+      if (heal > 0) {
+        src.hp = Math.min(src.maxHp, src.hp + heal);
+        this.floaters.push({ x: src.x, y: src.y - 62, text: `+${heal}`, t: 0, color: '#ff6f8f' });
+      }
+    }
+    if (t.buffs.thorns && src && src !== t && !friendly && src.alive) {
+      const back = Math.round(dmg * t.buffs.thorns);
+      if (back > 0) {
+        src.hp = Math.max(0, src.hp - back);
+        this.floaters.push({ x: src.x, y: src.y - 56, text: `-${back}`, t: 0, color: '#a8e05f' });
+        if (src.hp <= 0) this.destroyTank(src, t);
+      }
+    }
+
+    // 극저온 코팅 — 내 공격에 맞은 적이 얼어붙습니다
+    if (src && src !== t && !friendly && src.buffs.frostTouch && t.alive) {
+      t.frozen = Math.max(t.frozen, src.buffs.frostTouch);
+      this.floaters.push({ x: t.x + 22, y: t.y - 76, text: '빙결', t: 0, color: '#9fe8ff' });
+    }
+    // 자동 응급 나노 — 위험할 때 한 번 살려 줍니다
+    if (t.alive && t.hp > 0 && t.buffs.autoMedic && t.hp < t.maxHp * 0.3) {
+      const heal = t.buffs.autoMedic;
+      t.buffs.autoMedic = 0;
+      t.hp = Math.min(t.maxHp, t.hp + heal);
+      this.floaters.push({ x: t.x, y: t.y - 84, text: `🚨 응급 회복 +${heal}`, t: 0, color: '#4fe07f', big: true });
+    }
+
+    if (t.hp <= 0) this.destroyTank(t, friendly ? null : src);
+    this.ui.refresh(this);
+  }
+
+  destroyTank(t, killer) {
+    if (!t.alive) return;
+    // 불사조 회로 — 한 번 부활
+    if (t.buffs.phoenix > 0) {
+      t.buffs.phoenix--;
+      t.hp = t.buffs.phoenixHp || 45;
+      if (HAS_FX) { FX.explosion(t.x, t.cy, 52, 'fire'); FX.flash(0.4, '#ffb060'); }
+      this.floaters.push({ x: t.x, y: t.y - 76, text: '부활!', t: 0, color: '#ff8a3d', big: true });
+      this.ui.banner(`🔥 ${t.name} 부활!`, 1400);
+      return;
+    }
+    t.alive = false;
+    if (HAS_FX) { FX.explosion(t.x, t.cy, 44, 'tank'); FX.shake(0.8); }
+    if (typeof Sfx !== 'undefined' && Sfx.destroy) Sfx.destroy();
+    if (killer && killer !== t) {
+      killer.kills++;
+      if (killer.buffs.scavenger) {
+        this.bonusCredits = (this.bonusCredits || 0) + killer.buffs.scavenger;
+        this.floaters.push({ x: killer.x, y: killer.y - 90, text: `◈ +${killer.buffs.scavenger}`, t: 0, color: '#ffb02e' });
+      }
+    }
+    // 자폭 장치
+    if (t.buffs.deathBlast) {
+      this.pending.push({
+        delay: 0.25, x: t.x, y: t.cy,
+        w: { radius: t.buffs.deathBlast, damage: Math.round(t.buffs.deathBlast * 0.75), kind: 'nuke' },
+        owner: t.id,
+      });
+      this.floaters.push({ x: t.x, y: t.y - 96, text: '💀 자폭!', t: 0, color: '#ff5348', big: true });
+    }
+    // 파괴된 전차는 보급 상자를 떨굽니다
+    this.dropCrate(t.x, t.y - 30, rollDropItem(this.stage), true);
+    this.ui.banner(`💥 ${t.name} 격파! — 보급품을 떨어뜨렸습니다`, 1500);
+  }
+
+  /* ═════════════ 아이템 · 보급 ═════════════ */
+
+  /** 전차에게 아이템 효과를 적용. silent=true 면 배너를 띄우지 않습니다 */
+  grantItem(t, inst, silent) {
+    if (typeof inst === 'string') inst = { id: inst, roll: 1 };
+    const def = inst && itemDef(inst.id);
+    if (!def || !t) return null;
+    const v = itemValue(inst);
+    let label;
+    if (def.kind === 'active') {
+      t.addItem(inst);
+      label = `${def.name} ×${itemUses(inst)}`;
+    } else {
+      label = def.apply ? def.apply(this, t, v) : def.name;
+    }
+    if (!silent) {
+      this.floaters.push({ x: t.x, y: t.y - 84, text: `${def.icon} ${itemName(inst)}`, t: 0, color: RARITY[def.rarity].color, big: true });
+      if (label && label !== def.name) {
+        this.floaters.push({ x: t.x, y: t.y - 64, text: label, t: 0, color: '#e9ecf4' });
+      }
     }
     this.ui.refresh(this);
+    return label;
+  }
+
+  /** 상자 하나 떨어뜨리기 (parachute=false 면 바로 지면에) */
+  dropCrate(x, y, inst, withChute) {
+    this.crates.push({
+      x: clamp(x, 24, W - 24), y,
+      vy: withChute ? 0.8 : 3,
+      chute: !!withChute,
+      landed: false,
+      item: inst || rollCrateItem(this.stage),
+      t: 0, bob: Math.random() * 6,
+    });
+  }
+
+  /** 보급기가 화면을 가로지르며 상자를 떨굽니다 */
+  callSupplyPlane(count) {
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    const n = Math.max(1, count || 1);
+    const drops = [];
+    for (let i = 0; i < n; i++) drops.push(120 + Math.random() * (W - 240));
+    drops.sort((a, b) => (dir > 0 ? a - b : b - a));
+    this.planes.push({
+      kind: 'supply', dir,
+      x: dir > 0 ? -140 : W + 140,
+      y: 90 + Math.random() * 70,
+      speed: 210 * dir,
+      drops, dropped: 0,
+    });
+    this.ui.banner('🛩 보급기 접근 — 상자를 떨어뜨립니다', 1600);
+    if (typeof Sfx !== 'undefined' && Sfx.windGust) Sfx.windGust(6);
+  }
+
+  /** 폭격기 — 목표 좌표에 3연발 */
+  callAirstrike(targetX, ownerId, count) {
+    const dir = targetX > W / 2 ? -1 : 1;
+    this.planes.push({
+      kind: 'bomber', dir,
+      x: dir > 0 ? -160 : W + 160,
+      y: 120 + Math.random() * 40,
+      speed: 280 * dir,
+      target: clamp(targetX, 40, W - 40),
+      owner: ownerId,
+      bombs: Math.max(1, count || 3),
+      dropped: 0,
+    });
+    this.ui.banner('✈ 폭격기 진입', 1500);
+  }
+
+  /** 유성우 */
+  callMeteors(n, ownerId) {
+    const w = { id: 'meteor', name: '유성', radius: 52, damage: 46, behavior: 'std', kind: 'nuke', fire: 'heavy', count: 1, spread: 0, speed: 1 };
+    for (let i = 0; i < n; i++) {
+      const x = 80 + Math.random() * (W - 160);
+      this.pending.push({ delay: 0.35 * i + 0.2, x, y: Terrain.heightAt(this.ground, x), w, owner: ownerId, meteor: true });
+    }
+    if (typeof Sfx !== 'undefined' && Sfx.warning) Sfx.warning();
+  }
+
+  updatePlanes(dt) {
+    for (let i = this.planes.length - 1; i >= 0; i--) {
+      const pl = this.planes[i];
+      const prev = pl.x;
+      pl.x += pl.speed * dt;
+      if (pl.kind === 'supply') {
+        while (pl.dropped < pl.drops.length) {
+          const dx = pl.drops[pl.dropped];
+          const passed = pl.dir > 0 ? prev < dx && pl.x >= dx : prev > dx && pl.x <= dx;
+          if (!passed) break;
+          this.dropCrate(dx, pl.y + 10, rollCrateItem(this.stage), true);
+          pl.dropped++;
+        }
+      } else if (pl.kind === 'bomber' && pl.dropped < (pl.bombs || 3)) {
+        const dx = pl.target + (pl.dropped - (pl.bombs || 3) / 2) * 46 * pl.dir;
+        const passed = pl.dir > 0 ? prev < dx && pl.x >= dx : prev > dx && pl.x <= dx;
+        if (passed) {
+          const w = { id: 'bomb', name: '폭탄', radius: 44, damage: 34, behavior: 'std', kind: 'normal', fire: 'heavy', count: 1, spread: 0, speed: 1 };
+          this.projectiles.push(makeProjectile(pl.x, pl.y + 12, -90, 6, pl.owner != null ? pl.owner : -1, w, { powerMul: 1 }));
+          pl.dropped++;
+        }
+      }
+      if (pl.x < -260 || pl.x > W + 260) this.planes.splice(i, 1);
+    }
+  }
+
+  updateCrates(dt) {
+    for (let i = this.crates.length - 1; i >= 0; i--) {
+      const c = this.crates[i];
+      c.t += dt;
+      const gy = Terrain.heightAt(this.ground, c.x) - 9;
+      if (!c.landed) {
+        c.vy = Math.min(c.chute ? 1.6 : 6.5, c.vy + (c.chute ? 0.06 : 0.35));
+        c.y += c.vy * dt * 60;
+        c.x = clamp(c.x + (c.chute ? this.wind * 0.16 * dt * 60 : 0), 16, W - 16);
+        if (c.y >= gy) { c.y = gy; c.landed = true; if (HAS_FX) FX.dust(c.x, gy + 8, 0); }
+      } else {
+        c.y = gy;   // 지형이 깎이면 따라 내려옵니다
+      }
+      // 근처 전차가 자동으로 획득
+      for (const t of this.tanks) {
+        if (!t.alive) continue;
+        const reach = 26 * t.type.size * (t.buffs.magnet || 1);
+        if (Math.abs(t.x - c.x) < reach && Math.abs(t.y - c.y) < 70) {
+          this.takeCrate(t, i);
+          break;
+        }
+      }
+    }
+  }
+
+  checkCratePickup(t) {
+    for (let i = this.crates.length - 1; i >= 0; i--) {
+      const c = this.crates[i];
+      const reach = 26 * t.type.size * (t.buffs.magnet || 1);
+      if (Math.abs(t.x - c.x) < reach && Math.abs(t.y - c.y) < 70) { this.takeCrate(t, i); return; }
+    }
+  }
+
+  takeCrate(t, idx) {
+    const c = this.crates[idx];
+    if (!c) return;
+    this.crates.splice(idx, 1);
+    t.pickups++;
+    const times = t.buffs.dupe ? 2 : 1;
+    for (let k = 0; k < times; k++) {
+      const inst = k === 0 ? c.item : rollCrateItem(this.stage);
+      if (inst && t.buffs.luck) inst.roll = Math.round(Math.min(1.62, inst.roll * (1 + t.buffs.luck)) * 100) / 100;
+      this.grantItem(t, inst);
+    }
+    if (typeof Sfx !== 'undefined' && Sfx.select) Sfx.select();
+    if (HAS_FX) FX.spark(c.x, c.y, 10);
+  }
+
+  /** 지형 복원기 — 원본 높이맵으로 서서히 되돌립니다 */
+  restoreTerrain(cx, half) {
+    const x0 = Math.max(0, Math.floor(cx - half));
+    const x1 = Math.min(W - 1, Math.ceil(cx + half));
+    for (let x = x0; x <= x1; x++) {
+      const k = 1 - Math.abs(x - cx) / half;
+      this.ground[x] += (this.ground0[x] - this.ground[x]) * clamp(k, 0, 1);
+    }
+    if (HAS_FX) {
+      for (let i = 0; i < 8; i++) FX.dust(cx + (Math.random() * 2 - 1) * half, Terrain.heightAt(this.ground, cx), 0);
+    }
+  }
+
+  /** 폭발이 상자를 파괴 */
+  blastCrates(x, y, r) {
+    for (let i = this.crates.length - 1; i >= 0; i--) {
+      const c = this.crates[i];
+      if (Math.hypot(c.x - x, c.y - y) < r) {
+        this.crates.splice(i, 1);
+        if (HAS_FX) FX.debris(c.x, c.y, 8, '#8a6b42');
+      }
+    }
+  }
+
+  /* ── 지뢰 ── */
+
+  checkMineStep(t) {
+    for (let i = this.mines.length - 1; i >= 0; i--) {
+      const m = this.mines[i];
+      if (m.team === t.team) continue;
+      if (Math.abs(t.x - m.x) < 20 && Math.abs(t.y - m.y) < 60) {
+        this.mines.splice(i, 1);
+        this.explode(m.x, m.y, { radius: 46, damage: m.dmg || 42, kind: 'normal' }, m.owner);
+        return;
+      }
+    }
+  }
+
+  blastMines(x, y, r, ownerId) {
+    for (let i = this.mines.length - 1; i >= 0; i--) {
+      const m = this.mines[i];
+      if (Math.hypot(m.x - x, m.y - y) < r) {
+        this.mines.splice(i, 1);
+        this.pending.push({
+          delay: 0.1, x: m.x, y: m.y,
+          w: { radius: 46, damage: m.dmg || 42, kind: 'normal' },
+          owner: m.owner != null ? m.owner : ownerId,
+        });
+      }
+    }
+  }
+
+  updateMines(dt) {
+    for (const m of this.mines) { m.t += dt; m.y = Terrain.heightAt(this.ground, m.x) - 3; }
+  }
+
+  /** 전투 중 아이템 사용 */
+  useItem(idx) {
+    const t = this.cur;
+    if (!t || this.state !== 'aim') return false;
+    const slot = t.items[idx];
+    if (!slot || slot.uses <= 0) return false;
+    const def = itemDef(slot.id);
+    if (!def || !def.apply) return false;
+    const label = def.apply(this, t, itemValue(slot));
+    if (label == null) return false;
+    slot.uses--;
+    if (slot.uses <= 0) t.items.splice(idx, 1);
+    this.floaters.push({ x: t.x, y: t.y - 80, text: `${def.icon} ${label}`, t: 0, color: RARITY[def.rarity].color, big: true });
+    if (typeof Sfx !== 'undefined' && Sfx.select) Sfx.select();
+    this.ui.refresh(this);
+    return true;
   }
 
   /** 턴 시작 시 불바다 피해 */
@@ -460,6 +862,9 @@ class Game {
     this.updateFloaters(dt);
     this.updatePending(dt);
     this.updateBurnVisual(dt);
+    this.updatePlanes(dt);
+    this.updateCrates(dt);
+    this.updateMines(dt);
     this.settleTanks();
 
     switch (this.state) {
@@ -478,7 +883,18 @@ class Game {
         break;
       case 'fire':
         this.updateProjectiles();
-        if (!this.projectiles.length && !this.pending.length && this.stateT > 0.25) this.setState('settle');
+        if (!this.projectiles.length && !this.pending.length && this.stateT > 0.25) {
+          // 속사 장전기 — 같은 턴에 한 번 더
+          if (this.cur && this.cur.alive && this.cur.buffs.extraShot > 0) {
+            this.cur.buffs.extraShot--;
+            this.turnLeft = Math.max(this.turnLeft, 14);
+            this.ui.banner('⏩ 추가 사격!', 900);
+            if (this.cur.isAI) this.ai = { phase: 'wait', t: 0, plan: null, moved: 0 };
+            this.setState('aim');
+          } else {
+            this.setState('settle');
+          }
+        }
         break;
       case 'settle': {
         const busy = this.tanks.some((t) => t.falling) || this.pending.length > 0;
@@ -520,6 +936,23 @@ class Game {
     ai.t += dt;
     switch (ai.phase) {
       case 'wait':
+        // 주운 아이템을 가끔 사용합니다
+        if (!ai.usedItem && t.items.length && ai.t > 0.2) {
+          ai.usedItem = true;
+          if (Math.random() < 0.65) {
+            const idx = Math.floor(Math.random() * t.items.length);
+            const slot = t.items[idx];
+            const def = itemDef(slot.id);
+            if (def && def.apply) {
+              const label = def.apply(this, t, itemValue(slot));
+              if (label != null) {
+                slot.uses--;
+                if (slot.uses <= 0) t.items.splice(idx, 1);
+                this.floaters.push({ x: t.x, y: t.y - 80, text: `${def.icon} ${label}`, t: 0, color: RARITY[def.rarity].color });
+              }
+            }
+          }
+        }
         if (ai.t > 0.45) {
           ai.plan = AI.plan(this, t);
           if (!ai.plan) { this.setState('settle'); return; }
@@ -597,6 +1030,23 @@ class Game {
         continue;
       }
 
+      // 유도 장치 — 가장 가까운 적 쪽으로 살짝 휘어짐
+      if (p.homing && p.t > 8) {
+        const owner = this.tanks[p.owner];
+        let best = null, bd = Infinity;
+        for (const tk of this.tanks) {
+          if (!tk.alive || (owner && tk.team === owner.team)) continue;
+          const d = Math.hypot(tk.cx - p.x, tk.cy - p.y);
+          if (d < bd) { bd = d; best = tk; }
+        }
+        if (best) {
+          const dx = best.cx - p.x, dy = best.cy - p.y;
+          const L = Math.hypot(dx, dy) || 1;
+          p.vx += (dx / L) * 0.1;
+          p.vy += (dy / L) * 0.07;
+        }
+      }
+
       stepProjectile(p, this.wind);
       if (p.t % 2 === 0) p.trail.push(p.x, p.y);
       if (HAS_FX) FX.trail(p.x, p.y, p.weapon ? p.weapon.kind : 'normal');
@@ -632,6 +1082,35 @@ class Game {
       const c = collideProjectile(p, this.ground, this.tanks, p.owner);
       if (!c) continue;
 
+      // 관통 탄심 — 지형을 한 겹 뚫고 지나갑니다
+      if (c.type === 'ground' && p.pierce > 0) {
+        p.pierce--;
+        if (HAS_FX) { FX.debris(c.x, c.y, 7, '#6b4a2a'); FX.spark(c.x, c.y, 5); }
+        for (let k = 0; k < 300; k++) {
+          stepProjectile(p, this.wind);
+          if (p.x < 0 || p.x > W || p.y > H + 40) break;
+          if (p.y < Terrain.heightAt(this.ground, p.x)) break;
+        }
+        continue;
+      }
+
+      // 도탄 장치 — 지면에서 한 번 튕깁니다
+      if (c.type === 'ground' && p.bounce > 0) {
+        p.bounce--;
+        const gl = Terrain.heightAt(this.ground, clamp(c.x - 6, 0, W - 1));
+        const gr = Terrain.heightAt(this.ground, clamp(c.x + 6, 0, W - 1));
+        const ang = Math.atan2(gr - gl, 12);
+        const nx = Math.sin(ang), ny = -Math.cos(ang);
+        const dot = p.vx * nx + p.vy * ny;
+        p.vx = (p.vx - 2 * dot * nx) * 0.72;
+        p.vy = (p.vy - 2 * dot * ny) * 0.72;
+        p.x = c.x;
+        p.y = Terrain.heightAt(this.ground, clamp(c.x, 0, W - 1)) - 5;
+        if (HAS_FX) FX.spark(c.x, c.y, 7);
+        if (typeof Sfx !== 'undefined' && Sfx.armorGraze) Sfx.armorGraze();
+        continue;
+      }
+
       const owner = this.tanks[p.owner];
       if (c.type === 'out') {
         this.projectiles.splice(i, 1);
@@ -643,6 +1122,17 @@ class Game {
       if (done) {
         this.projectiles.splice(i, 1);
         if (owner && owner.lastTrail) owner.lastTrail.push(p.trail);
+        // 분열 신관 — 착탄점 좌우로 연쇄 폭발
+        if (p.splitFuse) {
+          for (let k = 0; k < 2; k++) {
+            const ox = clamp(c.x + (k === 0 ? -36 : 36), 6, W - 6);
+            this.pending.push({
+              delay: 0.13 * (k + 1), x: ox,
+              y: Terrain.heightAt(this.ground, ox) - 4,
+              w: p.weapon, owner: p.owner,
+            });
+          }
+        }
       }
     }
   }
@@ -690,7 +1180,9 @@ class Game {
     t.falling = false;
     t.vy = 0;
     const drop = t.y - (t.fallFrom != null ? t.fallFrom : t.y);
-    if (t.alive && drop > 50) {
+    if (t.alive && drop > 50 && t.buffs.chute) {
+      this.floaters.push({ x: t.x, y: t.y - 66, text: '낙하산', t: 0, color: '#9fe8ff' });
+    } else if (t.alive && drop > 50) {
       this.damage(t, Math.round((drop - 50) * 0.32), null);
       if (HAS_FX) { FX.dust(t.x, t.y, 0); FX.debris(t.x, t.y, 8, '#6b4a2a'); }
       if (typeof Sfx !== 'undefined' && Sfx.collapse) Sfx.collapse();
@@ -727,12 +1219,16 @@ class Game {
     else this.fallbackTerrain(c);
 
     this.drawBurns(c);
+    this.drawMines(c);
+    this.drawCrates(c);
     this.drawAimHint(c);
 
     for (const t of this.tanks) if (!t.alive) this.drawTank(c, t);
     for (const t of this.tanks) if (t.alive) this.drawTank(c, t);
 
     this.drawProjectiles(c);
+    this.drawPlanes(c);
+    this.drawMeteorWarnings(c);
     if (HAS_FX) FX.drawFront(c);
     for (const t of this.tanks) this.drawNamePlate(c, t);
     this.drawFloaters(c);
@@ -784,6 +1280,117 @@ class Game {
     }
   }
 
+  /* ── 보급 상자 · 지뢰 · 항공기 ── */
+
+  drawCrates(c) {
+    for (const cr of this.crates) {
+      const def = cr.item && itemDef(cr.item.id);
+      const col = def ? RARITY[def.rarity].color : '#8fa3bf';
+      c.save();
+      // 낙하산
+      if (!cr.landed && cr.chute) {
+        const sway = Math.sin(cr.t * 2.4) * 5;
+        c.fillStyle = 'rgba(240,246,255,0.9)';
+        c.beginPath();
+        c.ellipse(cr.x + sway, cr.y - 26, 19, 13, 0, Math.PI, 0);
+        c.fill();
+        c.strokeStyle = 'rgba(200,215,235,0.85)';
+        c.lineWidth = 1.2;
+        c.beginPath();
+        c.moveTo(cr.x + sway - 18, cr.y - 26); c.lineTo(cr.x - 6, cr.y - 8);
+        c.moveTo(cr.x + sway + 18, cr.y - 26); c.lineTo(cr.x + 6, cr.y - 8);
+        c.stroke();
+      }
+      const bob = cr.landed ? Math.sin(this.time * 3 + cr.bob) * 1.6 : 0;
+      const y = cr.y + bob;
+      // 상자
+      TankArt.rr(c, cr.x - 9, y - 9, 18, 18, 3);
+      const g = c.createLinearGradient(0, y - 9, 0, y + 9);
+      g.addColorStop(0, '#b98f52');
+      g.addColorStop(1, '#6d5027');
+      c.fillStyle = g; c.fill();
+      c.strokeStyle = '#3a2a14'; c.lineWidth = 1.2; c.stroke();
+      c.fillStyle = col;
+      c.fillRect(cr.x - 9, y - 2.4, 18, 4.8);
+      c.strokeStyle = 'rgba(255,255,255,0.28)'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(cr.x - 9, y - 5); c.lineTo(cr.x + 9, y - 5); c.stroke();
+      // 발광
+      if (cr.landed) {
+        const pulse = 0.4 + Math.sin(this.time * 3.5 + cr.bob) * 0.25;
+        const rg = c.createRadialGradient(cr.x, y, 2, cr.x, y, 30);
+        rg.addColorStop(0, TankArt.alpha(col, 0.42 * pulse));
+        rg.addColorStop(1, TankArt.alpha(col, 0));
+        c.fillStyle = rg;
+        c.beginPath(); c.arc(cr.x, y, 30, 0, Math.PI * 2); c.fill();
+      }
+      if (def) {
+        c.font = '12px system-ui, sans-serif';
+        c.textAlign = 'center';
+        c.fillText(def.icon, cr.x, y + 4);
+      }
+      c.restore();
+    }
+  }
+
+  drawMines(c) {
+    for (const m of this.mines) {
+      c.save();
+      c.fillStyle = '#22242a';
+      c.beginPath(); c.ellipse(m.x, m.y, 7, 4, 0, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = '#4a4d55'; c.lineWidth = 1; c.stroke();
+      const blink = Math.sin(m.t * 5) > 0.2;
+      c.fillStyle = blink ? '#ff5348' : 'rgba(255,83,72,0.25)';
+      c.beginPath(); c.arc(m.x, m.y - 3, 1.7, 0, Math.PI * 2); c.fill();
+      c.restore();
+    }
+  }
+
+  drawPlanes(c) {
+    for (const pl of this.planes) {
+      c.save();
+      c.translate(pl.x, pl.y);
+      c.scale(pl.dir, 1);
+      const bomber = pl.kind === 'bomber';
+      const col = bomber ? '#4a4f5c' : '#6b7686';
+      // 동체
+      c.fillStyle = col;
+      c.beginPath();
+      c.moveTo(-34, 0); c.lineTo(-24, -5); c.lineTo(20, -5);
+      c.lineTo(34, 0); c.lineTo(20, 5); c.lineTo(-24, 5);
+      c.closePath(); c.fill();
+      c.strokeStyle = '#22262e'; c.lineWidth = 1.1; c.stroke();
+      // 날개 · 꼬리
+      c.fillStyle = TankArt.shade(col, -0.2);
+      c.beginPath(); c.moveTo(-4, -3); c.lineTo(8, -20); c.lineTo(14, -20); c.lineTo(8, -3); c.closePath(); c.fill();
+      c.beginPath(); c.moveTo(-4, 3); c.lineTo(8, 18); c.lineTo(14, 18); c.lineTo(8, 3); c.closePath(); c.fill();
+      c.beginPath(); c.moveTo(-30, -2); c.lineTo(-24, -13); c.lineTo(-19, -13); c.lineTo(-22, -2); c.closePath(); c.fill();
+      // 조종석 · 표식
+      c.fillStyle = '#a8e4ff';
+      c.beginPath(); c.ellipse(18, -2, 5, 2.6, 0, 0, Math.PI * 2); c.fill();
+      c.fillStyle = bomber ? '#ff5348' : '#4fe07f';
+      c.beginPath(); c.arc(0, 0, 2.6, 0, Math.PI * 2); c.fill();
+      // 프로펠러 흐림
+      c.strokeStyle = 'rgba(220,230,245,0.35)';
+      c.lineWidth = 2;
+      c.beginPath(); c.ellipse(34, 0, 2.5, 11, 0, 0, Math.PI * 2); c.stroke();
+      c.restore();
+    }
+  }
+
+  drawMeteorWarnings(c) {
+    for (const q of this.pending) {
+      if (!q.meteor) continue;
+      const k = clamp(1 - q.delay / 0.6, 0, 1);
+      c.save();
+      c.globalAlpha = 0.35 + Math.sin(this.time * 18) * 0.25;
+      c.strokeStyle = '#ff7b3d';
+      c.lineWidth = 2.4;
+      c.beginPath(); c.arc(q.x, q.y - 6, 44 * (1 - k * 0.55) + 12, 0, Math.PI * 2); c.stroke();
+      c.beginPath(); c.moveTo(q.x, q.y - 6 - 40); c.lineTo(q.x, q.y - 6 - 14); c.stroke();
+      c.restore();
+    }
+  }
+
   /** 조준 보조: 이전 사격 궤적 + 포구 방향선 */
   drawAimHint(c) {
     const t = this.cur;
@@ -811,6 +1418,37 @@ class Game {
     c.lineTo(tip.x + Math.cos(a) * 62, tip.y + Math.sin(a) * 62);
     c.stroke();
     c.restore();
+
+    // 탄도 컴퓨터 — 예상 궤적과 탄착점
+    if (t.buffs.scope) {
+      const p = makeProjectile(tip.x, tip.y, t.angle, t.power, t.id, t.weaponDef(), this.shotOpts(t));
+      const pts = [];
+      let hit = null;
+      for (let i = 0; i < 1000; i++) {
+        stepProjectile(p, this.wind);
+        if (i % 3 === 0) pts.push(p.x, p.y);
+        if (p.y > H + 40 || p.x < -240 || p.x > W + 240) break;
+        if (p.x >= 0 && p.x < W && p.y >= Terrain.heightAt(this.ground, p.x)) { hit = { x: p.x, y: p.y }; break; }
+      }
+      c.save();
+      c.setLineDash([2, 6]);
+      c.strokeStyle = 'rgba(120,230,180,0.7)';
+      c.lineWidth = 1.8;
+      c.beginPath();
+      for (let i = 0; i < pts.length; i += 2) c.lineTo(pts[i], pts[i + 1]);
+      c.stroke();
+      c.setLineDash([]);
+      if (hit) {
+        c.strokeStyle = 'rgba(120,230,180,0.9)';
+        c.lineWidth = 2;
+        c.beginPath(); c.arc(hit.x, hit.y, 9, 0, Math.PI * 2); c.stroke();
+        c.beginPath();
+        c.moveTo(hit.x - 13, hit.y); c.lineTo(hit.x + 13, hit.y);
+        c.moveTo(hit.x, hit.y - 13); c.lineTo(hit.x, hit.y + 13);
+        c.stroke();
+      }
+      c.restore();
+    }
   }
 
   drawTank(c, t) {
