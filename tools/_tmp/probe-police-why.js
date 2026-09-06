@@ -16,14 +16,14 @@ export default async function run({canvas}){
   for(let i=0;i<120;i++)game.update(1/60);
   P.addWanted(3,'t');
   let minD=1e9;
-  for(let i=0;i<60*60;i++){
+  for(let i=0;i<60*90;i++){
     game.update(1/60);
     const p=game.player.position;
-    if(i%150===0){
+    if(i%300===0){
       const rows=P.cars.map(u=>{const v=u.vehicle;if(!v)return 'novehicle';
         const d=Math.hypot(v.position[0]-p[0],v.position[2]-p[2]);
         const sped=Math.hypot(v.velocity[0],v.velocity[2]);
-        return `${u.state} d=${d.toFixed(0)} sp=${sped.toFixed(1)} thr=${v.input.throttle.toFixed(2)} brk=${v.input.brake.toFixed(2)} str=${v.input.steer.toFixed(2)} lane=${u.laneId} stuck=${u.stuck.toFixed(1)} age=${u.age.toFixed(0)}`;});
+        return `${u.state} d=${d.toFixed(0)} sp=${sped.toFixed(1)} thr=${v.input.throttle.toFixed(2)} brk=${v.input.brake.toFixed(2)} str=${v.input.steer.toFixed(2)} lane=${u.laneId} stuck=${u.stuck.toFixed(1)} np=${u.noProgress.toFixed(0)} best=${u.bestDist.toFixed(0)} age=${u.age.toFixed(0)}`;});
       out.trace.push(`f=${i} vis=${P.playerVisible} search=${P.searching}/${P.searchTimer.toFixed(0)} w=${P.wanted} cars=${P.cars.length} cops=${P.cops.length} | ${rows.join(' || ')}`);
     }
     for(const u of P.cars){const v=u.vehicle;if(!v)continue;

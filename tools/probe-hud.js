@@ -125,7 +125,21 @@ export default async function run({ canvas }) {
   game.mapScreen.update();
   await settle(6);
   out.notes.push('MAP OPEN: ' + geom('#map-root'));
-  game.mapScreen.hide();
+  // Leave a viewpoint the harness can screenshot: `--view map` shows the fullscreen map,
+  // anything else shows the HUD over the game.
+  window.__shot = async (arg) => {
+    const mode = String(arg || '');
+    if (mode.includes('map')) {
+      game.mapScreen.show();
+      for (let i = 0; i < 6; i++) { game.update(1 / 60); game.mapScreen.update(); }
+      await new Promise((r) => setTimeout(r, 400));
+    } else {
+      game.mapScreen.hide();
+      for (let i = 0; i < 6; i++) { game.update(1 / 60); game.hud.update(1 / 60); }
+    }
+    game.render(1 / 60);
+  };
 
+  game.mapScreen.hide();
   return out;
 }

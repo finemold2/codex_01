@@ -179,6 +179,9 @@ export class PathGraph {
     this.sz = new Float32Array(sc);
     this.sPoly = new Int32Array(sc);
     this.sDist = new Float32Array(sc);
+    /** Unit tangent at each query sample, so `nearestDirected` needs no polyline walk. */
+    this.stx = new Float32Array(sc);
+    this.stz = new Float32Array(sc);
 
     let w = 0;
     let minx = Infinity;
@@ -191,10 +194,13 @@ export class PathGraph {
       for (let k = 0; k < cnt; k++) {
         const d = cnt === 1 ? this.len[i] * 0.5 : (k / (cnt - 1)) * this.len[i];
         this.sample(i, d, _pt);
+        this.tangent(i, d, _tan);
         this.sx[w] = _pt[0];
         this.sz[w] = _pt[1];
         this.sPoly[w] = i;
         this.sDist[w] = d;
+        this.stx[w] = _tan[0];
+        this.stz[w] = _tan[1];
         if (_pt[0] < minx) minx = _pt[0];
         if (_pt[0] > maxx) maxx = _pt[0];
         if (_pt[1] < minz) minz = _pt[1];
@@ -418,6 +424,66 @@ export class PathGraph {
   }
 
   /**
+   * Nearest point on the network **travelling the same way we are**.
+   *
+   * `nearest` scores by distance alone, which on a two-way street is a coin toss between the
+   * lane a car is driving down and the oncoming one a few metres beside it. Latching onto the
+   * oncoming lane makes the driver's next waypoint sit *behind* it, and from there it either
+   * spins on the spot or ploughs straight on into the kerb - which is exactly how AI cars
+   * ended up parked nose-first inside buildings. Only lanes whose tangent agrees with the
+   * heading are considered; if none does, the caller gets -1 and can fall back to `nearest`.
+   *
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {number} fx Vehicle forward x (unit).
+   * @param {number} fz Vehicle forward z (unit).
+   * @param {number} [maxR=40] Search radius in metres.
+   * @param {number} [minDot=0.25] Required agreement between lane and heading.
+   * @returns {number} Polyline id, or -1. Results also land in `nearPoly` / `nearDist` /
+   *   `nearDist2`, exactly as {@link PathGraph#nearest} leaves them.
+   */
+  nearestDirected(x, z, fx, fz, maxR = 40, minDot = 0.25) {
+    this.nearPoly = -1;
+    this.nearDist = 0;
+    this.nearDist2 = Infinity;
+    if (this.sampleCount === 0) return -1;
+    const cell = this.cell;
+    const r = maxR > 0 ? maxR : 40;
+    let i0 = Math.floor((x - r - this.gx0) / cell);
+    let i1 = Math.floor((x + r - this.gx0) / cell);
+    let j0 = Math.floor((z - r - this.gz0) / cell);
+    let j1 = Math.floor((z + r - this.gz0) / cell);
+    if (i0 < 0) i0 = 0;
+    if (j0 < 0) j0 = 0;
+    if (i1 >= this.gw) i1 = this.gw - 1;
+    if (j1 >= this.gh) j1 = this.gh - 1;
+    let bestSample = -1;
+    let bestD2 = r * r;
+    for (let ci = i0; ci <= i1; ci++) {
+      const colBase = ci * this.gh;
+      for (let cj = j0; cj <= j1; cj++) {
+        const c = colBase + cj;
+        const s1 = this.cellStart[c + 1];
+        for (let k = this.cellStart[c]; k < s1; k++) {
+          const s = this.cellItem[k];
+          if (this.stx[s] * fx + this.stz[s] * fz < minDot) continue;
+          const dx = this.sx[s] - x;
+          const dz = this.sz[s] - z;
+          const d2 = dx * dx + dz * dz;
+          if (d2 < bestD2) { bestD2 = d2; bestSample = s; }
+        }
+      }
+    }
+    if (bestSample < 0) return -1;
+    const poly = this.sPoly[bestSample];
+    const d = this.project(poly, x, z);
+    this.nearPoly = poly;
+    this.nearDist = d;
+    this.nearDist2 = this.projDist2;
+    return poly;
+  }
+
+  /**
    * Collects query samples whose distance from a point falls inside an annulus.
    * @param {number} x World x.
    * @param {number} z World z.
@@ -500,8 +566,8 @@ export function pursuitSteer(v, tx, tz) {
   // behind it drives dead ahead at full throttle — straight into whatever it is facing.
   // Cars ended up nose-first inside buildings this way and stayed there for the rest of the
   // session. Past the beam, commit to full lock towards the target instead.
-  if (alpha > 1.9) return 1;
-  if (alpha < -1.9) return -1;
+  if (alpha > 1.5708) return 1;
+  if (alpha < -1.5708) return -1;
   const type = v.type || null;
   const wb = type && Number.isFinite(type.wheelBase) ? type.wheelBase : 2.7;
   const smax = type && Number.isFinite(type.steerMax) && type.steerMax > 0.05 ? type.steerMax : 0.6;
@@ -1327,7 +1393,7 @@ export class TrafficManager {
     if (ai.laneDist >= laneLen - 0.6) {
       if (!this._advanceLane(ai)) {
         // Dead end with nowhere to go: snap onto the nearest lane instead of freezing.
-        const near = graph.nearest(x, z, 60);
+        const near = this._reacquire(x, z, fx, fz, 60);
         if (near < 0) { ai.lost += dt; if (ai.lost > 3) this._recycle(v); return; }
         ai.laneId = near;
         ai.laneDist = graph.nearDist;
@@ -1342,7 +1408,7 @@ export class TrafficManager {
     if (offTrack > 100) {
       ai.lost += dt;
       if (ai.lost > 0.8) {
-        const near = graph.nearest(x, z, 70);
+        const near = this._reacquire(x, z, fx, fz, 70);
         if (near >= 0) {
           ai.laneId = near;
           ai.laneDist = graph.nearDist;
@@ -1368,8 +1434,7 @@ export class TrafficManager {
     // along the building behind it, until something stops it. Pulling the carrot in turns the
     // recovery into a real steering command.
     const offset = Math.sqrt(Math.max(0, offTrack));
-    const lookahead = clamp(4.5 + Math.abs(speed) * 0.72, 5.5, 26)
-      / (1 + clamp(offset * 0.25, 0, 2.5));
+    const lookahead = clamp(clamp(6.5 + Math.abs(speed) * 0.72, 8, 26) - offset * 0.9, 8, 26);
     this._routePoint(ai, lookahead, _pt);
     let tx = _pt[0];
     let tz = _pt[1];
@@ -1496,16 +1561,16 @@ export class TrafficManager {
       input.steer = -steer;
       if (ai.stuck > 8) {
         const player = this.game.player;
-        const dpx = player && player.position ? player.position[0] - x : 1e9;
-        const dpz = player && player.position ? player.position[2] - z : 1e9;
-        // Out of sight: recycle. In sight: give the reverse manoeuvre another go rather than
+        const ppx = player && player.position ? fin(player.position[0], 0) : 1e9;
+        const ppz = player && player.position ? fin(player.position[2], 0) : 1e9;
+        // Out of sight: recycle. On screen: give the reverse manoeuvre another go rather than
         // popping the car out of the world in front of the player.
-        if (dpx * dpx + dpz * dpz > 3600) { this._recycle(v); return; }
+        if (this._canVanish(x, z, ppx, ppz)) { this._recycle(v); return; }
         ai.stuck = 0;
         ai.lastX = x;
         ai.lastZ = z;
         // Re-acquire from where the car actually ended up, not from the lane it failed on.
-        const near = graph.nearest(x, z, 70);
+        const near = this._reacquire(x, z, fx, fz, 70);
         if (near >= 0) { ai.laneId = near; ai.laneDist = graph.nearDist; }
         ai.routeLen = 0;
         this._extendRoute(ai);
@@ -1527,9 +1592,9 @@ export class TrafficManager {
       ai.idle += dt;
       if (ai.idle > 40) {
         const player = this.game.player;
-        const dpx = player && player.position ? player.position[0] - x : 1e9;
-        const dpz = player && player.position ? player.position[2] - z : 1e9;
-        if (dpx * dpx + dpz * dpz > 3025) { this._recycle(v); return; }
+        const ppx = player && player.position ? fin(player.position[0], 0) : 1e9;
+        const ppz = player && player.position ? fin(player.position[2], 0) : 1e9;
+        if (this._canVanish(x, z, ppx, ppz)) { this._recycle(v); return; }
         ai.idle = 0;
         ai.anchorX = x;
         ai.anchorZ = z;
@@ -1546,6 +1611,44 @@ export class TrafficManager {
   _recycle(v) {
     const i = this.vehicles.indexOf(v);
     if (i >= 0) this._dropIndex(i, false);
+  }
+
+  /**
+   * Whether a car can be recycled without the player seeing it blink out: either far enough
+   * away not to be noticed, or outside the camera frustum.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {number} px Player x.
+   * @param {number} pz Player z.
+   * @returns {boolean} True when the car may be removed now.
+   * @private
+   */
+  _canVanish(x, z, px, pz) {
+    const dx = x - px;
+    const dz = z - pz;
+    if (dx * dx + dz * dz > 3600) return true;
+    const cam = this.game.camera;
+    if (!cam || typeof cam.frustumContainsSphere !== 'function') return false;
+    try { return !cam.frustumContainsSphere(x, 1.2, z, 3.5); } catch (err) { return false; }
+  }
+
+  /**
+   * Re-acquires a lane for a displaced car, preferring one that runs the way it is facing.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {number} fx Forward x (unit).
+   * @param {number} fz Forward z (unit).
+   * @param {number} r Search radius in metres.
+   * @returns {number} Lane id, or -1.
+   * @private
+   */
+  _reacquire(x, z, fx, fz, r) {
+    const g = this.lanes;
+    const directed = g.nearestDirected(x, z, fx, fz, r);
+    if (directed >= 0) return directed;
+    // Nothing running our way in range (a dead end, or the car is facing a wall): take
+    // whatever is closest and let the pursuit turn it round.
+    return g.nearest(x, z, r);
   }
 
   /**

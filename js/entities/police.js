@@ -91,7 +91,7 @@ const COP_SIGHT = 55;
 /** Line-of-sight tests are refreshed on this period (seconds). */
 const LOS_PERIOD = 0.22;
 /** Distance at which a cruiser deploys its cops when the player is on foot (metres). */
-const DEPLOY_RANGE = 34;
+const DEPLOY_RANGE = 44;
 /** Preferred engagement range for a cop on foot (metres). */
 const COP_RANGE = 11;
 /** Cop movement speed (m/s). */
@@ -123,6 +123,7 @@ const SHOUT_COOLDOWN = 6.5;
  * ------------------------------------------------------------------ */
 
 const _pt = new Float32Array(2);
+const _pt2 = new Float32Array(2);
 const _tan = new Float32Array(2);
 const _origin = new Float32Array(3);
 const _dir = new Float32Array(3);
@@ -136,6 +137,19 @@ const _ctx = {
   lookYaw: 0, distance: 0,
 };
 const _fireOpts = { weapon: 'pistol', shooter: null, damageMul: 0.55 };
+/** Nearest-first selection scratch used by {@link PoliceSystem#_checkVisibility}. */
+const _losIdx = new Int32Array(4);
+const _losD2 = new Float64Array(4);
+
+/**
+ * Bodies a sight line may pass straight through. Trigger volumes (mission markers, pickups)
+ * and water are not cover.
+ * @param {object} body Collision body.
+ * @returns {boolean} True when the body blocks sight.
+ */
+function losBlocks(body) {
+  return body.tag !== 'trigger' && body.tag !== 'water';
+}
 
 /**
  * Reads a number defensively.
@@ -169,6 +183,7 @@ function makeUnit() {
     noProgress: 0,
     targetX: 0,
     targetZ: 0,
+    prevLane: -1,
     prevHealth: 1000,
     siren: null,
     armored: false,
@@ -288,6 +303,7 @@ export class PoliceSystem {
     this._spawnCursor = 0;
     this._roadblockTimer = 0;
     this._roadblocks = 0;
+    this._starveTimer = 0;
     this._heliAngle = 0;
     this._heliAssets = null;
     this._assets = (game && game.characterAssets) || null;
@@ -431,6 +447,7 @@ export class PoliceSystem {
     this._bustTimer = 0;
     this._roadblocks = 0;
     this._dispatchTimer = 0;
+    this._starveTimer = 0;
 
     for (let i = this.cars.length - 1; i >= 0; i--) this._removeUnit(this.cars[i], true);
     this.cars.length = 0;
@@ -461,6 +478,7 @@ export class PoliceSystem {
     u.noProgress = 0;
     u.targetX = 1e9;
     u.targetZ = 1e9;
+    u.prevLane = -1;
     u.siren = null;
     u.armored = false;
     u.lightPhase = this.rng.next() * 6.28;
@@ -609,7 +627,7 @@ export class PoliceSystem {
    * @returns {boolean} True when `_spawn` was filled in.
    * @private
    */
-  _findSpawn(px, pz, rMin, rMax) {
+  _findSpawn(px, pz, rMin, rMax, requireHidden = false) {
     const g = this.lanes;
     if (!g || g.sampleCount === 0) return false;
     const n = g.queryRing(px, pz, rMin, rMax, _cand);
@@ -630,7 +648,10 @@ export class PoliceSystem {
       if (camera && typeof camera.frustumContainsSphere === 'function') {
         let visible = false;
         try { visible = camera.frustumContainsSphere(x, 1.2, z, 3.5); } catch (err) { visible = false; }
-        if (visible) score = 0;
+        if (visible) {
+          if (requireHidden) continue;
+          score = 0;
+        }
       }
       const dx = x - px;
       const dz = z - pz;
@@ -680,10 +701,16 @@ export class PoliceSystem {
    * @returns {object|null} The unit, or null when nothing could be spawned.
    * @private
    */
-  _dispatchCar(px, pz, armored) {
+  _dispatchCar(px, pz, armored, close = false) {
     const game = this.game;
     if (typeof game.spawnVehicle !== 'function') return null;
-    if (!this._findSpawn(px, pz, SPAWN_MIN, SPAWN_MAX)) return null;
+    // `close` is the starvation fallback: nothing has reached the suspect for a while, so the
+    // road route (not the car count) is the problem. Dispatch from a tighter ring, but only
+    // onto a spot the player cannot currently see, so a cruiser never pops into frame.
+    const found = close
+      ? (this._findSpawn(px, pz, 52, 96, true) || this._findSpawn(px, pz, SPAWN_MIN, SPAWN_MAX))
+      : this._findSpawn(px, pz, SPAWN_MIN, SPAWN_MAX);
+    if (!found) return null;
     let v = null;
     try {
       v = game.spawnVehicle('police', _spawn.x, _spawn.z, _spawn.yaw, { isPolice: true });
@@ -843,11 +870,26 @@ export class PoliceSystem {
     // --- dispatch ---------------------------------------------------------------------
     this._dispatchTimer -= step;
     let pursuing = 0;
-    for (let i = 0; i < this.cars.length; i++) if (this.cars[i].state !== 'roadblock') pursuing++;
+    let closest = Infinity;
+    for (let i = 0; i < this.cars.length; i++) {
+      const u = this.cars[i];
+      if (u.state !== 'roadblock') pursuing++;
+      const v = u.vehicle;
+      if (!v || !v.position || !Number.isFinite(v.position[0])) continue;
+      const dx = v.position[0] - px;
+      const dz = v.position[2] - pz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < closest) closest = d2;
+    }
+    // Starvation: cars are being dispatched but none of them can actually get to the suspect,
+    // because the lane route in is blocked or loops. Without this the response is infinite
+    // cars circling two blocks away and a wanted level nobody ever comes to collect.
+    if (closest < 3600) this._starveTimer = 0;
+    else this._starveTimer += step;
     if (this._dispatchTimer <= 0 && pursuing < plan.cars) {
       this._dispatchTimer = DISPATCH_INTERVAL;
       const armored = plan.armored > 0 && pursuing >= plan.cars - plan.armored;
-      this._dispatchCar(px, pz, armored);
+      this._dispatchCar(px, pz, armored, this._starveTimer > 18);
     }
 
     // --- roadblocks --------------------------------------------------------------------
@@ -912,28 +954,69 @@ export class PoliceSystem {
     if (!player || player.dead) return false;
     if (this.helicopter && this.helicopter.locked) return true;
     const py = fin(player.position ? player.position[1] : 0, 0) + 1.1;
-    let budget = 4;
-    for (let i = 0; i < this.cars.length && budget > 0; i++) {
-      const v = this.cars[i].vehicle;
-      if (!v || !v.position || v.isDestroyed) continue;
-      const dx = px - v.position[0];
-      const dz = pz - v.position[2];
-      const d2 = dx * dx + dz * dz;
-      if (d2 > CAR_SIGHT * CAR_SIGHT) continue;
-      budget--;
+    // Only a handful of raycasts are affordable per refresh, so they have to be spent on the
+    // *nearest* watchers. Walking the list in order and stopping after four burnt the budget
+    // on whichever cruisers happened to be dispatched first, so a unit sitting eight metres
+    // from the suspect was never tested and the police stayed blind while parked next to him.
+    let n = this._nearestFour(this.cars, px, pz, CAR_SIGHT, true);
+    for (let k = 0; k < n; k++) {
+      const v = this.cars[_losIdx[k]].vehicle;
       if (this._lineOfSight(v.position[0], v.position[1] + 1.1, v.position[2], px, py, pz)) return true;
     }
-    for (let i = 0; i < this.cops.length && budget > 0; i++) {
-      const cop = this.cops[i];
-      if (cop.dead) continue;
-      const dx = px - cop.position[0];
-      const dz = pz - cop.position[2];
-      const d2 = dx * dx + dz * dz;
-      if (d2 > COP_SIGHT * COP_SIGHT) continue;
-      budget--;
+    n = this._nearestFour(this.cops, px, pz, COP_SIGHT, false);
+    for (let k = 0; k < n; k++) {
+      const cop = this.cops[_losIdx[k]];
       if (this._lineOfSight(cop.position[0], cop.position[1] + 1.5, cop.position[2], px, py, pz)) return true;
     }
     return false;
+  }
+
+  /**
+   * Fills `_losIdx` with the indices of up to four live watchers nearest the player.
+   * @param {object[]} list `cars` (unit records) or `cops`.
+   * @param {number} px Player x.
+   * @param {number} pz Player z.
+   * @param {number} sight Maximum range in metres.
+   * @param {boolean} isCar True when `list` holds unit records rather than cop records.
+   * @returns {number} How many indices were written (0..4).
+   * @private
+   */
+  _nearestFour(list, px, pz, sight, isCar) {
+    let n = 0;
+    const max = sight * sight;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      let x;
+      let z;
+      if (isCar) {
+        const v = e.vehicle;
+        if (!v || !v.position || v.isDestroyed || !Number.isFinite(v.position[0])) continue;
+        x = v.position[0];
+        z = v.position[2];
+      } else {
+        if (e.dead) continue;
+        x = e.position[0];
+        z = e.position[2];
+      }
+      const dx = px - x;
+      const dz = pz - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > max) continue;
+      // Insertion sort into a fixed four-slot buffer; no allocation, no full sort.
+      let slot = n < 4 ? n++ : 4;
+      if (slot === 4) {
+        if (d2 >= _losD2[3]) continue;
+        slot = 3;
+      }
+      while (slot > 0 && _losD2[slot - 1] > d2) {
+        _losD2[slot] = _losD2[slot - 1];
+        _losIdx[slot] = _losIdx[slot - 1];
+        slot--;
+      }
+      _losD2[slot] = d2;
+      _losIdx[slot] = i;
+    }
+    return n;
   }
 
   /**
@@ -958,7 +1041,7 @@ export class PoliceSystem {
     _dir[0] /= l; _dir[1] /= l; _dir[2] /= l;
     _origin[0] = ax; _origin[1] = ay; _origin[2] = az;
     let hit = null;
-    try { hit = coll.raycast(_origin, _dir, l - 0.4, null); } catch (err) { hit = null; }
+    try { hit = coll.raycast(_origin, _dir, l - 0.4, losBlocks); } catch (err) { hit = null; }
     return !hit;
   }
 
@@ -1052,11 +1135,18 @@ export class PoliceSystem {
       }
 
       // Deploy cops when the player is on foot nearby, or at high heat.
+      // The crew also gets out when the car has stopped making headway: if the cruiser cannot
+      // route any closer, officers on foot are the only thing that will ever reach the
+      // suspect, and "the police simply never turn up" is the worst failure this system has.
       const wantDeploy = player && !player.vehicle && !player.dead
-        && (d2 < DEPLOY_RANGE * DEPLOY_RANGE || (this.wanted >= 4 && d2 < 3600));
+        && (d2 < DEPLOY_RANGE * DEPLOY_RANGE || (this.wanted >= 4 && d2 < 3600)
+          || (unit.noProgress > 6 && d2 < 4900));
       if (wantDeploy && unit.cops.length === 0 && this.cops.length < plan.cops) {
         unit.deployTimer += dt;
-        if (unit.deployTimer > 0.5 && Math.abs(forwardSpeedOf(v)) < 3) this._deploy(unit);
+        // Officers get out as soon as the cruiser is down to walking pace. Waiting for a dead
+        // stop meant a unit that could not quite park never put anybody on the pavement, and
+        // the crew is what actually reaches a suspect the car cannot route to.
+        if (unit.deployTimer > 0.4 && Math.abs(forwardSpeedOf(v)) < 4.5) this._deploy(unit);
       } else {
         unit.deployTimer = 0;
       }
@@ -1218,8 +1308,10 @@ export class PoliceSystem {
     } else {
       // --- lane navigation -----------------------------------------------------------
       const g = this.lanes;
+      const hx = -Math.sin(fin(v.yaw, 0));
+      const hz = -Math.cos(fin(v.yaw, 0));
       if (unit.laneId < 0 || g.length(unit.laneId) <= 0) {
-        const near = g.nearest(x, z, 70);
+        const near = this._reacquireLane(x, z, hx, hz, 70);
         unit.laneId = near;
         unit.laneDist = near >= 0 ? g.nearDist : 0;
       }
@@ -1230,12 +1322,13 @@ export class PoliceSystem {
         unit.laneDist = g.project(unit.laneId, x, z);
         const laneLen = g.length(unit.laneId);
         if (unit.laneDist >= laneLen - 1.2) {
-          const nextId = this._bestNext(unit.laneId, tx, tz);
+          const nextId = this._bestNext(unit.laneId, tx, tz, unit.prevLane);
           if (nextId >= 0) {
+            unit.prevLane = unit.laneId;
             unit.laneId = nextId;
             unit.laneDist = 0;
           } else {
-            const near = g.nearest(x, z, 70);
+            const near = this._reacquireLane(x, z, hx, hz, 70);
             unit.laneId = near;
             unit.laneDist = near >= 0 ? g.nearDist : 0;
           }
@@ -1245,7 +1338,7 @@ export class PoliceSystem {
         let laneId = unit.laneId;
         const len = g.length(laneId);
         if (ld > len) {
-          const nx = this._bestNext(laneId, tx, tz);
+          const nx = this._bestNext(laneId, tx, tz, unit.prevLane);
           if (nx >= 0) { ld -= len; laneId = nx; }
         }
         g.sample(laneId, ld, _pt);
@@ -1259,8 +1352,11 @@ export class PoliceSystem {
     }
 
     // Pull up short of a suspect on foot: the cruiser becomes cover and the crew gets out.
-    if (player && !player.vehicle && !player.dead && dist < 30) {
-      target = Math.min(target, Math.max(0, (dist - 8.5) * 0.85));
+    // The envelope starts wide and shallow on purpose - braking hard from 20 m/s inside the
+    // last thirty metres just overshoots the suspect, and a cruiser that keeps sailing past
+    // is never slow enough to let its crew out.
+    if (player && !player.vehicle && !player.dead && dist < 45) {
+      target = Math.min(target, Math.max(0, (dist - 10) * 0.55));
     }
 
     // Do not plough through the traffic in front.
@@ -1310,6 +1406,29 @@ export class PoliceSystem {
   }
 
   /**
+   * Re-acquires a lane for a cruiser, preferring one that runs the way it is already facing.
+   *
+   * A plain nearest-point query is a coin toss between a two-way street's two lanes, and
+   * latching onto the oncoming one puts the next waypoint behind the car, which pure pursuit
+   * answers with zero steering and full throttle - straight into the kerb.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {number} fx Forward x (unit).
+   * @param {number} fz Forward z (unit).
+   * @param {number} r Search radius in metres.
+   * @returns {number} Lane id, or -1.
+   * @private
+   */
+  _reacquireLane(x, z, fx, fz, r) {
+    const g = this.lanes;
+    if (typeof g.nearestDirected === 'function') {
+      const directed = g.nearestDirected(x, z, fx, fz, r);
+      if (directed >= 0) return directed;
+    }
+    return g.nearest(x, z, r);
+  }
+
+  /**
    * Greedy lane choice: the successor whose far end is closest to the target.
    * @param {number} laneId Current lane.
    * @param {number} tx Target x.
@@ -1317,7 +1436,7 @@ export class PoliceSystem {
    * @returns {number} Lane id, or -1.
    * @private
    */
-  _bestNext(laneId, tx, tz) {
+  _bestNext(laneId, tx, tz, avoid) {
     const lanes = this.city.lanes;
     const lane = lanes[laneId];
     if (!lane || !lane.next || lane.next.length === 0) return -1;
@@ -1326,11 +1445,29 @@ export class PoliceSystem {
     let bestD = Infinity;
     for (let i = 0; i < lane.next.length; i++) {
       const id = lane.next[i];
-      const len = g.length(id);
-      g.sample(id, len, _pt);
+      if (id === avoid && lane.next.length > 1) continue;
+      g.sample(id, g.length(id), _pt);
       const dx = _pt[0] - tx;
       const dz = _pt[1] - tz;
-      const d = dx * dx + dz * dz;
+      let d = dx * dx + dz * dz;
+      // Two-ply. Single-ply "whichever arm ends closest" is a plain hill climb and gets stuck
+      // in the local minimum every grid produces: the arm that eventually reaches the suspect
+      // often has to start by heading away from him, so a one-lane horizon rejects it and the
+      // cruiser circles the same block until the watchdog recycles it.
+      const nx = lanes[id];
+      if (nx && nx.next && nx.next.length) {
+        let sub = Infinity;
+        for (let k = 0; k < nx.next.length; k++) {
+          const id2 = nx.next[k];
+          if (id2 === laneId) continue;
+          g.sample(id2, g.length(id2), _pt2);
+          const ex = _pt2[0] - tx;
+          const ez = _pt2[1] - tz;
+          const d2 = ex * ex + ez * ez;
+          if (d2 < sub) sub = d2;
+        }
+        if (sub < d) d = sub;
+      }
       if (d < bestD) { bestD = d; best = id; }
     }
     return best;
