@@ -371,8 +371,10 @@ export class Game {
   _buildPickupAssets() {
     const geo = roundedPickupGeometry();
     this._pickupMesh = this.renderer.createMesh(geo);
+    // Emissive strength is deliberately modest: these are small objects, and the post chain's
+    // bloom threshold sits at 1.15, so anything much brighter tonemaps to a flat white blob.
     const mk = (albedo, emissive) => this.renderer.createMaterial({
-      albedo, emissive, emissiveStrength: 2.2, roughness: 0.35, metallic: 0.1,
+      albedo, emissive, emissiveStrength: 1.1, roughness: 0.35, metallic: 0.1,
       name: 'pickup',
     });
     this._pickupMats = {

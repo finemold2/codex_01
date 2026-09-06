@@ -48,6 +48,14 @@ const SHOP_H = 4.6;
 const FACADE_TILE_W = 12.0;
 /** Facade texture tile height (m) — four storeys. */
 const FACADE_TILE_H = 13.2;
+/**
+ * A prop whose authored `y` reaches this height (m) and clears the local ground is treated as
+ * wall/roof mounted; anything lower is planted on the surface. citygen's ground furniture sits
+ * at 0..0.15 and its mounted signage starts above 5 m, so the split is unambiguous.
+ */
+const PROP_MOUNT_Y = 2.5;
+/** Metres of shelving bank rasterised around every water lot. */
+const WATER_BANK = 14;
 /** Street props inside this radius get a point light submitted at night (m). */
 const LIGHT_RADIUS = 90;
 /** Hard cap on point lights submitted by the world each frame. */
@@ -700,7 +708,14 @@ class Terrain {
     const nx = this.nx, nz = this.nz, cell = this.cell;
     const minX = this.minX, minZ = this.minZ;
     const mask = new Uint8Array(nx * nz);
-    const hard = new Uint8Array(nx * nz);
+    const lots = city.lots || [];
+    let wet = 0;
+    for (let i = 0; i < lots.length; i++) {
+      if (lots[i].kind === 'water' || lots[i].surface === 'water') wet++;
+    }
+    // The exact (unpadded) carriageway footprint, needed only to keep a bridge deck flat where
+    // it crosses a water lot.
+    const hard = wet ? new Uint8Array(nx * nz) : null;
 
     /**
      * Marks the lattice points covered by an oriented rectangle.
@@ -751,7 +766,7 @@ class Terrain {
       const cx = (r.ax + r.bx) * 0.5, cz = (r.az + r.bz) * 0.5;
       // Match buildRoadSurfaces: the quad overshoots each end by half a carriageway.
       stamp(mask, cx, cz, dx / len, dz / len, len * 0.5 + half, half, pad);
-      stamp(hard, cx, cz, dx / len, dz / len, len * 0.5 + half, half, 0);
+      if (hard) stamp(hard, cx, cz, dx / len, dz / len, len * 0.5 + half, half, 0);
       if (nodes[r.nodeA] && half > nodeHalf[r.nodeA]) nodeHalf[r.nodeA] = half;
       if (nodes[r.nodeB] && half > nodeHalf[r.nodeB]) nodeHalf[r.nodeB] = half;
     }
@@ -759,11 +774,10 @@ class Terrain {
       const half = nodeHalf[i];
       if (!(half > 0)) continue;
       stamp(mask, nodes[i].x, nodes[i].z, 1, 0, half, half, pad);
-      stamp(hard, nodes[i].x, nodes[i].z, 1, 0, half, half, 0);
+      if (hard) stamp(hard, nodes[i].x, nodes[i].z, 1, 0, half, half, 0);
     }
 
     const rb = roadBounds(city, [0, 0, 0, 0]);
-    const lots = city.lots || [];
     const r4 = [0, 0, 0, 0];
     for (let i = 0; i < lots.length; i++) {
       if (!lotIsPaved(lots[i], rb)) continue;
@@ -774,7 +788,7 @@ class Terrain {
 
     // The padding must never shelve over open water: clear anything inside a water lot that is
     // not actually carrying a carriageway (a bridge deck keeps its flat cells).
-    for (let i = 0; i < lots.length; i++) {
+    for (let i = 0; hard && i < lots.length; i++) {
       const l = lots[i];
       if (l.kind !== 'water' && l.surface !== 'water') continue;
       lotRect(l, r4);
@@ -834,11 +848,12 @@ class Terrain {
     // Shoreline plane: the outer edge of the city on the sea side.
     const shore = sx !== 0 ? (sx > 0 ? cx1 : -cx0) : (sz > 0 ? cz1 : -cz0);
 
-    // Water lots carved inside the city (canals, ponds, marina basins).
+    // Water lots carved inside the city (canals, ponds, marina basins), as [x0, z0, x1, z1].
     const waterRects = [];
     const lots = city.lots || [];
     for (let i = 0; i < lots.length; i++) {
-      if (lots[i].kind === 'water') waterRects.push(lots[i]);
+      const l = lots[i];
+      if (l.kind === 'water' || l.surface === 'water') waterRects.push(lotRect(l, [0, 0, 0, 0]));
     }
     this.waterRects = waterRects;
 
@@ -877,14 +892,23 @@ class Terrain {
         }
         for (let w = 0; w < waterRects.length; w++) {
           const r = waterRects[w];
-          const dx = Math.max(r.x - r.w * 0.5 - x, x - (r.x + r.w * 0.5), 0);
-          const dz = Math.max(r.z - r.d * 0.5 - z, z - (r.z + r.d * 0.5), 0);
-          const d = Math.hypot(dx, dz);
-          if (d < 14) {
-            const depth = (this.waterLevel === null ? -2 : this.waterLevel) - 2.6;
-            const t = 1 - smoothstep(0, 14, d);
-            h = Math.min(h, lerp(h, depth, t));
-            if (t > 0.02) flat = false;
+          const ox = Math.max(r[0] - x, x - r[2]);
+          const oz = Math.max(r[1] - z, z - r[3]);
+          // Signed distance to the basin: negative inside it.
+          const sd = (ox > 0 || oz > 0)
+            ? Math.hypot(Math.max(ox, 0), Math.max(oz, 0))
+            : Math.max(ox, oz);
+          if (sd < WATER_BANK) {
+            const wl = this.waterLevel === null ? -2 : this.waterLevel;
+            // The waterline lands exactly on the lot citygen marked as water: outside it the
+            // bank climbs back to street level, inside it drops to the basin floor. Ramping
+            // straight to the floor from the lip used to flood ~9 m of the neighbouring beach
+            // and leave palm trees standing in the sea.
+            const target = sd >= 0
+              ? lerp(wl, ROAD_Y, smoothstep(0, WATER_BANK, sd))
+              : lerp(wl, wl - 2.6, clamp(-sd / 6, 0, 1));
+            if (target < h) h = target;
+            flat = false;
           }
         }
         if (paved[k]) {
@@ -2887,6 +2911,26 @@ class TrafficLight {
 /* ---------------------------------------------------------- instanced props */
 
 /**
+ * Base height for a prop instance.
+ *
+ * Ground furniture is planted on the surface it stands on, never on an absolute floor: the
+ * beach drops below y = 0, and the old `max(p.y, surface)` left palms, lamps and benches
+ * hovering up to 2 m over the sand. citygen authors ground props at 0 or kerb height and
+ * mounts signage (wall billboards, rooftop panels) at 3 m or more, so only a height that is
+ * both absolutely high and clearly clear of the local ground is treated as a mount.
+ *
+ * @param {object} bc Build context.
+ * @param {object} p Prop record.
+ * @returns {number} World y for the prop's base.
+ */
+function propBaseY(bc, p) {
+  const base = bc.surfaceY(p.x, p.z);
+  const y = p.y;
+  if (typeof y !== 'number' || !Number.isFinite(y)) return base;
+  return (y >= PROP_MOUNT_Y && y > base + 1) ? y : base;
+}
+
+/**
  * Creates the instanced batches for one prop type and fills their transforms.
  * @param {object} bc Build context.
  * @param {string} type Prop type name.
@@ -2908,7 +2952,7 @@ function emitPropType(bc, type, list, proto) {
   for (let i = 0; i < n; i++) {
     const p = list[i];
     const s = p.scale && p.scale > 0.01 ? p.scale : 1;
-    const y = Math.max(p.y || 0, bc.surfaceY(p.x, p.z));
+    const y = propBaseY(bc, p);
     trs(m, p.x, y, p.z, p.rot || 0, s, s, s);
     matrices.set(m, i * 16);
     positions[i * 3] = p.x; positions[i * 3 + 1] = y; positions[i * 3 + 2] = p.z;
@@ -3067,7 +3111,7 @@ function buildTrafficLights(bc, props, proto) {
     // The prop faces the junction: forward = (-sin, -cos). The travel axis follows it.
     const fx = -Math.sin(rot), fz = -Math.cos(rot);
     const axis = Math.abs(fx) >= Math.abs(fz) ? 'x' : 'z';
-    const y = Math.max(p.y || 0, bc.surfaceY(p.x, p.z));
+    const y = propBaseY(bc, p);
     const c = Math.cos(rot), sn = Math.sin(rot);
     const head = { light: tl, axis, index: heads.length };
     for (let b = 0; b < 3; b++) {
@@ -3124,11 +3168,15 @@ class WorldRender {
 
     this._staticIds = o.staticIds;
     this._propGroups = o.propGroups;
+    /** Only the prop groups that are distance-culled; the rest never need re-uploading. */
+    this._lodGroups = o.propGroups.filter((g) => g.lod > 0);
     this._heads = o.heads;
     this._headMats = o.headMats;
     this._bulbBatches = o.bulbBatches;
     this._signKeys = o.signKeys;
     this._billboardKeys = o.billboardKeys;
+    this._terrainHook = o.terrainHook || null;
+    this._disposed = false;
 
     this.time = 0;
     this.nightFactor = 0;
@@ -3209,7 +3257,7 @@ class WorldRender {
     }
 
     // --- water scroll ------------------------------------------------------
-    const water = this.mats.water;
+    const water = this.waterLevel === null ? null : this.mats.water;
     if (water) {
       const uo = water.uvOffset && water.uvOffset.length >= 2 ? water.uvOffset : this._waterUv;
       uo[0] = (uo[0] + step * 0.011) % 1;
@@ -3338,14 +3386,16 @@ class WorldRender {
    * @returns {void}
    */
   _updateLod(cx, cz) {
-    const groups = this._propGroups;
+    // Round-robin over the culled groups only: walking the whole prop list would spend most
+    // ticks on groups that are never trimmed, stretching a full refresh to several seconds and
+    // letting kerbside clutter pop in late when the player is driving.
+    const groups = this._lodGroups;
     if (!groups.length) return;
     const moved = Math.abs(cx - this._camX) + Math.abs(cz - this._camZ) > 10;
     if (!moved && this._lodCursor === 0) return;
     if (this._lodCursor === 0) { this._camX = cx; this._camZ = cz; }
     const g = groups[this._lodCursor];
     this._lodCursor = (this._lodCursor + 1) % groups.length;
-    if (!g.lod) return;
     if (!g.subset) g.subset = new Int32Array(g.count);
     const r2 = g.lod * g.lod;
     let c = 0;
@@ -3365,6 +3415,8 @@ class WorldRender {
    * @returns {void}
    */
   dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
     const r = this.renderer;
     if (typeof r.removeStatic === 'function') {
       for (let i = 0; i < this._staticIds.length; i++) r.removeStatic(this._staticIds[i]);
@@ -3381,6 +3433,7 @@ class WorldRender {
       for (let b = 0; b < g.batches.length; b++) kill(g.batches[b].batch);
     }
     this._propGroups.length = 0;
+    this._lodGroups.length = 0;
     if (this._bulbBatches) {
       kill(this._bulbBatches.red); kill(this._bulbBatches.amber); kill(this._bulbBatches.green);
     }
@@ -3391,7 +3444,17 @@ class WorldRender {
     }
     this.bodies.length = 0;
     this.trafficLights.length = 0;
+    if (this.trafficLightByNode && typeof this.trafficLightByNode.clear === 'function') {
+      this.trafficLightByNode.clear();
+    }
     this._heads.length = 0;
+    this.lights.length = 0;
+    this._selCount = 0;
+    // Detach the height function so the collision world stops calling into a dead world.
+    if (this._terrainHook && typeof this._terrainHook.restore === 'function') {
+      this._terrainHook.restore();
+      this._terrainHook = null;
+    }
   }
 }
 
@@ -3471,26 +3534,38 @@ function buildMinimapData(bc) {
  * everywhere — roads, raised sidewalks, beaches, hills and the sea bed.
  * @param {object} collision Collision world.
  * @param {(x:number,z:number)=>number} fn Height function.
- * @returns {string} The hook that was used (for diagnostics).
+ * @returns {{name:string, restore:(function():void)|null}} The hook used (name is surfaced in
+ *   `stats.terrainHook`) plus the undo that {@link WorldRender#dispose} runs, so a disposed
+ *   world stops being called back into — and stops pinning its height field alive — through a
+ *   collision world that outlives it.
  */
 function installTerrainFunction(collision, fn) {
-  if (!collision) return 'none';
+  if (!collision) return { name: 'none', restore: null };
   const setters = ['setTerrainFn', 'setTerrainHeightFn', 'setTerrainHeight', 'setGroundHeightFn',
     'setHeightFunction', 'setTerrain', 'setGroundFunction'];
   for (let i = 0; i < setters.length; i++) {
-    if (typeof collision[setters[i]] === 'function') {
-      collision[setters[i]](fn);
-      return setters[i];
+    const name = setters[i];
+    if (typeof collision[name] === 'function') {
+      collision[name](fn);
+      return { name, restore: () => collision[name](null) };
     }
   }
   collision.terrainHeight = fn;
   collision.terrainHeightFn = fn;
   const orig = collision.groundHeight;
   if (typeof orig !== 'function') {
-    collision.groundHeight = (x, z) => fn(x, z);
-    return 'assigned';
+    const patched = (x, z) => fn(x, z);
+    collision.groundHeight = patched;
+    return {
+      name: 'assigned',
+      restore: () => {
+        if (collision.groundHeight === patched) delete collision.groundHeight;
+        if (collision.terrainHeight === fn) collision.terrainHeight = null;
+        if (collision.terrainHeightFn === fn) collision.terrainHeightFn = null;
+      }
+    };
   }
-  collision.groundHeight = function groundHeightWithTerrain(x, z) {
+  const wrapped = function groundHeightWithTerrain(x, z) {
     const t = fn(x, z);
     const b = orig.call(this, x, z);
     if (!Number.isFinite(b)) return t;
@@ -3498,7 +3573,15 @@ function installTerrainFunction(collision, fn) {
     // sea the sampled terrain is the only truth.
     return t > -0.02 ? (b > t ? b : t) : (b > 0.05 ? b : t);
   };
-  return 'wrapped';
+  collision.groundHeight = wrapped;
+  return {
+    name: 'wrapped',
+    restore: () => {
+      if (collision.groundHeight === wrapped) collision.groundHeight = orig;
+      if (collision.terrainHeight === fn) collision.terrainHeight = null;
+      if (collision.terrainHeightFn === fn) collision.terrainHeightFn = null;
+    }
+  };
 }
 
 /* ------------------------------------------------------------- buildWorld */
@@ -3573,14 +3656,10 @@ export function buildWorld(gl, renderer, textures, city, opts = {}) {
   const roads = city.roads || [];
   const nodeHalf = new Float32Array(nodes.length);
   const nodeApproaches = new Array(nodes.length);
-  const roadBox = [Infinity, Infinity, -Infinity, -Infinity];
+  const roadBox = roadBounds(city, [0, 0, 0, 0]);
   for (let i = 0; i < nodes.length; i++) nodeApproaches[i] = [];
   for (let i = 0; i < roads.length; i++) {
     const r = roads[i];
-    roadBox[0] = Math.min(roadBox[0], r.ax - r.width, r.bx - r.width);
-    roadBox[1] = Math.min(roadBox[1], r.az - r.width, r.bz - r.width);
-    roadBox[2] = Math.max(roadBox[2], r.ax + r.width, r.bx + r.width);
-    roadBox[3] = Math.max(roadBox[3], r.az + r.width, r.bz + r.width);
     const dx = r.bx - r.ax, dz = r.bz - r.az;
     const len = Math.hypot(dx, dz) || 1;
     const ux = dx / len, uz = dz / len;
@@ -3598,10 +3677,6 @@ export function buildWorld(gl, renderer, textures, city, opts = {}) {
       }
       if (!dup) list.push({ dx: ends[e][3], dz: ends[e][4], width: r.width, roadId: r.id });
     }
-  }
-  if (!isFinite(roadBox[0])) {
-    roadBox[0] = bounds.min[0]; roadBox[1] = bounds.min[1];
-    roadBox[2] = bounds.max[0]; roadBox[3] = bounds.max[1];
   }
 
   // --- chunk grids --------------------------------------------------------
@@ -3701,7 +3776,7 @@ export function buildWorld(gl, renderer, textures, city, opts = {}) {
 
   // --- collision ----------------------------------------------------------
   const hook = installTerrainFunction(collision, surfaceY);
-  stats.terrainHook = hook;
+  stats.terrainHook = hook.name;
   stats.bodies = bc.bodies.length;
   stats.buildingBodies = bc.buildingBodies;
 
@@ -3725,6 +3800,7 @@ export function buildWorld(gl, renderer, textures, city, opts = {}) {
     heads: tlData.heads,
     headMats: tlData.mats,
     bulbBatches,
+    terrainHook: hook,
     signKeys: Array.from(bc.signMaterials),
     billboardKeys: Array.from(bc.billboardMaterials),
     minimapData: buildMinimapData(bc),

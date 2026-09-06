@@ -2320,9 +2320,16 @@ export class MissionManager {
       const t = (dist - MARKER_FADE_NEAR) / (MARKER_FADE_FAR - MARKER_FADE_NEAR);
       fade = t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
     }
+    // The marker is additive and UNLIT, so its emissive term - not its alpha - is what actually
+    // reaches the framebuffer. Scale emissiveBoost (and the tint, for the base colour) rather than
+    // only the alpha, which an additive blend largely ignores.
+    const k = MARKER_MIN_ALPHA + (1 - MARKER_MIN_ALPHA) * fade;
     const opts = meshes.opts;
-    const base = meshes.baseAlpha;
-    opts.tint[3] = base * (MARKER_MIN_ALPHA + (1 - MARKER_MIN_ALPHA) * fade);
+    opts.tint[0] = k;
+    opts.tint[1] = k;
+    opts.tint[2] = k;
+    opts.tint[3] = meshes.baseAlpha * k;
+    opts.emissiveBoost = k;
     renderer.submit(meshes.mesh, meshes.material, _mm, opts);
     if (typeof renderer.submitLight === 'function') {
       const li = 2.4 * (0.35 + 0.65 * fade);
@@ -2346,12 +2353,15 @@ export class MissionManager {
       const material = typeof renderer.createMaterial === 'function'
         ? renderer.createMaterial({
           name: 'missionMarker',
-          albedo: [1, 0.78, 0.12],
+          albedo: [0.85, 0.62, 0.10],
           emissive: [1, 0.7, 0.12],
-          emissiveStrength: 3.2,
+          // Additive blending on a 2 m cylinder: at 3.2 the pillar tonemaps to flat white from any
+          // normal viewing distance and swallows whatever is behind it. 1.25 still reads as a
+          // clearly glowing beacon while staying translucent.
+          emissiveStrength: 1.25,
           roughness: 0.5,
           metallic: 0,
-          alpha: 0.42,
+          alpha: 0.3,
           blend: 'add',
           doubleSided: true,
           castShadow: false,
@@ -2360,7 +2370,7 @@ export class MissionManager {
           unlit: true,
         })
         : null;
-      this._meshes = { mesh, material, baseAlpha: 0.65, opts: { castShadow: false, tint: [1, 1, 1, 0.65] } };
+      this._meshes = { mesh, material, baseAlpha: 0.55, opts: { castShadow: false, tint: [1, 1, 1, 0.55] } };
     } catch (err) {
       this._meshFailed = true;
     }

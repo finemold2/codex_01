@@ -182,6 +182,8 @@ export default async function run({ canvas }) {
     game.hud.show();
     game.player.aiming = false;
     if (mode.includes('turn')) game.camera.yaw += Math.PI;
+    if (mode.includes('nomark')) game.missions.submit = () => {};
+    if (mode.includes('nopick')) game._submitPickups = () => {};
     if (mode.includes('move')) {
       const p = game.city.spawns.missionPoints[3] || game.city.spawns.missionPoints[0];
       game.player.reset(p.x, game.worldToGround(p.x, p.z) + 0.1, p.z, 0);
