@@ -848,3 +848,400 @@ export class Input {
     if (typeof code !== 'string' || code.length === 0) return '';
     return code.toLowerCase();
   }
+
+  // ==================================================================== internals
+
+  /**
+   * Raw (unblocked) held test for an action across keyboard, mouse, gamepad and touch.
+   * @param {string} action
+   * @returns {boolean}
+   * @private
+   */
+  _rawDown(action) {
+    const codes = this._bindings[action];
+    if (codes !== undefined) {
+      for (let i = 0; i < codes.length; i++) {
+        if (this._isCodeDown(codes[i])) return true;
+      }
+    }
+    const pads = this._gamepadBindings[action];
+    if (pads !== undefined) {
+      for (let i = 0; i < pads.length; i++) {
+        const idx = PAD_CODE_INDEX[pads[i]];
+        if (idx !== undefined && this._padDown[idx] !== 0) return true;
+      }
+    }
+    return this._touchActions.has(action);
+  }
+
+  /**
+   * Does any code bound to `action` appear in the given edge set?
+   * @param {string} action
+   * @param {Set<string>} set `_pressed` or `_released`
+   * @returns {boolean}
+   * @private
+   */
+  _anyEdge(action, set) {
+    if (set.size === 0) return false;
+    const codes = this._bindings[action];
+    if (codes !== undefined) {
+      for (let i = 0; i < codes.length; i++) {
+        if (set.has(codes[i])) return true;
+      }
+    }
+    const pads = this._gamepadBindings[action];
+    if (pads !== undefined) {
+      for (let i = 0; i < pads.length; i++) {
+        if (set.has(pads[i])) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Device-agnostic held test for a single code.
+   * @param {string} code normalized code
+   * @returns {boolean}
+   * @private
+   */
+  _isCodeDown(code) {
+    const pad = PAD_CODE_INDEX[code];
+    if (pad !== undefined) return this._padDown[pad] !== 0;
+    const mouse = MOUSE_CODE_INDEX[code];
+    if (mouse !== undefined) return this._mouseDown[mouse] !== 0;
+    return this.keys.has(code);
+  }
+
+  /**
+   * Marks a keyboard code as down and emits its action hooks.
+   * @param {string} code normalized code
+   * @returns {void}
+   * @private
+   */
+  _pressCode(code) {
+    if (this.keys.has(code)) return;
+    this.keys.add(code);
+    this._pressed.add(code);
+    this._fireCode(code);
+  }
+
+  /**
+   * Marks a keyboard code as up.
+   * @param {string} code normalized code
+   * @returns {void}
+   * @private
+   */
+  _releaseCode(code) {
+    if (!this.keys.has(code)) return;
+    this.keys.delete(code);
+    this._released.add(code);
+  }
+
+  /**
+   * Updates one mouse button plus the public `buttons` flags.
+   * @param {number} button MouseEvent.button
+   * @param {boolean} down
+   * @returns {void}
+   * @private
+   */
+  _setMouseButton(button, down) {
+    const idx = button < 0 ? 0 : (button > 4 ? 4 : button);
+    const was = this._mouseDown[idx] !== 0;
+    if (was === down) return;
+    this._mouseDown[idx] = down ? 1 : 0;
+    const code = MOUSE_CODES[idx];
+    if (down) {
+      this._pressed.add(code);
+      this._fireCode(code);
+    } else {
+      this._released.add(code);
+    }
+    this.buttons.left = this._mouseDown[0] !== 0;
+    this.buttons.middle = this._mouseDown[1] !== 0;
+    this.buttons.right = this._mouseDown[2] !== 0;
+  }
+
+  /**
+   * Fires the action hooks bound to a code.
+   * @param {string} code normalized code
+   * @returns {void}
+   * @private
+   */
+  _fireCode(code) {
+    const actions = this._codeToActions.get(code);
+    if (actions === undefined) return;
+    for (let i = 0; i < actions.length; i++) this._emit(actions[i]);
+  }
+
+  /**
+   * Invokes every hook registered for an action, honouring `blocked`.
+   * @param {string} action
+   * @returns {void}
+   * @private
+   */
+  _emit(action) {
+    const list = this._listeners.get(action);
+    if (list === undefined || list.length === 0) return;
+    if (this.blocked && !this._uiActions.has(action)) return;
+    for (let i = 0; i < list.length; i++) {
+      try {
+        list[i](action, this);
+      } catch (err) {
+        console.error('[input] action handler for "' + action + '" threw:', err);
+      }
+    }
+  }
+
+  /**
+   * Rebuilds the code -> actions lookup used by the event hooks.
+   * @returns {void}
+   * @private
+   */
+  _rebuildReverseMap() {
+    const map = this._codeToActions;
+    map.clear();
+    this._collectReverse(this._bindings, map);
+    this._collectReverse(this._gamepadBindings, map);
+  }
+
+  /**
+   * Adds one binding table to the reverse lookup.
+   * @param {Record<string, string[]>} table
+   * @param {Map<string, string[]>} map
+   * @returns {void}
+   * @private
+   */
+  _collectReverse(table, map) {
+    for (const action in table) {
+      const codes = table[action];
+      for (let i = 0; i < codes.length; i++) {
+        let list = map.get(codes[i]);
+        if (list === undefined) {
+          list = [];
+          map.set(codes[i], list);
+        }
+        if (list.indexOf(action) < 0) list.push(action);
+      }
+    }
+  }
+
+  /**
+   * Drops every held key, button, stick and touch. Used on blur / tab hide / detach so nothing
+   * can stay stuck down while the page is not receiving events.
+   * @returns {void}
+   * @private
+   */
+  _clearAll() {
+    this.keys.forEach(this._releaseHeldKey, this);
+    this.keys.clear();
+    for (let i = 0; i < this._mouseDown.length; i++) {
+      if (this._mouseDown[i] !== 0) {
+        this._mouseDown[i] = 0;
+        this._released.add(MOUSE_CODES[i]);
+      }
+    }
+    this.buttons.left = false;
+    this.buttons.middle = false;
+    this.buttons.right = false;
+    for (let i = 0; i < this._padDown.length; i++) {
+      if (this._padDown[i] !== 0) {
+        this._padDown[i] = 0;
+        this._released.add(PAD_BUTTON_CODES[i]);
+      }
+      this._padState.buttons[PAD_BUTTON_NAMES[i]] = false;
+    }
+    this._padState.lx = 0;
+    this._padState.ly = 0;
+    this._padState.rx = 0;
+    this._padState.ry = 0;
+    this._padState.lt = 0;
+    this._padState.rt = 0;
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    this.wheelDelta = 0;
+    this._releaseAllTouches();
+    this._computeAxes();
+  }
+
+  /**
+   * `Set.forEach` callback used by `_clearAll` to record release edges without allocating.
+   * @param {string} code
+   * @returns {void}
+   * @private
+   */
+  _releaseHeldKey(code) {
+    this._released.add(code);
+  }
+
+  /**
+   * Recomputes every derived axis from the current device state.
+   * @returns {void}
+   * @private
+   */
+  _computeAxes() {
+    const a = this._axes;
+    const gp = this.gamepad;
+    const t = this.touch;
+    const digRight = this._rawDown('right') ? 1 : 0;
+    const digLeft = this._rawDown('left') ? 1 : 0;
+    const digFwd = this._rawDown('forward') ? 1 : 0;
+    const digBack = this._rawDown('back') ? 1 : 0;
+
+    let mx = digRight - digLeft + t.moveVec.x;
+    let my = digFwd - digBack + t.moveVec.y;
+    let th = digFwd - digBack + t.moveVec.y;
+    let lookX = 0;
+    let lookY = 0;
+
+    if (gp !== null) {
+      mx += gp.lx;
+      my -= gp.ly;
+      th += (gp.rt - gp.lt) - gp.ly;
+      lookX = gp.rx;
+      lookY = gp.ry;
+    }
+
+    a.moveX = clamp1(mx);
+    a.moveY = clamp1(my);
+    a.steer = a.moveX;
+    a.throttle = clamp1(th);
+
+    const s = this.sensitivity;
+    a.lookX = clamp1(lookX * s);
+    a.lookY = clamp1(lookY * s * (this.invertY ? -1 : 1));
+  }
+
+  /**
+   * Reads the active controller into the reusable snapshot and derives button edges.
+   * @param {number} dt seconds
+   * @returns {void}
+   * @private
+   */
+  _pollGamepad(dt) {
+    const nav = typeof navigator !== 'undefined' ? navigator : null;
+    if (nav === null || typeof nav.getGamepads !== 'function') return;
+    if (this._padIndex < 0) {
+      this._padScanTimer -= dt;
+      if (this._padScanTimer > 0) return;
+      this._padScanTimer = 0.5;
+    }
+
+    let pads = null;
+    try {
+      pads = nav.getGamepads();
+    } catch (err) {
+      return;
+    }
+    if (pads === null || pads === undefined) return;
+
+    let src = this._padIndex >= 0 ? pads[this._padIndex] : null;
+    if (src === null || src === undefined || !src.connected) {
+      src = null;
+      this._padIndex = -1;
+      for (let i = 0; i < pads.length; i++) {
+        const p = pads[i];
+        if (p && p.connected && p.buttons && p.axes && p.buttons.length >= 4) {
+          src = p;
+          this._padIndex = i;
+          break;
+        }
+      }
+    }
+    if (src === null) {
+      if (this.gamepad !== null) this._clearGamepad();
+      return;
+    }
+
+    const state = this._padState;
+    state.index = this._padIndex;
+    state.id = src.id || '';
+    const axes = src.axes;
+    const dz = this.deadzone;
+    const l = applyStick(this._stickL, axes.length > 0 ? axes[0] : 0, axes.length > 1 ? axes[1] : 0, dz);
+    const r = applyStick(this._stickR, axes.length > 2 ? axes[2] : 0, axes.length > 3 ? axes[3] : 0, dz);
+    state.lx = l.x;
+    state.ly = l.y;
+    state.rx = r.x;
+    state.ry = r.y;
+
+    const btns = src.buttons;
+    const tdz = this.triggerDeadzone;
+    for (let i = 0; i < PAD_BUTTON_CODES.length; i++) {
+      const b = i < btns.length ? btns[i] : null;
+      let value = 0;
+      let down = false;
+      if (b !== null && b !== undefined) {
+        value = typeof b === 'number' ? b : (b.value || 0);
+        down = typeof b === 'number' ? b > 0.5 : (b.pressed === true || value > 0.5);
+      }
+      if (i === 6) state.lt = applyTrigger(value, tdz);
+      else if (i === 7) state.rt = applyTrigger(value, tdz);
+      state.buttons[PAD_BUTTON_NAMES[i]] = down;
+      const was = this._padDown[i] !== 0;
+      if (was === down) continue;
+      this._padDown[i] = down ? 1 : 0;
+      const code = PAD_BUTTON_CODES[i];
+      if (down) {
+        this._pressed.add(code);
+        this._fireCode(code);
+      } else {
+        this._released.add(code);
+      }
+    }
+    // Some pads report triggers only through the analog axes; keep the digital flag in sync.
+    if (state.lt > 0.5 && this._padDown[6] === 0) state.buttons.lt = true;
+    if (state.rt > 0.5 && this._padDown[7] === 0) state.buttons.rt = true;
+    this.gamepad = state;
+  }
+
+  /**
+   * Forgets the current controller and releases everything it held.
+   * @returns {void}
+   * @private
+   */
+  _clearGamepad() {
+    for (let i = 0; i < this._padDown.length; i++) {
+      if (this._padDown[i] !== 0) {
+        this._padDown[i] = 0;
+        this._released.add(PAD_BUTTON_CODES[i]);
+      }
+      this._padState.buttons[PAD_BUTTON_NAMES[i]] = false;
+    }
+    const state = this._padState;
+    state.index = -1;
+    state.id = '';
+    state.lx = 0;
+    state.ly = 0;
+    state.rx = 0;
+    state.ry = 0;
+    state.lt = 0;
+    state.rt = 0;
+    this.gamepad = null;
+    this._padIndex = -1;
+  }
+
+  /**
+   * Bleeds off touch look/move state so a lifted finger never leaves the player drifting.
+   * @param {number} dt seconds
+   * @returns {void}
+   * @private
+   */
+  _decayTouch(dt) {
+    const t = this.touch;
+    if (this._lookId < 0 && (t.lookDX !== 0 || t.lookDY !== 0)) {
+      const f = Math.exp(-24 * dt);
+      t.lookDX *= f;
+      t.lookDY *= f;
+      if (t.lookDX < 0.01 && t.lookDX > -0.01) t.lookDX = 0;
+      if (t.lookDY < 0.01 && t.lookDY > -0.01) t.lookDY = 0;
+    }
+    const mv = t.moveVec;
+    if (this._stickId < 0 && (mv.x !== 0 || mv.y !== 0)) {
+      const f = Math.exp(-26 * dt);
+      mv.x *= f;
+      mv.y *= f;
+      if (mv.x < 0.002 && mv.x > -0.002) mv.x = 0;
+      if (mv.y < 0.002 && mv.y > -0.002) mv.y = 0;
+    }
+    t.active = this._stickId >= 0 || this._lookId >= 0 || this._touchActions.size > 0;
+  }

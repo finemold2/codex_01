@@ -904,27 +904,32 @@ function buildNodesAndEdges(ctx) {
 
   const outZ = ctx.gridMaxZ + WATERFRONT_SETOUT - roadWZ[blocksZ] * 0.5;
   const outX = ctx.gridMaxX + WATERFRONT_SETOUT - roadWX[blocksX] * 0.5;
-  /** @type {Array<{x:number,z:number,grid:number}>} */
+  /** @type {Array<{x:number,z:number,grid:number,side:string,bi:number}>} */
   const wf = [];
   for (let i = 0; i <= blocksX; i += 2) {
     if (gridNode[i][blocksZ] < 0) continue;
     wf.push({
       x: xRoad[i],
       z: outZ + 9 * Math.sin(i * 0.72 + 1.3),
-      grid: gridNode[i][blocksZ]
+      grid: gridNode[i][blocksZ],
+      side: 'south',
+      bi: i
     });
   }
   if (gridNode[blocksX][blocksZ] >= 0) {
-    wf.push({ x: outX, z: outZ, grid: gridNode[blocksX][blocksZ] });
+    wf.push({ x: outX, z: outZ, grid: gridNode[blocksX][blocksZ], side: 'corner', bi: blocksX });
   }
   for (let j = blocksZ - 2; j >= 0; j -= 2) {
     if (gridNode[blocksX][j] < 0) continue;
     wf.push({
       x: outX + 9 * Math.sin(j * 0.72 + 2.1),
       z: zRoad[j],
-      grid: gridNode[blocksX][j]
+      grid: gridNode[blocksX][j],
+      side: 'east',
+      bi: j
     });
   }
+  ctx.wfMeta = wf;
 
   const wfIds = [];
   for (const w of wf) {

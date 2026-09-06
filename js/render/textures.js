@@ -1953,3 +1953,453 @@ function genChrome(S, seed) {
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
+
+/* ------------------------------------------------------------------------- *
+ * 3b. Facades — RGB carries the wall, ALPHA carries the emissive window mask
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Writes an emissive mask into the alpha channel of an RGBA buffer.
+ * @param {Uint8ClampedArray} px RGBA pixels.
+ * @param {Float32Array} mask Mask in 0..1.
+ * @returns {void}
+ */
+function applyMask(px, mask) {
+  for (let i = 0, p = 3; i < mask.length; i++, p += 4) px[p] = mask[i] * 255;
+}
+
+/**
+ * Curtain-wall glass tower facade: 6 floors x 6 bays of full-height glazing
+ * with aluminium mullions, spandrel panels and sky reflections.
+ * @param {number} S Texture size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genGlassFacade(S, seed) {
+  const FLOORS = 6, COLS = 6;
+  const rng = new Rand(seed ^ 0x9a11);
+  const noise = new NoiseSource(seed);
+  const panes = FLOORS * COLS;
+  const paneTint = new Float32Array(panes);
+  const paneDark = new Float32Array(panes);
+  const paneRefl = new Float32Array(panes);
+  for (let i = 0; i < panes; i++) {
+    paneTint[i] = rng.range(-1, 1);
+    paneDark[i] = rng.chance(0.22) ? rng.range(0.45, 0.75) : 1;
+    paneRefl[i] = rng.range(0.6, 1.35);
+  }
+  const clouds = fbmField(S, S, noise, { freqX: 4, freqY: 6, octaves: 4, gain: 0.55 });
+  const grime = fbmField(S, S, new NoiseSource(seed + 151), { freqX: 8, freqY: 30, octaves: 3 });
+  const dust = fbmField(S, S, new NoiseSource(seed + 152), { freq: Math.max(48, S / 6), octaves: 2, value: true });
+
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const mask = new Float32Array(S * S);
+
+  const mullionW = 0.030, centreW = 0.014, spandrelTop = 0.74, glassTop = 0.07;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const fy = y / S * FLOORS, fl = Math.floor(fy), ly = fy - fl;
+    for (let x = 0; x < S; x++) {
+      const i = row + x;
+      const fx = x / S * COLS, cl = Math.floor(fx), lx = fx - cl;
+      const id = fl * COLS + cl;
+
+      const edgeX = Math.min(lx, 1 - lx);
+      const inMullion = edgeX < mullionW || Math.abs(lx - 0.5) < centreW;
+      const inSpandrel = ly >= spandrelTop;
+      const inTransom = ly < glassTop;
+      let r, g, b, m = 0;
+
+      if (inSpandrel) {
+        /* Opaque spandrel panel hiding the floor slab. */
+        const t = smoothstep(spandrelTop, spandrelTop + 0.04, ly);
+        const shade = 0.55 + t * 0.35 + (dust[i] - 0.5) * 0.12;
+        r = 44 * shade + 8; g = 50 * shade + 9; b = 56 * shade + 11;
+        if (ly > 0.965) { r *= 0.5; g *= 0.5; b *= 0.55; }
+      } else if (inMullion || inTransom) {
+        const shade = 0.8 + (dust[i] - 0.5) * 0.25 + (edgeX < 0.008 ? -0.25 : 0);
+        r = 92 * shade; g = 98 * shade; b = 104 * shade;
+      } else {
+        /* Glass: sky gradient + cloud reflection + per-pane variation. */
+        const t = clamp((ly - glassTop) / (spandrelTop - glassTop), 0, 1);
+        const refl = Math.pow(1 - t, 1.5) * paneRefl[id];
+        const cloud = clouds[i];
+        const tint = paneTint[id];
+        const skyR = 96 + cloud * 84 + tint * 10;
+        const skyG = 140 + cloud * 78 + tint * 8;
+        const skyB = 184 + cloud * 60 + tint * 6;
+        const baseR = 16 + tint * 5, baseG = 33 + tint * 6, baseB = 41 + tint * 7;
+        r = lerp(baseR, skyR, clamp(refl * 0.62, 0, 1));
+        g = lerp(baseG, skyG, clamp(refl * 0.62, 0, 1));
+        b = lerp(baseB, skyB, clamp(refl * 0.62, 0, 1));
+        /* Diagonal glazing streak. */
+        const streak = smoothstep(0.72, 1.0, Math.sin((lx * 1.6 + t * 2.2 + id * 0.31) * Math.PI));
+        r += streak * 26; g += streak * 30; b += streak * 34;
+        /* Some panes show a dark interior instead of a reflection. */
+        const dk = paneDark[id];
+        r *= dk; g *= dk; b *= dk;
+        /* Rain streak grime running down the glass. */
+        const gm = smoothstep(0.55, 0.95, grime[i]) * t * 0.35;
+        r = lerp(r, r * 0.7 + 12, gm); g = lerp(g, g * 0.72 + 12, gm); b = lerp(b, b * 0.75 + 12, gm);
+        m = 1;
+      }
+      const p = i * 4;
+      px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
+      mask[i] = m;
+    }
+  }
+  applyMask(px, mask);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Office block facade: 4 floors x 4 punched windows in a precast concrete
+ * frame, with sills, dirt runoff, mullions and randomly lowered blinds.
+ * @param {number} S Texture size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genOfficeFacade(S, seed) {
+  const FLOORS = 4, COLS = 4;
+  const rng = new Rand(seed ^ 0x3b77);
+  const noise = new NoiseSource(seed);
+  const cells = FLOORS * COLS;
+  const blind = new Float32Array(cells);
+  const tint = new Float32Array(cells);
+  const dark = new Float32Array(cells);
+  for (let i = 0; i < cells; i++) {
+    blind[i] = rng.chance(0.45) ? rng.range(0.15, 0.62) : 0;
+    tint[i] = rng.range(-1, 1);
+    dark[i] = rng.range(0.75, 1.15);
+  }
+  const wallN = fbmField(S, S, noise, { freq: 6, octaves: 4, gain: 0.55 });
+  const wallFine = fbmField(S, S, new NoiseSource(seed + 161), { freq: Math.max(64, S / 4), octaves: 2, value: true });
+  const runoff = fbmField(S, S, new NoiseSource(seed + 162), { freqX: 22, freqY: 5, octaves: 3 });
+  const clouds = fbmField(S, S, new NoiseSource(seed + 163), { freqX: 5, freqY: 7, octaves: 3 });
+
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const mask = new Float32Array(S * S);
+
+  const WX0 = 0.17, WX1 = 0.83, WY0 = 0.20, WY1 = 0.74;
+  const FRAME = 0.030;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const fy = y / S * FLOORS, fl = Math.floor(fy), ly = fy - fl;
+    for (let x = 0; x < S; x++) {
+      const i = row + x;
+      const fx = x / S * COLS, cl = Math.floor(fx), lx = fx - cl;
+      const id = fl * COLS + cl;
+      let r, g, b, m = 0;
+
+      const inWin = lx > WX0 && lx < WX1 && ly > WY0 && ly < WY1;
+      const inFrame = inWin && (lx < WX0 + FRAME || lx > WX1 - FRAME || ly < WY0 + FRAME || ly > WY1 - FRAME
+        || Math.abs(lx - 0.5) < 0.012 || Math.abs(ly - 0.42) < 0.010);
+
+      if (!inWin) {
+        /* Concrete wall with a pilaster rhythm and floor bands. */
+        const pil = 1 - smoothstep(0.02, 0.10, Math.min(lx, 1 - lx));
+        const band = 1 - smoothstep(0.0, 0.035, Math.min(ly, 1 - ly));
+        let c = 148 + (wallN[i] - 0.5) * 30 + (wallFine[i] - 0.5) * 14;
+        c += pil * 12 - band * 26;
+        /* Dirt streaks running below the sills. */
+        const sillShadow = (ly > WY1 && ly < WY1 + 0.22 && lx > WX0 - 0.02 && lx < WX1 + 0.02) ? 1 : 0;
+        const dirt = sillShadow * smoothstep(0.35, 0.95, runoff[i]) * smoothstep(WY1 + 0.22, WY1, ly);
+        c = lerp(c, c * 0.68, dirt * 0.8);
+        /* Protruding sill catches light. */
+        if (ly > WY1 && ly < WY1 + 0.035 && lx > WX0 - 0.03 && lx < WX1 + 0.03) c *= 1.16;
+        r = c * 1.0; g = c * 0.985; b = c * 0.95;
+      } else if (inFrame) {
+        const c = 176 + (wallFine[i] - 0.5) * 18;
+        r = c * 0.96; g = c * 0.98; b = c;
+      } else {
+        const t = clamp((ly - WY0) / (WY1 - WY0), 0, 1);
+        const refl = Math.pow(1 - t, 1.7) * (0.7 + clouds[i] * 0.7);
+        let gr = 22 + tint[id] * 5, gg = 34 + tint[id] * 6, gb = 46 + tint[id] * 8;
+        gr = lerp(gr, 118 + clouds[i] * 70, clamp(refl * 0.55, 0, 1));
+        gg = lerp(gg, 150 + clouds[i] * 60, clamp(refl * 0.55, 0, 1));
+        gb = lerp(gb, 178 + clouds[i] * 50, clamp(refl * 0.55, 0, 1));
+        gr *= dark[id]; gg *= dark[id]; gb *= dark[id];
+        m = 1;
+        /* Venetian blinds lowered from the top of the pane. */
+        const bl = blind[id];
+        if (bl > 0 && t < bl) {
+          const slat = ((ly - WY0) * 90) % 1;
+          const s = 0.72 + 0.28 * smoothstep(0.35, 0.65, slat);
+          gr = 168 * s; gg = 160 * s; gb = 146 * s;
+          m = 0;
+        }
+        r = gr; g = gg; b = gb;
+      }
+      const p = i * 4;
+      px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
+      mask[i] = m;
+    }
+  }
+  applyMask(px, mask);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Apartment block facade: 4 floors x 3 bays of stucco with balconies,
+ * railings, air-conditioner boxes and curtained windows.
+ * @param {number} S Texture size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genApartmentFacade(S, seed) {
+  const FLOORS = 4, COLS = 3;
+  const rng = new Rand(seed ^ 0x5c31);
+  const noise = new NoiseSource(seed);
+  const cells = FLOORS * COLS;
+  const hasBalcony = new Uint8Array(cells);
+  const hasAC = new Uint8Array(cells);
+  const curtain = new Float32Array(cells);
+  const tint = new Float32Array(cells);
+  for (let i = 0; i < cells; i++) {
+    hasBalcony[i] = rng.chance(0.66) ? 1 : 0;
+    hasAC[i] = rng.chance(0.35) ? 1 : 0;
+    curtain[i] = rng.chance(0.5) ? rng.range(0.2, 0.9) : 0;
+    tint[i] = rng.range(-1, 1);
+  }
+  const stucco = fbmField(S, S, noise, { freq: 9, octaves: 4, gain: 0.55 });
+  const fine = fbmField(S, S, new NoiseSource(seed + 171), { freq: Math.max(70, S / 4), octaves: 2, value: true });
+  const streak = fbmField(S, S, new NoiseSource(seed + 172), { freqX: 26, freqY: 6, octaves: 3 });
+  const sky = fbmField(S, S, new NoiseSource(seed + 173), { freqX: 4, freqY: 6, octaves: 3 });
+
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const mask = new Float32Array(S * S);
+
+  const WX0 = 0.13, WX1 = 0.87, WY0 = 0.13, WY1 = 0.70;
+  const RAIL_TOP = 0.44, RAIL_BOT = 0.74, SLAB_BOT = 0.82;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const fy = y / S * FLOORS, fl = Math.floor(fy), ly = fy - fl;
+    for (let x = 0; x < S; x++) {
+      const i = row + x;
+      const fx = x / S * COLS, cl = Math.floor(fx), lx = fx - cl;
+      const id = fl * COLS + cl;
+      let r, g, b, m = 0;
+
+      const inWin = lx > WX0 && lx < WX1 && ly > WY0 && ly < WY1;
+      const frame = inWin && (lx < WX0 + 0.028 || lx > WX1 - 0.028 || ly < WY0 + 0.028 || ly > WY1 - 0.028
+        || Math.abs(lx - 0.5) < 0.014);
+      const acBox = hasAC[id] && lx > 0.62 && lx < 0.84 && ly > 0.20 && ly < 0.33;
+
+      if (inWin && !frame && !acBox) {
+        const t = clamp((ly - WY0) / (WY1 - WY0), 0, 1);
+        const refl = Math.pow(1 - t, 1.6) * (0.6 + sky[i] * 0.8);
+        let gr = 26 + tint[id] * 6, gg = 36 + tint[id] * 6, gb = 44 + tint[id] * 8;
+        gr = lerp(gr, 112 + sky[i] * 66, clamp(refl * 0.5, 0, 1));
+        gg = lerp(gg, 142 + sky[i] * 58, clamp(refl * 0.5, 0, 1));
+        gb = lerp(gb, 170 + sky[i] * 48, clamp(refl * 0.5, 0, 1));
+        m = 1;
+        if (curtain[id] > 0 && lx < WX0 + (WX1 - WX0) * curtain[id]) {
+          /* Fabric curtain: soft vertical folds, still lets light through. */
+          const fold = 0.78 + 0.22 * Math.sin(lx * 90 + id);
+          gr = 196 * fold; gg = 188 * fold; gb = 172 * fold;
+          m = 0.55;
+        }
+        r = gr; g = gg; b = gb;
+      } else if (acBox) {
+        const sh = ly > 0.30 ? 0.7 : 1;
+        const c = (128 + (fine[i] - 0.5) * 20) * sh;
+        r = c; g = c * 1.01; b = c * 1.04;
+      } else if (inWin) {
+        const c = 208 + (fine[i] - 0.5) * 16;
+        r = c; g = c * 0.99; b = c * 0.96;
+      } else {
+        /* Stucco wall + floor slab bands. */
+        let c = 176 + (stucco[i] - 0.5) * 34 + (fine[i] - 0.5) * 14;
+        const slab = 1 - smoothstep(0.0, 0.045, Math.min(ly, 1 - ly));
+        c = lerp(c, 196, slab * 0.7);
+        c -= smoothstep(0.5, 0.95, streak[i]) * 14 * (ly > 0.5 ? 1 : 0.3);
+        r = c * 1.03; g = c * 0.98; b = c * 0.90;
+      }
+
+      /* Balcony railing and slab drawn over everything in this bay. */
+      if (hasBalcony[id]) {
+        if (ly > RAIL_TOP && ly < RAIL_BOT && lx > 0.04 && lx < 0.96) {
+          const bar = ((lx - 0.04) * 26) % 1;
+          const isBar = bar < 0.42 || ly < RAIL_TOP + 0.045;
+          if (isBar) {
+            const c = 96 + (fine[i] - 0.5) * 22;
+            r = c * 0.95; g = c; b = c * 1.06;
+            m = 0;
+          } else if (m > 0) {
+            /* Glass seen between the bars is slightly shaded by the balcony. */
+            r *= 0.86; g *= 0.86; b *= 0.88;
+          }
+        }
+        if (ly >= RAIL_BOT && ly < SLAB_BOT) {
+          const t = (ly - RAIL_BOT) / (SLAB_BOT - RAIL_BOT);
+          const c = (200 - t * 66) + (fine[i] - 0.5) * 14;
+          r = c; g = c * 0.99; b = c * 0.96;
+          m = 0;
+        }
+      }
+
+      const p = i * 4;
+      px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
+      mask[i] = m;
+    }
+  }
+  applyMask(px, mask);
+  ctx.putImageData(img, 0, 0);
+  return { canvas: canvas, pixels: px };
+}
+
+/**
+ * Ground-floor shopfront strip used for the bottom floor of city blocks:
+ * three units with glazing, doors, awnings and illuminated Korean signage.
+ * The sign lettering and the shop interiors are marked emissive in alpha.
+ * @param {number} S Texture size.
+ * @param {number} seed Seed.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
+ */
+function genGroundFloorShops(S, seed) {
+  const SHOPS = 3;
+  const rng = new Rand(seed ^ 0x7f42);
+  const noise = new NoiseSource(seed);
+  const signHue = [];
+  const awning = [];
+  for (let i = 0; i < SHOPS; i++) {
+    signHue.push(rng.int(0, 359));
+    awning.push(rng.chance(0.6) ? 1 : 0);
+  }
+  const wallN = fbmField(S, S, noise, { freq: 7, octaves: 4 });
+  const fine = fbmField(S, S, new NoiseSource(seed + 181), { freq: Math.max(64, S / 4), octaves: 2, value: true });
+  const interior = fbmField(S, S, new NoiseSource(seed + 182), { freq: 12, octaves: 3 });
+
+  const canvas = createCanvas(S, S);
+  const ctx = ctx2d(canvas);
+  const img = newImage(ctx, S, S);
+  const px = img.data;
+  const mask = new Float32Array(S * S);
+
+  const CORNICE = 0.06, SIGN0 = 0.06, SIGN1 = 0.26, GLASS0 = 0.32, GLASS1 = 0.88;
+  for (let y = 0; y < S; y++) {
+    const row = y * S;
+    const v = y / S;
+    for (let x = 0; x < S; x++) {
+      const i = row + x;
+      const fx = x / S * SHOPS, sh = Math.floor(fx), lx = fx - sh;
+      let r, g, b, m = 0;
+      const pier = Math.min(lx, 1 - lx) < 0.045;
+
+      if (v < CORNICE) {
+        const c = 96 + (wallN[i] - 0.5) * 22 - (v < 0.012 ? 26 : 0);
+        r = c * 1.0; g = c * 0.98; b = c * 0.95;
+      } else if (v < SIGN1 && !pier) {
+        /* Illuminated sign box: saturated panel, letters added later. */
+        const hh = signHue[sh] / 360;
+        const t = smoothstep(SIGN0, SIGN1, v);
+        const l = 0.20 + (1 - t) * 0.10;
+        const c = hslToRgbBytes(hh, 0.62, l);
+        r = c[0] + (fine[i] - 0.5) * 10;
+        g = c[1] + (fine[i] - 0.5) * 10;
+        b = c[2] + (fine[i] - 0.5) * 10;
+        if (v > SIGN1 - 0.014) { r *= 0.4; g *= 0.4; b *= 0.4; }
+      } else if (v < GLASS0) {
+        if (awning[sh] && !pier) {
+          /* Striped awning valance. */
+          const stripe = ((lx * 9) % 1) < 0.5 ? 1 : 0;
+          const shade = 0.72 + smoothstep(GLASS0, SIGN1, v) * 0.4;
+          r = (stripe ? 196 : 42) * shade;
+          g = (stripe ? 190 : 52) * shade;
+          b = (stripe ? 182 : 72) * shade;
+        } else {
+          const c = 118 + (wallN[i] - 0.5) * 20;
+          r = c; g = c * 0.99; b = c * 0.97;
+        }
+      } else if (v < GLASS1 && !pier) {
+        const door = lx > 0.70 && lx < 0.93;
+        const mull = Math.abs(lx - 0.36) < 0.012 || Math.abs(lx - 0.68) < 0.014
+          || (door && (Math.abs(lx - 0.70) < 0.012 || Math.abs(lx - 0.93) < 0.012))
+          || v > GLASS1 - 0.02 || v < GLASS0 + 0.015;
+        if (mull) {
+          const c = 74 + (fine[i] - 0.5) * 16;
+          r = c; g = c * 1.02; b = c * 1.05;
+        } else {
+          /* Shop interior seen through glass: warm, uneven, emissive. */
+          const t = clamp((v - GLASS0) / (GLASS1 - GLASS0), 0, 1);
+          const glow = 0.45 + interior[i] * 0.8;
+          r = (150 + interior[i] * 90) * glow * (1.1 - t * 0.35);
+          g = (128 + interior[i] * 78) * glow * (1.1 - t * 0.35);
+          b = (96 + interior[i] * 60) * glow * (1.1 - t * 0.35);
+          /* Reflection of the street on the lower glass. */
+          const refl = smoothstep(0.35, 1.0, t) * 0.4;
+          r = lerp(r, 60, refl); g = lerp(g, 72, refl); b = lerp(b, 88, refl);
+          m = 1 - refl * 0.5;
+          if (door) m *= 0.85;
+        }
+      } else if (pier) {
+        const c = 132 + (wallN[i] - 0.5) * 26 + (fine[i] - 0.5) * 12;
+        const shade = v > GLASS1 ? 0.7 : 1;
+        r = c * shade; g = c * 0.99 * shade; b = c * 0.95 * shade;
+      } else {
+        /* Plinth below the glazing. */
+        const c = 62 + (wallN[i] - 0.5) * 18 + (fine[i] - 0.5) * 10;
+        r = c; g = c * 0.99; b = c * 0.98;
+      }
+      const p = i * 4;
+      px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
+      mask[i] = m;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  /* Signage: draw opaque, then detect the painted texels and mark them emissive. */
+  const before = ctx.getImageData(0, 0, S, S).data.slice();
+  const names = ['라면 24H', 'MART 마트', '전당포'];
+  const sub = ['NOODLE BAR', 'OPEN 24 HOURS', 'PAWN SHOP'];
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < SHOPS; i++) {
+    const cx = S * (i + 0.5) / SHOPS;
+    ctx.fillStyle = '#fdfdf4';
+    ctx.font = 'bold ' + Math.round(S * 0.085) + 'px ' + FONT_KO;
+    ctx.fillText(names[i], cx, S * 0.135);
+    ctx.fillStyle = 'rgba(255,244,214,0.92)';
+    ctx.font = 'bold ' + Math.round(S * 0.030) + 'px ' + FONT_DISPLAY;
+    ctx.fillText(sub[i], cx, S * 0.216);
+  }
+  ctx.restore();
+  const after = ctx.getImageData(0, 0, S, S);
+  const outPx = after.data;
+  for (let i = 0, p = 0; i < S * S; i++, p += 4) {
+    const d = Math.abs(outPx[p] - before[p]) + Math.abs(outPx[p + 1] - before[p + 1]) + Math.abs(outPx[p + 2] - before[p + 2]);
+    if (d > 24) mask[i] = 1;
+  }
+  applyMask(outPx, mask);
+  ctx.putImageData(after, 0, 0);
+  return { canvas: canvas, pixels: outPx };
+}
+
+/**
+ * Converts HSL to 8-bit RGB.
+ * @param {number} h Hue 0..1.
+ * @param {number} s Saturation 0..1.
+ * @param {number} l Lightness 0..1.
+ * @returns {number[]} `[r, g, b]` in 0..255.
+ */
+function hslToRgbBytes(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (h - Math.floor(h)) * 6;
+  const xx = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1) { r = c; g = xx; } else if (hp < 2) { r = xx; g = c; } else if (hp < 3) { g = c; b = xx; } else if (hp < 4) { g = xx; b = c; } else if (hp < 5) { r = xx; b = c; } else { r = c; b = xx; }
+  const m = l - c * 0.5;
+  return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+}

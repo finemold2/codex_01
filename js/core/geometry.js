@@ -818,3 +818,678 @@ export function wedge(w, h, d) {
 
   return fromArrays(positions, normals, uvs, indices, null);
 }
+
+// --- polygon triangulation ----------------------------------------------------
+
+/**
+ * Signed area of a 2D polygon using the shoelace formula.
+ * Positive means the loop is counter-clockwise in (x, z) parameter space.
+ * @param {ArrayLike<ArrayLike<number>>} pts Polygon points as [x, z] pairs.
+ * @returns {number} Signed area (square meters).
+ */
+function polygonSignedArea(pts) {
+  let a = 0;
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a * 0.5;
+}
+
+/**
+ * Point in triangle test for a positively oriented triangle (boundary counts as in).
+ * @param {number} ax Triangle a.x.
+ * @param {number} az Triangle a.z.
+ * @param {number} bx Triangle b.x.
+ * @param {number} bz Triangle b.z.
+ * @param {number} cx Triangle c.x.
+ * @param {number} cz Triangle c.z.
+ * @param {number} px Query x.
+ * @param {number} pz Query z.
+ * @returns {boolean} True when the point is inside or on the triangle.
+ */
+function pointInTriangle(ax, az, bx, bz, cx, cz, px, pz) {
+  const d1 = (bx - ax) * (pz - az) - (bz - az) * (px - ax);
+  if (d1 < 0) return false;
+  const d2 = (cx - bx) * (pz - bz) - (cz - bz) * (px - bx);
+  if (d2 < 0) return false;
+  const d3 = (ax - cx) * (pz - cz) - (az - cz) * (px - cx);
+  return d3 >= 0;
+}
+
+/**
+ * Ear clipping triangulation for simple polygons, concave included.
+ * Input winding does not matter: the traversal is normalized so every emitted
+ * triple is positively oriented in the (x, z) shoelace sense. Collinear and
+ * duplicated corners are dropped without emitting degenerate triangles, and a
+ * forced-progress fallback guarantees termination on malformed input.
+ * @param {ArrayLike<ArrayLike<number>>} pts Polygon points as [x, z] pairs.
+ * @param {number[]} out Array receiving flat index triples (cleared first).
+ * @returns {number[]} out
+ */
+function earClipPolygon(pts, out) {
+  out.length = 0;
+  const n = pts.length;
+  if (n < 3) return out;
+  const v = _earIndices;
+  v.length = 0;
+  if (polygonSignedArea(pts) >= 0) {
+    for (let i = 0; i < n; i++) v.push(i);
+  } else {
+    for (let i = n - 1; i >= 0; i--) v.push(i);
+  }
+
+  let count = v.length;
+  let i = 0;
+  let attempts = 0;
+  while (count > 3) {
+    if (i >= count) i = 0;
+    const pi = (i + count - 1) % count;
+    const ni = (i + 1) % count;
+    const a = pts[v[pi]];
+    const b = pts[v[i]];
+    const c = pts[v[ni]];
+    const ax = a[0], az = a[1];
+    const bx = b[0], bz = b[1];
+    const cx = c[0], cz = c[1];
+    const cross = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+    let clip = false;
+    let emit = false;
+    if (cross > COLLINEAR_EPS) {
+      let blocked = false;
+      for (let k = 0; k < count; k++) {
+        if (k === pi || k === i || k === ni) continue;
+        const p = pts[v[k]];
+        const px = p[0];
+        const pz = p[1];
+        if ((px === ax && pz === az) || (px === bx && pz === bz) || (px === cx && pz === cz)) continue;
+        if (pointInTriangle(ax, az, bx, bz, cx, cz, px, pz)) {
+          blocked = true;
+          break;
+        }
+      }
+      if (!blocked) {
+        clip = true;
+        emit = true;
+      }
+    } else if (cross > -COLLINEAR_EPS) {
+      // Collinear or duplicated corner: remove it, it carries no area.
+      clip = true;
+    }
+    if (!clip && attempts >= count * 3) {
+      // Self-intersecting or otherwise broken input: force progress.
+      clip = true;
+      emit = cross > COLLINEAR_EPS;
+    }
+    if (clip) {
+      if (emit) out.push(v[pi], v[i], v[ni]);
+      v.splice(i, 1);
+      count--;
+      attempts = 0;
+      i = i > 0 ? i - 1 : count - 1;
+    } else {
+      i++;
+      attempts++;
+    }
+  }
+  if (count === 3) {
+    const a = pts[v[0]];
+    const b = pts[v[1]];
+    const c = pts[v[2]];
+    const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (Math.abs(cross) > COLLINEAR_EPS) out.push(v[0], v[1], v[2]);
+  }
+  return out;
+}
+
+/**
+ * Copies a polygon dropping consecutive duplicate points and forcing positive
+ * (counter-clockwise in shoelace terms) orientation.
+ * @param {ArrayLike<ArrayLike<number>>} src Source points as [x, z] pairs.
+ * @returns {number[][]} Cleaned polygon, may hold fewer than 3 points.
+ */
+function preparePolygon(src) {
+  const poly = [];
+  const n = src.length;
+  for (let i = 0; i < n; i++) {
+    const p = src[i];
+    if (!p || !isFinite(p[0]) || !isFinite(p[1])) continue;
+    const last = poly[poly.length - 1];
+    if (last && Math.abs(last[0] - p[0]) < 1e-9 && Math.abs(last[1] - p[1]) < 1e-9) continue;
+    poly.push([p[0], p[1]]);
+  }
+  while (poly.length > 1) {
+    const first = poly[0];
+    const last = poly[poly.length - 1];
+    if (Math.abs(first[0] - last[0]) < 1e-9 && Math.abs(first[1] - last[1]) < 1e-9) poly.pop();
+    else break;
+  }
+  if (poly.length >= 3 && polygonSignedArea(poly) < 0) poly.reverse();
+  return poly;
+}
+
+/**
+ * Extrudes a 2D polygon (XZ plane) vertically into a prism.
+ * Side walls get exact per-quad normals, u equal to the perimeter arc length in
+ * meters and v equal to the height in meters (both times `opts.uvScale`); caps are
+ * ear-clipped and use world-space planar UVs.
+ * @param {ArrayLike<ArrayLike<number>>} points2d Footprint as [x, z] pairs, any winding.
+ * @param {number} height Extrusion height; negative extrudes below `baseY`.
+ * @param {object} [opts] Options.
+ * @param {boolean} [opts.capTop=true] Build the top cap.
+ * @param {boolean} [opts.capBottom=false] Build the bottom cap.
+ * @param {number|number[]} [opts.uvScale=[1,1]] UV tiles per meter.
+ * @param {number} [opts.baseY=0] World Y of the base.
+ * @param {number} [opts.taper=0] 0..1 shrink of the top outline toward the centroid.
+ * @param {boolean} [opts.flipNormals=false] Invert winding and normals (interiors).
+ * @returns {object} Geometry object.
+ */
+export function extrudePolygon(points2d, height, opts = {}) {
+  if (!points2d || points2d.length < 3) return emptyGeometry();
+  const poly = preparePolygon(points2d);
+  const n = poly.length;
+  if (n < 3) return emptyGeometry();
+
+  const capTop = opts.capTop !== false;
+  const capBottom = opts.capBottom === true;
+  const baseY = isFinite(opts.baseY) ? opts.baseY : 0;
+  const taper = Math.max(0, Math.min(1, isFinite(opts.taper) ? opts.taper : 0));
+  const flip = opts.flipNormals === true;
+  scale2(opts.uvScale, 1, 1, _uvScale);
+  const su = _uvScale[0];
+  const sv = _uvScale[1];
+  const h = isFinite(height) ? height : 0;
+  const y0 = h >= 0 ? baseY : baseY + h;
+  const y1 = h >= 0 ? baseY + h : baseY;
+  const wallH = Math.abs(h);
+
+  // Area centroid, used as the taper pivot.
+  let a2 = 0;
+  let cxs = 0;
+  let czs = 0;
+  for (let i = 0; i < n; i++) {
+    const p = poly[i];
+    const q = poly[(i + 1) % n];
+    const cr = p[0] * q[1] - q[0] * p[1];
+    a2 += cr;
+    cxs += (p[0] + q[0]) * cr;
+    czs += (p[1] + q[1]) * cr;
+  }
+  let cx = 0;
+  let cz = 0;
+  if (Math.abs(a2) > TINY) {
+    cx = cxs / (3 * a2);
+    cz = czs / (3 * a2);
+  } else {
+    for (let i = 0; i < n; i++) {
+      cx += poly[i][0];
+      cz += poly[i][1];
+    }
+    cx /= n;
+    cz /= n;
+  }
+  const k = 1 - taper;
+  const top = new Array(n);
+  for (let i = 0; i < n; i++) {
+    top[i] = [cx + (poly[i][0] - cx) * k, cz + (poly[i][1] - cz) * k];
+  }
+  const topCollapsed = taper > 1 - 1e-6;
+
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+
+  // Side walls.
+  if (wallH > TINY) {
+    let perim = 0;
+    for (let i = 0; i < n; i++) {
+      const i1 = (i + 1) % n;
+      const b0x = poly[i][0];
+      const b0z = poly[i][1];
+      const b1x = poly[i1][0];
+      const b1z = poly[i1][1];
+      const t0x = top[i][0];
+      const t0z = top[i][1];
+      const t1x = top[i1][0];
+      const t1z = top[i1][1];
+      const ex = b1x - b0x;
+      const ez = b1z - b0z;
+      const edgeLen = Math.sqrt(ex * ex + ez * ez);
+      if (edgeLen < 1e-9) continue;
+      // Exact face normal from the (planar) trapezoid.
+      const ux = t0x - b0x;
+      const uy = y1 - y0;
+      const uz = t0z - b0z;
+      const wx = t1x - b0x;
+      const wy = y1 - y0;
+      const wz = t1z - b0z;
+      let nx = uy * wz - uz * wy;
+      let ny = uz * wx - ux * wz;
+      let nz = ux * wy - uy * wx;
+      let nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (nl < TINY) {
+        nx = ez;
+        ny = 0;
+        nz = -ex;
+        nl = edgeLen;
+      }
+      nx /= nl;
+      ny /= nl;
+      nz /= nl;
+      const u0 = perim * su;
+      const u1 = (perim + edgeLen) * su;
+      const vTop = wallH * sv;
+      const base = positions.length / 3;
+      pushVertex(positions, normals, uvs, b0x, y0, b0z, nx, ny, nz, u0, 0);
+      pushVertex(positions, normals, uvs, b1x, y0, b1z, nx, ny, nz, u1, 0);
+      pushVertex(positions, normals, uvs, t1x, y1, t1z, nx, ny, nz, u1, vTop);
+      pushVertex(positions, normals, uvs, t0x, y1, t0z, nx, ny, nz, u0, vTop);
+      const topDegenerate = Math.abs(t1x - t0x) < 1e-9 && Math.abs(t1z - t0z) < 1e-9;
+      if (!topDegenerate) indices.push(base, base + 3, base + 2);
+      indices.push(base, base + 2, base + 1);
+      perim += edgeLen;
+    }
+  }
+
+  // Caps.
+  if ((capTop && !topCollapsed) || capBottom) {
+    const tris = earClipPolygon(poly, _earTris);
+    if (capBottom) {
+      const base = positions.length / 3;
+      for (let i = 0; i < n; i++) {
+        pushVertex(positions, normals, uvs,
+          poly[i][0], y0, poly[i][1], 0, -1, 0,
+          poly[i][0] * su, poly[i][1] * sv);
+      }
+      for (let t = 0; t < tris.length; t += 3) {
+        indices.push(base + tris[t], base + tris[t + 1], base + tris[t + 2]);
+      }
+    }
+    if (capTop && !topCollapsed) {
+      const base = positions.length / 3;
+      for (let i = 0; i < n; i++) {
+        pushVertex(positions, normals, uvs,
+          top[i][0], y1, top[i][1], 0, 1, 0,
+          top[i][0] * su, top[i][1] * sv);
+      }
+      for (let t = 0; t < tris.length; t += 3) {
+        indices.push(base + tris[t], base + tris[t + 2], base + tris[t + 1]);
+      }
+    }
+  }
+
+  const geo = fromArrays(positions, normals, uvs, indices, null);
+  if (flip) flipGeometry(geo);
+  return geo;
+}
+
+/**
+ * Builds a flat, ear-clipped polygon cap facing +Y at the given height.
+ * UVs are world meters (x, z).
+ * @param {ArrayLike<ArrayLike<number>>} points2d Outline as [x, z] pairs, any winding.
+ * @param {number} [y=0] World height of the cap.
+ * @returns {object} Geometry object.
+ */
+export function polygonFan(points2d, y = 0) {
+  if (!points2d || points2d.length < 3) return emptyGeometry();
+  const poly = preparePolygon(points2d);
+  const n = poly.length;
+  if (n < 3) return emptyGeometry();
+  const tris = earClipPolygon(poly, _earTris);
+  const positions = new Float32Array(n * 3);
+  const normals = new Float32Array(n * 3);
+  const uvs = new Float32Array(n * 2);
+  const indices = new Uint32Array(tris.length);
+  for (let i = 0; i < n; i++) {
+    positions[i * 3] = poly[i][0];
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = poly[i][1];
+    normals[i * 3] = 0;
+    normals[i * 3 + 1] = 1;
+    normals[i * 3 + 2] = 0;
+    uvs[i * 2] = poly[i][0];
+    uvs[i * 2 + 1] = poly[i][1];
+  }
+  for (let t = 0; t < tris.length; t += 3) {
+    indices[t] = tris[t];
+    indices[t + 1] = tris[t + 2];
+    indices[t + 2] = tris[t + 1];
+  }
+  const geo = { positions, normals, uvs, indices };
+  computeBounds(geo);
+  return geo;
+}
+
+/**
+ * Sweeps a circle along a 3D poly-line using parallel-transport frames, so the
+ * tube never twists or flips even on sharp bends. Flat caps close both ends.
+ * U runs 0..1 around the ring, V is the path arc length in meters.
+ * @param {ArrayLike<ArrayLike<number>>} pathPoints3d Path as [x, y, z] triples.
+ * @param {number} radius Tube radius (meters).
+ * @param {number} [radialSeg=8] Segments around the tube (>= 3).
+ * @returns {object} Geometry object.
+ */
+export function tube(pathPoints3d, radius, radialSeg = 8) {
+  if (!pathPoints3d || pathPoints3d.length < 2) return emptyGeometry();
+  const seg = Math.max(3, Math.floor(radialSeg));
+  const path = [];
+  for (let i = 0; i < pathPoints3d.length; i++) {
+    const p = pathPoints3d[i];
+    if (!p || !isFinite(p[0]) || !isFinite(p[1]) || !isFinite(p[2])) continue;
+    const last = path[path.length - 1];
+    if (last) {
+      const dx = p[0] - last[0];
+      const dy = p[1] - last[1];
+      const dz = p[2] - last[2];
+      if (dx * dx + dy * dy + dz * dz < 1e-18) continue;
+    }
+    path.push([p[0], p[1], p[2]]);
+  }
+  const m = path.length;
+  if (m < 2) return emptyGeometry();
+
+  // Tangents (central differences inside, one-sided at the ends).
+  const tangents = new Array(m);
+  for (let i = 0; i < m; i++) {
+    const a = path[Math.max(0, i - 1)];
+    const b = path[Math.min(m - 1, i + 1)];
+    let tx = b[0] - a[0];
+    let ty = b[1] - a[1];
+    let tz = b[2] - a[2];
+    let l = Math.sqrt(tx * tx + ty * ty + tz * tz);
+    if (l < TINY) {
+      tx = 0;
+      ty = 0;
+      tz = 1;
+      l = 1;
+    }
+    tangents[i] = [tx / l, ty / l, tz / l];
+  }
+
+  // Seed frame: reference axis least aligned with the first tangent.
+  const t0 = tangents[0];
+  const ax = Math.abs(t0[0]);
+  const ay = Math.abs(t0[1]);
+  const az = Math.abs(t0[2]);
+  let rx = 0;
+  let ry = 0;
+  let rz = 0;
+  if (ay <= ax && ay <= az) ry = 1;
+  else if (ax <= az) rx = 1;
+  else rz = 1;
+  let d = rx * t0[0] + ry * t0[1] + rz * t0[2];
+  let nx = rx - t0[0] * d;
+  let ny = ry - t0[1] * d;
+  let nz = rz - t0[2] * d;
+  let nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+  nx /= nl;
+  ny /= nl;
+  nz /= nl;
+
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  let arc = 0;
+  const frameN = new Array(m);
+  const frameB = new Array(m);
+
+  for (let i = 0; i < m; i++) {
+    if (i > 0) {
+      const tp = tangents[i - 1];
+      const tc = tangents[i];
+      // Rotate the previous normal by the minimal rotation taking tp to tc.
+      let axx = tp[1] * tc[2] - tp[2] * tc[1];
+      let axy = tp[2] * tc[0] - tp[0] * tc[2];
+      let axz = tp[0] * tc[1] - tp[1] * tc[0];
+      const axl = Math.sqrt(axx * axx + axy * axy + axz * axz);
+      const dt = tp[0] * tc[0] + tp[1] * tc[1] + tp[2] * tc[2];
+      if (axl > 1e-9) {
+        axx /= axl;
+        axy /= axl;
+        axz /= axl;
+        const angle = Math.atan2(axl, dt);
+        const cs = Math.cos(angle);
+        const sn = Math.sin(angle);
+        const dotAN = axx * nx + axy * ny + axz * nz;
+        const crx = axy * nz - axz * ny;
+        const cry = axz * nx - axx * nz;
+        const crz = axx * ny - axy * nx;
+        const rxn = nx * cs + crx * sn + axx * dotAN * (1 - cs);
+        const ryn = ny * cs + cry * sn + axy * dotAN * (1 - cs);
+        const rzn = nz * cs + crz * sn + axz * dotAN * (1 - cs);
+        nx = rxn;
+        ny = ryn;
+        nz = rzn;
+      } else if (dt < 0) {
+        nx = -nx;
+        ny = -ny;
+        nz = -nz;
+      }
+      // Re-orthogonalize against drift.
+      const proj = nx * tc[0] + ny * tc[1] + nz * tc[2];
+      nx -= tc[0] * proj;
+      ny -= tc[1] * proj;
+      nz -= tc[2] * proj;
+      let l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (l < TINY) {
+        nx = 1;
+        ny = 0;
+        nz = 0;
+        const p2 = nx * tc[0] + ny * tc[1] + nz * tc[2];
+        nx -= tc[0] * p2;
+        ny -= tc[1] * p2;
+        nz -= tc[2] * p2;
+        l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      }
+      nx /= l;
+      ny /= l;
+      nz /= l;
+      const prev = path[i - 1];
+      const cur = path[i];
+      arc += Math.sqrt(
+        (cur[0] - prev[0]) * (cur[0] - prev[0]) +
+        (cur[1] - prev[1]) * (cur[1] - prev[1]) +
+        (cur[2] - prev[2]) * (cur[2] - prev[2])
+      );
+    }
+    const t = tangents[i];
+    const bx = t[1] * nz - t[2] * ny;
+    const by = t[2] * nx - t[0] * nz;
+    const bz = t[0] * ny - t[1] * nx;
+    frameN[i] = [nx, ny, nz];
+    frameB[i] = [bx, by, bz];
+    const c = path[i];
+    for (let j = 0; j <= seg; j++) {
+      const phi = (j / seg) * TWO_PI;
+      const cp = Math.cos(phi);
+      const sp = Math.sin(phi);
+      const dx = cp * nx + sp * bx;
+      const dy = cp * ny + sp * by;
+      const dz = cp * nz + sp * bz;
+      pushVertex(positions, normals, uvs,
+        c[0] + dx * radius, c[1] + dy * radius, c[2] + dz * radius,
+        dx, dy, dz, j / seg, arc);
+    }
+  }
+
+  const stride = seg + 1;
+  for (let i = 0; i < m - 1; i++) {
+    for (let j = 0; j < seg; j++) {
+      const a = i * stride + j;
+      const b = a + 1;
+      const dIdx = a + stride;
+      const c = dIdx + 1;
+      indices.push(a, b, dIdx, b, c, dIdx);
+    }
+  }
+
+  // End caps.
+  if (radius > TINY) {
+    for (let end = 0; end < 2; end++) {
+      const i = end === 0 ? 0 : m - 1;
+      const t = tangents[i];
+      const sign = end === 0 ? -1 : 1;
+      const c = path[i];
+      const nrmX = t[0] * sign;
+      const nrmY = t[1] * sign;
+      const nrmZ = t[2] * sign;
+      const base = positions.length / 3;
+      pushVertex(positions, normals, uvs, c[0], c[1], c[2], nrmX, nrmY, nrmZ, 0.5, 0.5);
+      const fn = frameN[i];
+      const fb = frameB[i];
+      for (let j = 0; j <= seg; j++) {
+        const phi = (j / seg) * TWO_PI;
+        const cp = Math.cos(phi);
+        const sp = Math.sin(phi);
+        pushVertex(positions, normals, uvs,
+          c[0] + (cp * fn[0] + sp * fb[0]) * radius,
+          c[1] + (cp * fn[1] + sp * fb[1]) * radius,
+          c[2] + (cp * fn[2] + sp * fb[2]) * radius,
+          nrmX, nrmY, nrmZ,
+          0.5 + cp * 0.5, 0.5 + sp * 0.5);
+      }
+      for (let j = 0; j < seg; j++) {
+        if (end === 0) indices.push(base, base + 2 + j, base + 1 + j);
+        else indices.push(base, base + 1 + j, base + 2 + j);
+      }
+    }
+  }
+
+  return fromArrays(positions, normals, uvs, indices, null);
+}
+
+/**
+ * Builds a ribbon between two parallel poly-lines (roads, sidewalks, rails).
+ * V runs along the strip in meters, U across the width in meters, both scaled by
+ * `uvRepeat`. Normals follow the actual surface, so banked or sloped roads shade
+ * correctly.
+ * @param {ArrayLike<ArrayLike<number>>} pointsLeft3d Left edge as [x, y, z] triples.
+ * @param {ArrayLike<ArrayLike<number>>} pointsRight3d Right edge, same length.
+ * @param {number|number[]} [uvRepeat=1] UV tiles per meter ([across, along]).
+ * @returns {object} Geometry object.
+ */
+export function quadStrip(pointsLeft3d, pointsRight3d, uvRepeat = 1) {
+  if (!pointsLeft3d || !pointsRight3d) return emptyGeometry();
+  const n = Math.min(pointsLeft3d.length, pointsRight3d.length);
+  if (n < 2) return emptyGeometry();
+  scale2(uvRepeat, 1, 1, _uvScale);
+  const su = _uvScale[0];
+  const sv = _uvScale[1];
+
+  const positions = new Float32Array(n * 6);
+  const normals = new Float32Array(n * 6);
+  const uvs = new Float32Array(n * 4);
+  const indices = new Uint32Array((n - 1) * 6);
+
+  let along = 0;
+  let prevCx = 0;
+  let prevCy = 0;
+  let prevCz = 0;
+  for (let i = 0; i < n; i++) {
+    const l = pointsLeft3d[i];
+    const r = pointsRight3d[i];
+    const lx = l[0], ly = l[1], lz = l[2];
+    const rx = r[0], ry = r[1], rz = r[2];
+    const cxp = (lx + rx) * 0.5;
+    const cyp = (ly + ry) * 0.5;
+    const czp = (lz + rz) * 0.5;
+    if (i > 0) {
+      const dx = cxp - prevCx;
+      const dy = cyp - prevCy;
+      const dz = czp - prevCz;
+      along += Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    prevCx = cxp;
+    prevCy = cyp;
+    prevCz = czp;
+
+    // Along-strip tangent from neighbouring centers.
+    const ia = Math.max(0, i - 1);
+    const ib = Math.min(n - 1, i + 1);
+    const la = pointsLeft3d[ia];
+    const ra = pointsRight3d[ia];
+    const lb = pointsLeft3d[ib];
+    const rb = pointsRight3d[ib];
+    let tx = (lb[0] + rb[0]) * 0.5 - (la[0] + ra[0]) * 0.5;
+    let ty = (lb[1] + rb[1]) * 0.5 - (la[1] + ra[1]) * 0.5;
+    let tz = (lb[2] + rb[2]) * 0.5 - (la[2] + ra[2]) * 0.5;
+    const tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
+    if (tl > TINY) {
+      tx /= tl;
+      ty /= tl;
+      tz /= tl;
+    } else {
+      tx = 0;
+      ty = 0;
+      tz = 1;
+    }
+    let axx = rx - lx;
+    let axy = ry - ly;
+    let axz = rz - lz;
+    const width = Math.sqrt(axx * axx + axy * axy + axz * axz);
+    if (width > TINY) {
+      axx /= width;
+      axy /= width;
+      axz /= width;
+    } else {
+      axx = 1;
+      axy = 0;
+      axz = 0;
+    }
+    let nx = axy * tz - axz * ty;
+    let ny = axz * tx - axx * tz;
+    let nz = axx * ty - axy * tx;
+    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (nl > TINY) {
+      nx /= nl;
+      ny /= nl;
+      nz /= nl;
+    } else {
+      nx = 0;
+      ny = 1;
+      nz = 0;
+    }
+
+    const vp = i * 6;
+    positions[vp] = lx;
+    positions[vp + 1] = ly;
+    positions[vp + 2] = lz;
+    positions[vp + 3] = rx;
+    positions[vp + 4] = ry;
+    positions[vp + 5] = rz;
+    normals[vp] = nx;
+    normals[vp + 1] = ny;
+    normals[vp + 2] = nz;
+    normals[vp + 3] = nx;
+    normals[vp + 4] = ny;
+    normals[vp + 5] = nz;
+    const up = i * 4;
+    uvs[up] = 0;
+    uvs[up + 1] = along * sv;
+    uvs[up + 2] = width * su;
+    uvs[up + 3] = along * sv;
+  }
+
+  let ip = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = i * 2;
+    const b = a + 1;
+    const c = a + 3;
+    const e = a + 2;
+    indices[ip] = a;
+    indices[ip + 1] = b;
+    indices[ip + 2] = c;
+    indices[ip + 3] = a;
+    indices[ip + 4] = c;
+    indices[ip + 5] = e;
+    ip += 6;
+  }
+
+  const geo = { positions, normals, uvs, indices };
+  computeBounds(geo);
+  return geo;
+}
