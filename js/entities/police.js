@@ -167,6 +167,8 @@ function makeUnit() {
     blocked: 0,
     bestDist: Infinity,
     noProgress: 0,
+    targetX: 0,
+    targetZ: 0,
     prevHealth: 1000,
     siren: null,
     armored: false,
@@ -215,6 +217,7 @@ function makeCop() {
 
     unit: null,
     armored: false,
+    standDown: 0,
     accum: 0,
     phase: 0,
     distToPlayer: 1e9,
@@ -456,6 +459,8 @@ export class PoliceSystem {
     u.blocked = 0;
     u.bestDist = Infinity;
     u.noProgress = 0;
+    u.targetX = 1e9;
+    u.targetZ = 1e9;
     u.siren = null;
     u.armored = false;
     u.lightPhase = this.rng.next() * 6.28;
@@ -559,6 +564,7 @@ export class PoliceSystem {
     cop.accuracy = armored ? 1.35 : 1;
     cop.hasCover = false;
     cop.coverTimer = 0;
+    cop.standDown = 0;
     cop.velocity[0] = 0;
     cop.velocity[1] = 0;
     cop.velocity[2] = 0;
@@ -984,12 +990,13 @@ export class PoliceSystem {
       }
       unit.age += dt;
 
-      // Player rammed or shot the cruiser.
+      // Player rammed or shot the cruiser. Proximity alone is not evidence: cruisers scrape
+      // kerbs, traffic and each other constantly during a pursuit, and blaming the player for
+      // every dent used to re-arm the search timer several times a second, so the heat could
+      // never decay while a unit was anywhere near him.
       const hp = fin(v.health, unit.prevHealth);
-      if (hp < unit.prevHealth - 12) {
-        const dx = v.position[0] - px;
-        const dz = v.position[2] - pz;
-        if (dx * dx + dz * dz < 900) this.reportCrime('hitPolice', v.position);
+      if (hp < unit.prevHealth - 12 && this._playerBlamed(player, v, px, pz)) {
+        this.reportCrime('hitPolice', v.position);
       }
       unit.prevHealth = hp;
 
@@ -1068,6 +1075,37 @@ export class PoliceSystem {
   }
 
   /**
+   * Whether the player can plausibly be blamed for damage a cruiser has just taken.
+   *
+   * Two cases count: the player's own vehicle is in contact with the cruiser (a ram), or the
+   * player fired a shot / set off an explosion in the last two seconds with the cruiser in
+   * range. Everything else is the AI wrecking its own car.
+   * @param {object|null} player Player.
+   * @param {object} v The damaged cruiser.
+   * @param {number} px Player x.
+   * @param {number} pz Player z.
+   * @returns {boolean} True when the crime should be reported.
+   * @private
+   */
+  _playerBlamed(player, v, px, pz) {
+    if (!player) return false;
+    const pv = player.vehicle;
+    if (pv && pv !== v && pv.position) {
+      const reach = ((pv.type && pv.type.length) || 4.4) * 0.5
+        + ((v.type && v.type.length) || 4.9) * 0.5 + 1.6;
+      const dx = pv.position[0] - v.position[0];
+      const dz = pv.position[2] - v.position[2];
+      if (dx * dx + dz * dz < reach * reach) return true;
+    }
+    if (this._time - this._playerShotTime < 2) {
+      const dx = v.position[0] - px;
+      const dz = v.position[2] - pz;
+      if (dx * dx + dz * dz < 120 * 120) return true;
+    }
+    return false;
+  }
+
+  /**
    * A parked roadblock cruiser: watch for the player barging through it.
    * @param {object} unit Unit record.
    * @param {number} dt Time step.
@@ -1126,6 +1164,28 @@ export class PoliceSystem {
     const dx = tx - x;
     const dz = tz - z;
     const dist = Math.hypot(dx, dz);
+
+    // --- progress watchdog ------------------------------------------------------------
+    // A cruiser that cannot close on its target is wedged: against geometry, behind a jam it
+    // cannot pass, or trapped in a greedy routing loop. It still counts towards `plan.cars`,
+    // so leaving it there means the dispatcher never sends a replacement and the response
+    // simply never arrives. Recycle it and let the next dispatch drop a fresh unit into the
+    // ring around the player.
+    const tmx = tx - unit.targetX;
+    const tmz = tz - unit.targetZ;
+    if (tmx * tmx + tmz * tmz > 400) {
+      // The suspect moved on: the cruiser is not failing, the goalposts moved.
+      unit.targetX = tx;
+      unit.targetZ = tz;
+      unit.bestDist = dist;
+      unit.noProgress = 0;
+    } else if (dist < unit.bestDist - 4) {
+      unit.bestDist = dist;
+      unit.noProgress = 0;
+    } else {
+      unit.noProgress += dt;
+      if (unit.noProgress > 11 && dist > 45) { this._removeUnit(unit, false); return; }
+    }
 
     let steer;
     let target;
@@ -1207,9 +1267,14 @@ export class PoliceSystem {
     const fx = -Math.sin(fin(v.yaw, 0));
     const fz = -Math.cos(fin(v.yaw, 0));
     const gap = this._leadGap(v, x, z, fx, fz, player);
-    if (gap >= 0) {
-      if (gap < 2) target = 0;
-      else target = Math.min(target, gap * 1.15);
+    if (gap >= 0 && gap < 2) {
+      // Blocked. Sirens are supposed to make traffic move; when it does not, lean on the car
+      // in front rather than parking behind it for the rest of the chase.
+      unit.blocked += dt;
+      target = unit.blocked > 2.5 ? Math.min(target, 3.2) : 0;
+    } else {
+      unit.blocked = 0;
+      if (gap >= 0) target = Math.min(target, gap * 1.15);
     }
 
     input.steer = steer;
@@ -1217,13 +1282,19 @@ export class PoliceSystem {
     input.handbrake = false;
     input.horn = false;
 
-    // Stuck recovery.
+    // Stuck recovery. Progress is measured against a reference point that only moves once
+    // the cruiser has actually covered a metre: a per-tick displacement test is reset by the
+    // few centimetres of jitter a wedged car makes against whatever it is leaning on, so the
+    // recovery never fired and the unit sat there holding a dispatch slot.
     const mdx = x - unit.lastX;
     const mdz = z - unit.lastZ;
-    if (mdx * mdx + mdz * mdz < 0.0025 && target > 2) unit.stuck += dt;
-    else unit.stuck = 0;
-    unit.lastX = x;
-    unit.lastZ = z;
+    if (mdx * mdx + mdz * mdz > 1 || target <= 0.2) {
+      unit.lastX = x;
+      unit.lastZ = z;
+      unit.stuck = 0;
+    } else {
+      unit.stuck += dt;
+    }
     if (unit.stuck > 2.5) {
       input.throttle = -0.7;
       input.brake = 0;
@@ -1233,7 +1304,7 @@ export class PoliceSystem {
         const ddx = x - px;
         const ddz = z - pz;
         if (ddx * ddx + ddz * ddz > 3600) this._removeUnit(unit, false);
-        else unit.stuck = 0;
+        else { unit.stuck = 0; unit.lastX = x; unit.lastZ = z; }
       }
     }
   }
@@ -1413,12 +1484,20 @@ export class PoliceSystem {
         this._animateCop(cop, dt, 0);
         continue;
       }
-      if (this.wanted <= 0 && d2 > 90 * 90) {
-        // Heat is gone and nobody is watching: walk them out of the world.
-        this.cops.splice(i, 1);
-        this._detachCop(cop);
-        this._retireCop(cop);
-        continue;
+      if (this.wanted <= 0) {
+        // Heat is gone: stand down. Out of sight they leave at once, otherwise they hold for
+        // a few seconds and then go. Without the timer a cop kept walking towards the player
+        // (`lastKnown` is invalid at zero heat, so the patrol target *is* the player), which
+        // kept him inside the 90 m keep-alive radius and shadowing the player for ever.
+        cop.standDown += dt;
+        if (d2 > 90 * 90 || cop.standDown > 6) {
+          this.cops.splice(i, 1);
+          this._detachCop(cop);
+          this._retireCop(cop);
+          continue;
+        }
+      } else {
+        cop.standDown = 0;
       }
       if (d2 > 220 * 220) {
         this.cops.splice(i, 1);
@@ -1475,13 +1554,17 @@ export class PoliceSystem {
 
     if (!engaged) {
       cop.state = 'chase';
-      // Patrol back towards the last known position.
-      const tx = this.lastKnown.valid ? this.lastKnown.x : px;
-      const tz = this.lastKnown.valid ? this.lastKnown.z : pz;
-      const dx = tx - cop.position[0];
-      const dz = tz - cop.position[2];
-      const l = Math.hypot(dx, dz);
-      if (l > 3) { moveX = dx / l; moveZ = dz / l; desired = COP_SPEED * 0.55; }
+      // Patrol back towards the last known position. At zero heat there is nothing to patrol
+      // towards - `lastKnown` has been invalidated - so stand still rather than treating the
+      // player's own position as the search target.
+      if (this.wanted > 0) {
+        const tx = this.lastKnown.valid ? this.lastKnown.x : px;
+        const tz = this.lastKnown.valid ? this.lastKnown.z : pz;
+        const dx = tx - cop.position[0];
+        const dz = tz - cop.position[2];
+        const l = Math.hypot(dx, dz);
+        if (l > 3) { moveX = dx / l; moveZ = dz / l; desired = COP_SPEED * 0.55; }
+      }
     } else {
       const dx = px - cop.position[0];
       const dz = pz - cop.position[2];
@@ -1509,8 +1592,9 @@ export class PoliceSystem {
         }
       } else if (cop.reloadTimer > 0) {
         cop.state = 'reload';
-        // Back off a little while reloading.
-        if (dist < COP_RANGE * 0.8) { moveX = -dx / l; moveZ = -dz / l; desired = COP_SPEED * 0.6; }
+        // Back off only when the suspect is right on top of us, and only at a walk: the
+        // reload clip is a standing pose, so anything faster skates it across the ground.
+        if (dist < 5) { moveX = -dx / l; moveZ = -dz / l; desired = 1.4; }
       } else if (!los || dist > COP_RANGE * 1.6) {
         cop.state = 'chase';
         moveX = dx / l;
@@ -1773,13 +1857,19 @@ export class PoliceSystem {
     ch.position[2] = cop.position[2];
     ch.yaw = cop.yaw;
     if (!cop.dead) {
+      // `aim`, `crouch` and `reload` are standing poses. Playing one while the body is
+      // travelling - closing in to arrest at 4.4 m/s, sliding into cover at 3.7 - is exactly
+      // what reads as skating, so each has a gait-locked variant for when the feet move.
+      const moving = speed > 0.28;
       let state = 'idle';
-      if (cop.state === 'reload') state = 'reload';
-      else if (cop.state === 'fire' || cop.state === 'arrest') state = 'aim';
-      else if (speed > 5.4) state = 'sprint';
+      if (cop.state === 'reload') state = moving ? 'walk' : 'reload';
+      else if (cop.state === 'cover') {
+        state = speed > 2.8 ? 'run' : moving ? 'crouchWalk' : 'crouch';
+      } else if (cop.state === 'fire' || cop.state === 'arrest') {
+        state = speed > 2.8 ? 'run' : moving ? 'aimWalk' : 'aim';
+      } else if (speed > 5.4) state = 'sprint';
       else if (speed > 2.8) state = 'run';
-      else if (speed > 0.28) state = 'walk';
-      else if (cop.state === 'cover') state = 'crouch';
+      else if (moving) state = 'walk';
       ch.setState(state);
     }
     _ctx.moveSpeed = speed;
@@ -1829,8 +1919,11 @@ export class PoliceSystem {
         try { game.sfx.bodyFall(cop.position); } catch (err) { /* audio off */ }
       }
       const player = game.player || null;
-      const byPlayer = attacker === undefined || attacker === null || attacker === player
-        || (player && attacker === player.vehicle);
+      // `undefined`/`null` still means "unattributed, assume the player" for direct callers,
+      // but ped.js now resolves the real shooter first, so an officer shot by another officer
+      // during a firefight no longer costs the player three stars and a kill.
+      const byPlayer = !!player && (attacker === undefined || attacker === null
+        || attacker === player || attacker === player.vehicle);
       if (byPlayer) {
         if (player) player.kills = fin(player.kills, 0) + 1;
         this.reportCrime('copKill', cop.position);

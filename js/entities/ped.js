@@ -1752,7 +1752,11 @@ export class PedManager {
         // Run over check first: an OBB overlap against a fast car is fatal.
         if (sp > KNOCKDOWN_CAR_SPEED && this._carHits(ped, v)) {
           this._hitByCar(ped, v, sp);
-          return 0;
+          // Report the speed the body is actually travelling at: the impact leaves a knocked
+          // ped sliding at several m/s, and returning 0 here made `_animate` pick the standing
+          // idle pose while `_integrate` slid it along the road.
+          ped.speed = Math.hypot(ped.velocity[0], ped.velocity[2]);
+          return ped.speed;
         }
         if (sp < 1.2 || d2 < 1e-6) continue;
         // Only fear cars actually heading our way.

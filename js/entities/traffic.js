@@ -494,6 +494,14 @@ export function pursuitSteer(v, tx, tz) {
   if (!(ld > 0.05)) return 0;
   const want = Math.atan2(-dx, -dz);
   const alpha = wrapAngle(want - yaw);
+  // Pure pursuit degenerates behind the beam: the law is proportional to sin(alpha), which
+  // goes back to zero as the target swings round to directly *behind* the car. Taken
+  // literally that commands zero steering at 180 degrees, so a driver whose next waypoint is
+  // behind it drives dead ahead at full throttle — straight into whatever it is facing.
+  // Cars ended up nose-first inside buildings this way and stayed there for the rest of the
+  // session. Past the beam, commit to full lock towards the target instead.
+  if (alpha > 1.9) return 1;
+  if (alpha < -1.9) return -1;
   const type = v.type || null;
   const wb = type && Number.isFinite(type.wheelBase) ? type.wheelBase : 2.7;
   const smax = type && Number.isFinite(type.steerMax) && type.steerMax > 0.05 ? type.steerMax : 0.6;
@@ -622,6 +630,9 @@ function makeDriver() {
     crash: 0,
     swerve: 0,
     stuck: 0,
+    idle: 0,
+    anchorX: 0,
+    anchorZ: 0,
     lastX: 0,
     lastZ: 0,
     seed: 0,
@@ -811,6 +822,7 @@ export class TrafficManager {
     ai.crash = 0;
     ai.blocked = 0;
     ai.stuck = 0;
+    ai.idle = 0;
     ai.state = 'drive';
     if (this._drivers.length < 48) this._drivers.push(ai);
   }
@@ -1023,6 +1035,9 @@ export class TrafficManager {
     ai.crash = 0;
     ai.swerve = 0;
     ai.stuck = 0;
+    ai.idle = 0;
+    ai.anchorX = v.position[0];
+    ai.anchorZ = v.position[2];
     ai.lost = 0;
     ai.state = 'drive';
     ai.typeKey = typeKey;
@@ -1428,8 +1443,10 @@ export class TrafficManager {
     }
 
     // hazards: pedestrians, the player on foot, wrecks
-    const hazard = this._hazardLimit(v, ai, x, z, fx, fz, speed);
-    if (hazard < target) { target = hazard; if (hazard < 3) waiting = true; }
+    // Note: a hazard cap deliberately does NOT count as `waiting`. Traffic and signals clear
+    // on their own; a pedestrian parked in front of the bumper does not, and that case has to
+    // stay visible to the stuck detector.
+    target = Math.min(target, this._hazardLimit(v, ai, x, z, fx, fz, speed));
 
     if (panicking) target = Math.max(target, limit * 0.6);
     if (target < 0) target = 0;
@@ -1473,8 +1490,36 @@ export class TrafficManager {
         const dpz = player && player.position ? player.position[2] - z : 1e9;
         // Out of sight: recycle. In sight: give the reverse manoeuvre another go rather than
         // popping the car out of the world in front of the player.
-        if (dpx * dpx + dpz * dpz > 3600) this._recycle(v);
-        else { ai.stuck = 0; ai.lastX = x; ai.lastZ = z; }
+        if (dpx * dpx + dpz * dpz > 3600) { this._recycle(v); return; }
+        ai.stuck = 0;
+        ai.lastX = x;
+        ai.lastZ = z;
+        ai.routeLen = 0;
+        this._extendRoute(ai);
+      }
+    }
+
+    // --- absolute watchdog ------------------------------------------------------------
+    // Backstop that ignores every "this stop is legitimate" judgement above: a car that has
+    // not moved two metres in forty seconds is not queueing, it is abandoned scenery holding
+    // one of the twenty-eight traffic slots. Forty seconds is well over one full signal
+    // cycle (28.4 s), so a car waiting its turn never trips it.
+    const adx = x - ai.anchorX;
+    const adz = z - ai.anchorZ;
+    if (adx * adx + adz * adz > 4) {
+      ai.anchorX = x;
+      ai.anchorZ = z;
+      ai.idle = 0;
+    } else {
+      ai.idle += dt;
+      if (ai.idle > 40) {
+        const player = this.game.player;
+        const dpx = player && player.position ? player.position[0] - x : 1e9;
+        const dpz = player && player.position ? player.position[2] - z : 1e9;
+        if (dpx * dpx + dpz * dpz > 3025) { this._recycle(v); return; }
+        ai.idle = 0;
+        ai.anchorX = x;
+        ai.anchorZ = z;
       }
     }
   }
