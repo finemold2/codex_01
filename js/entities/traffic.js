@@ -557,26 +557,33 @@ export function corridorDistance(ox, oz, fx, fz, tx, tz, halfWidth) {
  * @returns {void}
  */
 export function resetVehicle(v, x, y, z, yaw) {
-  v.position[0] = x;
-  v.position[1] = y;
-  v.position[2] = z;
-  if (v.velocity) { v.velocity[0] = 0; v.velocity[1] = 0; v.velocity[2] = 0; }
-  v.yaw = yaw;
-  if (typeof v.pitch === 'number') v.pitch = 0;
-  if (typeof v.roll === 'number') v.roll = 0;
-  if (typeof v.yawRate === 'number') v.yawRate = 0;
-  if (typeof v.angularVelocity === 'number') v.angularVelocity = 0;
-  v.speed = 0;
-  v.forwardSpeed = 0;
+  if (typeof v.reset === 'function') {
+    v.reset(x, y, z, yaw);
+  } else {
+    v.position[0] = x;
+    v.position[1] = y;
+    v.position[2] = z;
+    if (v.velocity) { v.velocity[0] = 0; v.velocity[1] = 0; v.velocity[2] = 0; }
+    v.yaw = yaw;
+    if (typeof v.pitch === 'number') v.pitch = 0;
+    if (typeof v.roll === 'number') v.roll = 0;
+    if (typeof v.yawRate === 'number') v.yawRate = 0;
+    v.speed = 0;
+    v.forwardSpeed = 0;
+    v.gear = 1;
+  }
   v.steer = 0;
-  v.gear = 1;
   v.health = Number.isFinite(v.maxHealth) ? v.maxHealth : 1000;
   v.isDestroyed = false;
   v.driver = null;
   v.isPlayer = false;
   v.parked = false;
   v.visible = true;
+  v.engineOn = true;
   v.lodSkip = 0;
+  if (v.occupants && v.occupants.length) {
+    for (let i = 0; i < v.occupants.length; i++) v.occupants[i] = null;
+  }
   if (v.input) {
     v.input.throttle = 0;
     v.input.brake = 0;
@@ -584,8 +591,9 @@ export function resetVehicle(v, x, y, z, yaw) {
     v.input.handbrake = false;
     v.input.horn = false;
   }
+  // Release any forced lamp override so the recycled car goes back to automatic headlights.
   if (typeof v.setLights === 'function') {
-    try { v.setLights(false, false, false, false); } catch (err) { /* optional */ }
+    try { v.setLights(null); } catch (err) { /* optional */ }
   }
 }
 
@@ -716,8 +724,10 @@ export class TrafficManager {
     const pool = this._pool.get(typeKey);
     if (pool && pool.length > 0) {
       const v = pool.pop();
-      const y = typeof game.worldToGround === 'function' ? fin(game.worldToGround(x, z), 0) : 0;
-      resetVehicle(v, x, y + 0.45, z, yaw);
+      const ground = typeof game.worldToGround === 'function' ? fin(game.worldToGround(x, z), 0) : 0;
+      // `position` is the centre of mass, which rests `comHeight` above the road.
+      const lift = v.type && Number.isFinite(v.type.comHeight) ? v.type.comHeight : 0.45;
+      resetVehicle(v, x, ground + lift, z, yaw);
       if (Array.isArray(game.vehicles) && game.vehicles.indexOf(v) < 0) game.vehicles.push(v);
       return v;
     }
@@ -766,7 +776,11 @@ export class TrafficManager {
       v.input.horn = false;
     }
     if (typeof v.setLights === 'function') {
-      try { v.setLights(false, false, false, false); } catch (err) { /* optional */ }
+      try { v.setLights(null); } catch (err) { /* optional */ }
+    }
+    // Silence the engine / siren voices while the instance sits in the pool.
+    if (typeof v.dispose === 'function') {
+      try { v.dispose(); } catch (err) { /* optional */ }
     }
     let pool = this._pool.get(key);
     if (!pool) { pool = []; this._pool.set(key, pool); }

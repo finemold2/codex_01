@@ -95,13 +95,18 @@ export default async function run({ canvas }) {
   gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true);
   gl.enable(gl.CULL_FACE); gl.disable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  const before = snapState();
 
   ps.softParticles = false;
   ps.burst('smoke', 0, 1.6, 0, 60, { size: 0.5, life: 4 });
   ps.burst('spark', 0.6, 1.6, 0, 40, { power: 1 });
-  ps.update(1 / 60, cam);
+  // Smoke fades in over the first 20% of its life, so measure a warmed-up frame, not frame 0.
+  for (let f = 0; f < 25; f++) { ps.update(1 / 60, cam); rt.bind(true); ps.render(cam); }
   err('update(plain)');
+  rt.bind(true);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true);
+  gl.enable(gl.CULL_FACE); gl.disable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  const before = snapState();
   ps.render(cam);
   err('render(plain)');
   const plain = readStats();
@@ -118,6 +123,7 @@ export default async function run({ canvas }) {
   // ------------------------------------------------------------ 2. soft pass
   ps.softParticles = true;
   ps.setDepthTexture(depthCopy.depthTex, cam.near, cam.far);
+  for (let f = 0; f < 3; f++) { ps.update(1 / 60, cam); rt.bind(true); ps.render(cam); }
   rt.bind(true);
   ps.update(1 / 60, cam);
   ps.render(cam);

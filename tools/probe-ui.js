@@ -242,6 +242,40 @@ export default async function run() {
   if (!radar) bad('hud: radar canvas was not built');
   if (radar && radar.clientWidth < 100) bad(`hud: radar box is ${radar.clientWidth}px — css/game.css did not size it`);
 
+  // Every cached `data-r` reference must have resolved: the markup and the ref table agree.
+  for (const [k, v] of Object.entries(hud._e)) {
+    if (k === 'stars') continue;
+    if (!v) bad(`hud: element reference "${k}" did not resolve against HUD_MARKUP`);
+  }
+  if (hud._e.stars.length !== 5) bad(`hud: ${hud._e.stars.length} star elements, expected 5`);
+
+  // Every HUD cluster must be positioned by css/game.css and sit inside the viewport.
+  for (const sel of ['.hud-tl', '.hud-tr', '.hud-bl', '.hud-br', '.hud-center', '.hud-radar-wrap',
+    '.hud-weapon', '.hud-veh', '.hud-toasts', '.hud-cross']) {
+    const node = dom.hudRoot.querySelector(sel);
+    if (!node) { bad(`hud: ${sel} was not built`); continue; }
+    const cs = getComputedStyle(node);
+    if (cs.position !== 'absolute' && cs.position !== 'relative' && cs.position !== 'fixed') {
+      bad(`css: ${sel} is statically positioned (${cs.position}) — the HUD would stack vertically`);
+    }
+    const r = node.getBoundingClientRect();
+    // `.hud-toasts` is an empty flex column and `.hud-cross` is a zero-size anchor whose blades
+    // are positioned around it, so only the boxes that must have a plate are size-checked.
+    const sized = sel !== '.hud-toasts' && sel !== '.hud-cross';
+    if (sized && (r.width < 1 || r.height < 1)) bad(`css: ${sel} has no size (${r.width}x${r.height})`);
+    if (r.right < -1 || r.bottom < -1 || r.left > window.innerWidth || r.top > window.innerHeight) {
+      bad(`css: ${sel} is laid out off-screen`);
+    }
+  }
+  {
+    const wrap = dom.hudRoot.querySelector('.hud-radar-wrap').getBoundingClientRect();
+    if (Math.abs(wrap.width - wrap.height) > 1) bad('css: the radar box is not square');
+  }
+  {
+    const panel = getComputedStyle(dom.hudRoot.querySelector('.hud-weapon')).backgroundColor;
+    if (/rgba\(0, 0, 0, 0\)|transparent/.test(panel)) bad('css: the weapon panel has no background plate');
+  }
+
   const step = 1 / 60;
   for (let i = 0; i < 30; i++) hud.update(step);
 
@@ -724,6 +758,23 @@ export default async function run() {
 
   menu.showSettings('main');
   if (!dom.menuRoot.querySelector('.screen-settings.on')) bad('menu: settings screen did not open');
+  {
+    // Every settings key must have a widget, and every widget must be styled and clickable.
+    const keys = new Set(menu._controls.map((c) => c.key));
+    for (const k of Object.keys(menu.settings)) {
+      if (!keys.has(k)) bad(`menu: settings key "${k}" has no widget on the settings screen`);
+    }
+    for (const c of menu._controls) {
+      const r = c.el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) bad(`menu: the "${c.key}" widget has no size (${r.width}x${r.height})`);
+    }
+    const btn = dom.menuRoot.querySelector('.screen-settings .btn');
+    const cs = getComputedStyle(btn);
+    if (cs.pointerEvents === 'none') bad('css: menu buttons are not clickable');
+    if (btn.getBoundingClientRect().height < 20) bad('css: menu buttons have no height');
+    const wrapCs = getComputedStyle(dom.menuRoot.querySelector('.menu'));
+    if (wrapCs.pointerEvents !== 'auto') bad('css: the open menu does not accept pointer events');
+  }
 
   // Segmented picker: Enter must cycle and wrap.
   {

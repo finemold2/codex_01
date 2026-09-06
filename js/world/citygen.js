@@ -1954,6 +1954,38 @@ function shrinkOffRoad(b, rc, margin, minSize) {
   return true;
 }
 
+
+/**
+ * Last-resort resolver for a footprint that shrinking cannot free.
+ *
+ * {@link shrinkOffRoad} caps the shrink at `minSize`, so a building whose centre lies *inside* a
+ * wide carriageway (the 26 m avenues) can never escape by shrinking - it just becomes a small
+ * building still standing in a traffic lane. For those residual cases translate the footprint along
+ * the road normal until it clears, which keeps the building (and therefore its id) instead of
+ * dropping it.
+ *
+ * @param {object} b Building record, mutated in place.
+ * @param {object} rc Road keep-out rectangle.
+ * @param {number} margin Clearance to keep beyond the kerb line.
+ * @returns {boolean} True when the building was moved.
+ */
+function pushOffRoad(b, rc, margin) {
+  const nx = -Math.sin(rc.rot);
+  const nz = Math.cos(rc.rot);
+  const s = (b.x - rc.x) * nx + (b.z - rc.z) * nz;
+  const side = s >= 0 ? 1 : -1;
+  const ux = Math.cos(b.rot);
+  const uz = Math.sin(b.rot);
+  const du = Math.abs(ux * nx + uz * nz);
+  const dv = Math.abs(-uz * nx + ux * nz);
+  const sup = b.w * 0.5 * du + b.d * 0.5 * dv;
+  const need = (rc.hz + margin + sup) - Math.abs(s);
+  if (need <= 0.001) return false;
+  b.x += nx * side * need;
+  b.z += nz * side * need;
+  return true;
+}
+
 /**
  * Final safety pass: pulls any building footprint that still touches a
  * carriageway or its sidewalk back off the asphalt.
@@ -2017,6 +2049,28 @@ function clipBuildingsToRoads(ctx) {
     }
     if (moved === 0) break;
   }
+
+  // Anything still on the asphalt could not be freed by shrinking (its centre is inside a wide
+  // avenue); translate those clear instead of leaving a facade in a traffic lane.
+  for (let pass = 0; pass < 3; pass++) {
+    let moved = 0;
+    for (let i = 0; i < ctx.buildings.length; i++) {
+      const b = ctx.buildings[i];
+      const c = Math.abs(Math.cos(b.rot));
+      const sn = Math.abs(Math.sin(b.rot));
+      const ex = b.w * 0.5 * c + b.d * 0.5 * sn + 1;
+      const ez = b.w * 0.5 * sn + b.d * 0.5 * c + 1;
+      grid.query(b.x - ex, b.z - ez, b.x + ex, b.z + ez, _hits);
+      for (let k = 0; k < _hits.length; k++) {
+        const rc = _hits[k];
+        if (!obbOverlap(b.x, b.z, b.w * 0.5, b.d * 0.5, b.rot,
+          rc.x, rc.z, rc.hx, rc.hz, rc.rot, 0)) continue;
+        if (pushOffRoad(b, rc, MARGIN)) { moved++; dirty.add(b); }
+      }
+    }
+    if (moved === 0) break;
+  }
+
   for (const b of dirty) refitSigns(b);
 }
 

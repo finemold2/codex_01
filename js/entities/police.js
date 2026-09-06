@@ -118,9 +118,6 @@ const HELI_ORBIT = 42;
 const MAX_SIRENS = 3;
 /** Seconds between two shouted lines. */
 const SHOUT_COOLDOWN = 6.5;
-/** Cop AI tick period beyond 60 m (seconds). */
-const COP_LOD_STEP = 1 / 15;
-
 /* ------------------------------------------------------------------ *
  * Module scratch
  * ------------------------------------------------------------------ */
@@ -162,7 +159,6 @@ function makeUnit() {
     laneId: -1,
     laneDist: 0,
     accum: 0,
-    seenTimer: 0,
     deployTimer: 0,
     ramTimer: 0,
     stuck: 0,
@@ -443,7 +439,6 @@ export class PoliceSystem {
     u.laneId = -1;
     u.laneDist = 0;
     u.accum = 0;
-    u.seenTimer = 0;
     u.deployTimer = 0;
     u.ramTimer = 0;
     u.stuck = 0;
@@ -995,6 +990,10 @@ export class PoliceSystem {
         this._bailOut(unit);
         this._removeUnit(unit, false, true);
         v.isPolice = true;
+        // Hand the lamps back to automatic control; the siren is the player's business now.
+        if (typeof v.setLights === 'function') {
+          try { v.setLights(null); } catch (err) { /* optional */ }
+        }
         const traffic = game.traffic;
         if (traffic && Array.isArray(traffic.orphans) && traffic.orphans.indexOf(v) < 0
           && traffic.orphans.length < 24) {
@@ -1073,7 +1072,6 @@ export class PoliceSystem {
       v.input.handbrake = true;
       v.input.horn = false;
     }
-    unit.age += 0;
     const dx = px - unit.blockX;
     const dz = pz - unit.blockZ;
     if (dx * dx + dz * dz < 144 && player && player.vehicle) {

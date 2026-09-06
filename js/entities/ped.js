@@ -392,6 +392,10 @@ export class PedManager {
     ped.character = null;
     if (!ch) return;
     if (ch.dead || ch._ragActive) return;
+    if (ch.weaponVisible) {
+      ch.weaponVisible = false;
+      if (typeof ch.refreshAppearance === 'function') ch.refreshAppearance();
+    }
     let list = this._charPool.get(ped.bucket);
     if (!list) { list = []; this._charPool.set(ped.bucket, list); }
     if (list.length < 24) {
@@ -869,6 +873,7 @@ export class PedManager {
    */
   scare(ped, x, z, run) {
     if (!ped || ped.dead) return;
+    if (ped.hostile) return;   // mission hostiles do not panic
     ped.threatX = x;
     ped.threatZ = z;
     ped.hasThreat = true;
@@ -881,7 +886,10 @@ export class PedManager {
       if (ped.state !== 'flee') {
         this._setState(ped, 'flee');
         ped.timer = FLEE_TIME * this.rng.range(0.7, 1.3);
-        this._scream(ped);
+        if (!ped.screamed) {
+          ped.screamed = true;
+          this._scream(ped);
+        }
       } else {
         ped.timer = Math.max(ped.timer, FLEE_TIME * 0.6);
       }
@@ -1241,7 +1249,11 @@ export class PedManager {
     if (this.streaming) {
       let budget = SPAWN_BUDGET;
       while (budget > 0 && this.peds.length < this.maxPeds) {
-        if (!this._trySpawn(px, pz, SPAWN_MIN, SPAWN_MAX)) break;
+        // Fill the streets around the player first, but only where a building or the camera's
+        // own back is hiding the spot; otherwise fall back to the ~90 m ring, which is always
+        // far enough out to be safe.
+        if (!this._trySpawn(px, pz, SPAWN_NEAR, SPAWN_MIN, true)
+          && !this._trySpawn(px, pz, SPAWN_MIN, SPAWN_MAX)) break;
         budget--;
       }
     }
@@ -1265,6 +1277,13 @@ export class PedManager {
       return;
     }
 
+    // `missions.js` sets `armed` after `spawnPed` returns, so pick it up lazily.
+    const ch = ped.character;
+    if (ch && !!ped.armed !== !!ch.weaponVisible) {
+      ch.weaponVisible = !!ped.armed;
+      if (typeof ch.refreshAppearance === 'function') ch.refreshAppearance();
+    }
+
     this._think(ped, dt);
     const speed = this._steer(ped, dt);
     this._integrate(ped, dt);
@@ -1282,7 +1301,27 @@ export class PedManager {
     const rng = this.rng;
     ped.timer -= dt;
 
+    // Mission-owned hostiles hunt the player instead of wandering the sidewalk. The mission
+    // script owns their shooting (`missions.js` drives the weapon system directly); this only
+    // keeps them on the player and out of the scenery.
+    if (ped.hostile) {
+      if (ped.state === 'hit') {
+        ped.hitTimer -= dt;
+        if (ped.hitTimer <= 0) this._setState(ped, 'hostile');
+      } else if (ped.state !== 'hostile') {
+        this._setState(ped, 'hostile');
+      }
+      return;
+    }
+
     switch (ped.state) {
+      case 'hostile':
+        // The flag was cleared (mission over): fall back to civilian behaviour.
+        this._setState(ped, 'walk');
+        ped.timer = rng.range(5, 14);
+        this._attachToGraph(ped);
+        return;
+
       case 'hit':
         ped.hitTimer -= dt;
         if (ped.hitTimer <= 0) {
@@ -1574,7 +1613,31 @@ export class PedManager {
     let wantZ = 0;
     let desired = 0;
 
-    if (state === 'flee') {
+    if (state === 'hostile') {
+      const pl = this.game.player;
+      if (pl && pl.position && !pl.dead) {
+        const dx = pl.position[0] - ped.position[0];
+        const dz = pl.position[2] - ped.position[2];
+        const l = Math.hypot(dx, dz);
+        if (l > 1e-3) {
+          ped.yaw = angleDamp(ped.yaw, Math.atan2(-dx, -dz), 9, dt);
+          if (l > 11) {
+            wantX = dx / l;
+            wantZ = dz / l;
+            desired = ped.runSpeed * 0.8;
+          } else if (l < 6) {
+            // Back off and strafe so a firefight does not collapse into a huddle.
+            wantX = -dx / l;
+            wantZ = -dz / l;
+            desired = ped.walkSpeed;
+          } else {
+            wantX = -dz / l;
+            wantZ = dx / l;
+            desired = ped.walkSpeed * 0.7;
+          }
+        }
+      }
+    } else if (state === 'flee') {
       const dx = ped.position[0] - ped.threatX;
       const dz = ped.position[2] - ped.threatZ;
       const l = Math.hypot(dx, dz);
@@ -1687,7 +1750,7 @@ export class PedManager {
     // --- walk-graph leash ---------------------------------------------------------------
     let leashX = 0;
     let leashZ = 0;
-    if (ped.walkId >= 0 && state !== 'cross') {
+    if (ped.walkId >= 0 && state !== 'cross' && state !== 'hostile') {
       const g = this.walks;
       g.project(ped.walkId, ped.position[0], ped.position[2]);
       const off = Math.sqrt(g.projDist2);
@@ -1702,7 +1765,7 @@ export class PedManager {
         }
         if (off > LEASH_HARD) {
           // Far outside the network (thrown by a car, pushed by a crowd): walk back.
-          if (state !== 'flee' && state !== 'cower') {
+          if (state !== 'flee' && state !== 'cower' && state !== 'hostile') {
             this._attachToGraph(ped);
             this._setState(ped, 'walk');
           }
@@ -1900,6 +1963,7 @@ export class PedManager {
       let state = 'idle';
       if (ped.state === 'cower') state = 'crouch';
       else if (ped.state === 'hit') state = 'hit';
+      else if (ped.state === 'hostile') state = speed > 2.9 ? 'run' : 'aim';
       else if (speed > 5.6) state = 'sprint';
       else if (speed > 2.9) state = 'run';
       else if (speed > 0.28) state = 'walk';
@@ -1940,7 +2004,6 @@ export class PedManager {
     if (ped.state === state) return;
     ped.state = state;
     ped.stateTime = 0;
-    if (state === 'flee') ped.screamed = false;
   }
 
   /* ---------------------------------------------------------------- render */

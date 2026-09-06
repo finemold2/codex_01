@@ -59,6 +59,34 @@ export default async function run({ canvas }) {
   out.notes.push(`lane graph reachability from lane 0: ${(reach * 100).toFixed(1)}%`);
   if (reach < 0.6) bad(`lane graph is fragmented (${(reach * 100).toFixed(1)}% reachable)`);
 
+  // no building may stand on a carriageway (proper OBB separating-axis test - an axis-aligned
+  // box test reports false positives for rotated footprints)
+  const obbHit = (ax, az, ahx, ahz, arot, bx, bz, bhx, bhz, brot) => {
+    const ca = Math.cos(arot); const sa = Math.sin(arot);
+    const cb = Math.cos(brot); const sb = Math.sin(brot);
+    const axes = [[ca, sa], [-sa, ca], [cb, sb], [-sb, cb]];
+    const dx = bx - ax; const dz = bz - az;
+    for (const [nx, nz] of axes) {
+      const ra = ahx * Math.abs(ca * nx + sa * nz) + ahz * Math.abs(-sa * nx + ca * nz);
+      const rb = bhx * Math.abs(cb * nx + sb * nz) + bhz * Math.abs(-sb * nx + cb * nz);
+      if (Math.abs(dx * nx + dz * nz) > ra + rb + 1e-6) return false;
+    }
+    return true;
+  };
+  let onRoad = 0;
+  for (const r of city.roads) {
+    const dx = r.bx - r.ax; const dz = r.bz - r.az;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.01) continue;
+    const rot = Math.atan2(dz, dx);
+    const cx = (r.ax + r.bx) * 0.5; const cz = (r.az + r.bz) * 0.5;
+    for (const b of city.buildings) {
+      if (obbHit(cx, cz, len * 0.5, r.width * 0.5, rot, b.x, b.z, b.w * 0.5, b.d * 0.5, b.rot || 0)) { onRoad++; break; }
+    }
+  }
+  out.notes.push(`roads with a building on the carriageway: ${onRoad}/${city.roads.length}`);
+  if (onRoad) bad(`${onRoad} roads have a building standing in a traffic lane`);
+
   // finite coordinates
   let nan = 0;
   for (const b of city.buildings) if (![b.x, b.z, b.w, b.d, b.h].every(Number.isFinite)) nan++;

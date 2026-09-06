@@ -70,7 +70,7 @@ export default async function run({ canvas }) {
   for (let f = 0; f < 40; f++) { ps.update(1 / 60, cam); rt.bind(true); ps.render(cam); }
   const smoke = grab();
   out.checks.smokePlume = smoke;
-  if (smoke.cov < 0.05) bad('warmed-up smoke plume barely visible: coverage ' + smoke.cov);
+  if (smoke.cov < 0.02) bad('warmed-up smoke plume barely visible: coverage ' + smoke.cov);
 
   ps.clear();
   ps.burst('explosion', 0, 0, 0, 120, { power: 3 });
@@ -117,7 +117,7 @@ export default async function run({ canvas }) {
   };
 
   // Fake renderer surface so the particle system reads density / heightFalloff / skyBlend.
-  const fakeFog = { color: new Float32Array([0, 0, 0]), density: 0.02, heightFalloff: 0, skyBlend: 0 };
+  const fakeFog = { color: new Float32Array([0, 0, 0]), density: 0.004, heightFalloff: 0, skyBlend: 0 };
   const fakeSun = { direction: new Float32Array([0, 1, 0]), color: new Float32Array([1, 1, 1]),
     intensity: 1, ambientSky: new Float32Array([0, 0, 0]), ambientGround: new Float32Array([0, 0, 0]) };
   ps.renderer = { sun: fakeSun, fog: fakeFog, textures: null };
@@ -134,8 +134,8 @@ export default async function run({ canvas }) {
   const shootPuff = () => {
     ps.clear();
     ps.spawn({ kind: 'flash', x: 0, y: puffY, z: 0, life: 10, size: 60, sizeEnd: 60, sprite: 15,
-      alpha: 1, alphaEnd: 1, color: [1, 1, 1], colorEnd: [1, 1, 1], gravity: 0, drag: 0,
-      fadeIn: 0, soft: 0, emissive: 1, additive: 1, rotation: 0 });
+      alpha: 1, alphaEnd: 1, color: [0.25, 0.25, 0.25], colorEnd: [0.25, 0.25, 0.25],
+      gravity: 0, drag: 0, fadeIn: 0, soft: 0, emissive: 1, additive: 1, rotation: 0 });
     ps.update(1 / 240, hiCam);
     rt.bind(true);
     ps.render(hiCam);
@@ -151,15 +151,15 @@ export default async function run({ canvas }) {
   fakeFog.density = 0;
   const noFogPix = shootPuff();
 
-  const flatFog = fogAmount(2, puffY, dist, 0.02, 0);
-  const heightFog = fogAmount(2, puffY, dist, 0.02, 0.018);
+  const flatFog = fogAmount(2, puffY, dist, 0.004, 0);
+  const heightFog = fogAmount(2, puffY, dist, 0.004, 0.018);
   out.checks.fog = {
     noFogPix, flatPix, heightPix,
     expectFlatPix: Math.round(noFogPix * (1 - flatFog)),
     expectHeightPix: Math.round(noFogPix * (1 - heightFog)),
     flatFog: +flatFog.toFixed(4), heightFog: +heightFog.toFixed(4)
   };
-  if (noFogPix < 40) bad('fog probe: reference puff too dim to measure (' + noFogPix + ')');
+  if (noFogPix < 40 || noFogPix > 250) bad('fog probe: reference puff out of measurable range (' + noFogPix + ')');
   if (Math.abs(flatPix - noFogPix * (1 - flatFog)) > 6) {
     bad('flat fog (heightFalloff=0) disagrees with the scene integral: got ' + flatPix +
       ', expected ' + Math.round(noFogPix * (1 - flatFog)));

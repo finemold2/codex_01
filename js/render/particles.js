@@ -108,7 +108,7 @@ const MAX_STEP = 0.1;
  * pool over consecutive spawns instead, at a fixed cost each.
  * @type {number}
  */
-const RECYCLE_WINDOW = 64;
+const RECYCLE_WINDOW = 1000000;
 
 /* -------------------------------------------------------------------------- */
 /* Shaders                                                                     */
@@ -211,9 +211,9 @@ uniform float uAdditive;
 uniform vec2 uNearFade;
 
 /**
- * Analytic height fog, byte-for-byte the integral `render/shaders.js` uses for the scene
- * (GLSL_FOG). Matching it matters: a plume high above the street would otherwise be fogged
- * with a flat distance term while the buildings behind it use the height-attenuated one.
+ * Analytic height fog: the same integral render/shaders.js (GLSL_FOG) uses for the scene.
+ * Matching it matters: a plume high above the street would otherwise be fogged with a flat
+ * distance term while the buildings behind it use the height-attenuated one.
  */
 float fogAmount(vec3 camPos, vec3 worldPos, vec2 params) {
   vec3 d = worldPos - camPos;
