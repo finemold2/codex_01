@@ -765,3 +765,296 @@ class Terrain {
     return lerp(lerp(a, b, tx), lerp(c, d, tx), tz);
   }
 }
+
+/* ------------------------------------------------------------- chunk grids */
+
+/**
+ * A regular grid of merge buckets. Every (cell, material) pair becomes exactly one static
+ * batch, which is what makes frustum culling worthwhile: a chunk that leaves the frustum
+ * removes its whole slice of the city from the draw list.
+ */
+class ChunkGrid {
+  /**
+   * @param {number} minX Grid origin x.
+   * @param {number} minZ Grid origin z.
+   * @param {number} size Cell size in metres.
+   * @param {number} nx Cells along x.
+   * @param {number} nz Cells along z.
+   */
+  constructor(minX, minZ, size, nx, nz) {
+    this.minX = minX;
+    this.minZ = minZ;
+    this.size = size;
+    this.nx = nx;
+    this.nz = nz;
+    /** @type {Array<Map<string, MeshBuilder>>} */
+    this.cells = new Array(nx * nz);
+  }
+
+  /**
+   * Returns the builder for a world position and material key, creating it on demand.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {string} key Material key.
+   * @returns {MeshBuilder} The builder.
+   */
+  at(x, z, key) {
+    const i = clamp(Math.floor((x - this.minX) / this.size), 0, this.nx - 1);
+    const j = clamp(Math.floor((z - this.minZ) / this.size), 0, this.nz - 1);
+    const k = j * this.nx + i;
+    let map = this.cells[k];
+    if (!map) { map = new Map(); this.cells[k] = map; }
+    let b = map.get(key);
+    if (!b) { b = new MeshBuilder(96); map.set(key, b); }
+    return b;
+  }
+
+  /**
+   * Uploads every non-empty bucket as a static batch.
+   * @param {object} renderer Renderer.
+   * @param {Object<string,object>} mats Material table keyed like the buckets.
+   * @param {number[]} outIds Receives the static batch ids.
+   * @param {{batches:number, triangles:number}} stats Accumulated counters.
+   * @returns {void}
+   */
+  emit(renderer, mats, outIds, stats) {
+    for (let k = 0; k < this.cells.length; k++) {
+      const map = this.cells[k];
+      if (!map) continue;
+      for (const [key, builder] of map) {
+        if (builder.empty) continue;
+        const mat = mats[key];
+        if (!mat) continue;
+        const geo = builder.toGeometry();
+        if (!geo) continue;
+        stats.batches++;
+        stats.triangles += geo.indices.length / 3;
+        if (typeof renderer.addStatic === 'function') {
+          const id = renderer.addStatic(geo, mat);
+          if (id !== undefined && id !== null) outIds.push(id);
+        }
+      }
+      this.cells[k] = null;
+    }
+  }
+}
+
+/* --------------------------------------------------------------- lot index */
+
+/**
+ * Uniform grid over the axis-aligned city lots so `groundHeight` and prop placement can
+ * answer "which block am I standing on" in constant time.
+ */
+class LotIndex {
+  /**
+   * @param {object[]} lots CityData lots.
+   * @param {number[]} min World minimum `[x, z]`.
+   * @param {number[]} max World maximum `[x, z]`.
+   * @param {number} [cell] Cell size in metres.
+   */
+  constructor(lots, min, max, cell = 16) {
+    this.minX = min[0];
+    this.minZ = min[1];
+    this.cell = cell;
+    this.nx = Math.max(1, Math.ceil((max[0] - min[0]) / cell) + 1);
+    this.nz = Math.max(1, Math.ceil((max[1] - min[1]) / cell) + 1);
+    this.grid = new Int32Array(this.nx * this.nz).fill(-1);
+    this.lots = lots;
+    for (let i = 0; i < lots.length; i++) {
+      const l = lots[i];
+      const x0 = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
+      const z0 = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
+      const x1 = l.x1 !== undefined ? l.x1 : l.x + l.w * 0.5;
+      const z1 = l.z1 !== undefined ? l.z1 : l.z + l.d * 0.5;
+      const i0 = clamp(Math.floor((x0 - this.minX) / cell), 0, this.nx - 1);
+      const i1 = clamp(Math.floor((x1 - this.minX) / cell), 0, this.nx - 1);
+      const j0 = clamp(Math.floor((z0 - this.minZ) / cell), 0, this.nz - 1);
+      const j1 = clamp(Math.floor((z1 - this.minZ) / cell), 0, this.nz - 1);
+      for (let j = j0; j <= j1; j++) {
+        for (let ii = i0; ii <= i1; ii++) this.grid[j * this.nx + ii] = i;
+      }
+    }
+  }
+
+  /**
+   * Looks up the lot covering a world position.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @returns {object|null} The lot, or null when the point is on a road or outside.
+   */
+  at(x, z) {
+    const i = Math.floor((x - this.minX) / this.cell);
+    const j = Math.floor((z - this.minZ) / this.cell);
+    if (i < 0 || j < 0 || i >= this.nx || j >= this.nz) return null;
+    const id = this.grid[j * this.nx + i];
+    if (id < 0) return null;
+    const l = this.lots[id];
+    const x0 = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
+    const z0 = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
+    const x1 = l.x1 !== undefined ? l.x1 : l.x + l.w * 0.5;
+    const z1 = l.z1 !== undefined ? l.z1 : l.z + l.d * 0.5;
+    if (x < x0 || x > x1 || z < z0 || z > z1) return null;
+    return l;
+  }
+}
+
+/* -------------------------------------------------------------- materials */
+
+/**
+ * Builds every material the world uses. Materials are cheap; batches are not, so the keys
+ * here are deliberately few and shared aggressively across chunks.
+ *
+ * @param {object} renderer Renderer (used for `createMaterial` when available).
+ * @param {object} textures Texture library.
+ * @returns {Object<string, object>} Material table keyed by builder key.
+ */
+function buildMaterials(renderer, textures) {
+  const make = (desc) => (typeof renderer.createMaterial === 'function'
+    ? renderer.createMaterial(desc)
+    : Object.assign({
+      albedo: [1, 1, 1], roughness: 0.85, metallic: 0, emissive: [0, 0, 0], emissiveStrength: 1,
+      uvScale: [1, 1], uvOffset: [0, 0], alpha: 1, blend: 'opaque', doubleSided: false,
+      castShadow: true, receiveShadow: true, vertexColors: false, windowGlow: 0
+    }, desc));
+  const T = (...n) => pickTex(textures, ...n);
+
+  const mats = {};
+  mats.terrain = make({
+    name: 'terrain', map: T('dirt', 'grass', 'concrete'), normalMap: T('dirt_n', 'grass_n'),
+    uvScale: [0.09, 0.09], roughness: 0.97, vertexColors: true, receiveShadow: true
+  });
+  mats.grass = make({
+    name: 'grass', map: T('grass', 'dirt'), normalMap: T('grass_n'),
+    uvScale: [0.11, 0.11], roughness: 0.95, vertexColors: true
+  });
+  mats.sand = make({
+    name: 'sand', map: T('sand', 'dirt'), uvScale: [0.1, 0.1], roughness: 0.94, vertexColors: true
+  });
+  mats.water = make({
+    name: 'water', map: T('water'), normalMap: T('waterNormal', 'water_n'),
+    uvScale: [0.02, 0.02], roughness: 0.09, metallic: 0.0, reflectivity: 0.22,
+    albedo: [0.09, 0.19, 0.24], alpha: 0.86, blend: 'alpha', doubleSided: true,
+    castShadow: false, vertexColors: false, wetness: 1
+  });
+  mats.asphalt = make({
+    name: 'asphalt', map: T('asphalt'), normalMap: T('asphalt_n'),
+    uvScale: [1, 1], roughness: 0.88, vertexColors: true, castShadow: false
+  });
+  mats.mark = make({
+    name: 'roadMark', map: T('roadLines'), blend: 'alpha', depthWrite: false, sortBias: -4,
+    roughness: 0.62, vertexColors: true, castShadow: false, receiveShadow: true
+  });
+  mats.sidewalk = make({
+    name: 'sidewalk', map: T('sidewalk', 'concrete'), normalMap: T('sidewalk_n', 'concrete_n'),
+    uvScale: [1, 1], roughness: 0.9, vertexColors: true, castShadow: false
+  });
+  mats.kerb = make({
+    name: 'kerb', map: T('concrete', 'sidewalk'), normalMap: T('concrete_n'),
+    uvScale: [1, 1], roughness: 0.85, vertexColors: true
+  });
+  mats.plaza = make({
+    name: 'plaza', map: T('tileFloor', 'sidewalk'), uvScale: [1, 1], roughness: 0.6,
+    vertexColors: true, castShadow: false
+  });
+  mats.facadeGlass = make({
+    name: 'facadeGlass', map: T('glassFacade', 'officeFacade'), uvScale: [1, 1],
+    roughness: 0.22, metallic: 0.08, reflectivity: 0.09, vertexColors: true, windowGlow: 1
+  });
+  mats.facadeOffice = make({
+    name: 'facadeOffice', map: T('officeFacade', 'glassFacade'), uvScale: [1, 1],
+    roughness: 0.55, vertexColors: true, windowGlow: 1
+  });
+  mats.facadeApt = make({
+    name: 'facadeApartment', map: T('apartmentFacade', 'officeFacade'), uvScale: [1, 1],
+    roughness: 0.72, vertexColors: true, windowGlow: 1
+  });
+  mats.wall = make({
+    name: 'wallConcrete', map: T('concrete'), normalMap: T('concrete_n'),
+    uvScale: [1, 1], roughness: 0.88, vertexColors: true
+  });
+  mats.brick = make({
+    name: 'wallBrick', map: T('brick'), normalMap: T('brick_n'),
+    uvScale: [1, 1], roughness: 0.9, vertexColors: true
+  });
+  mats.shop = make({
+    name: 'shopfront', map: T('shopFacade', 'shopfront', 'storefront', 'groundFloor', 'tileFloor', 'glassFacade'),
+    uvScale: [1, 1], roughness: 0.35, reflectivity: 0.07, vertexColors: true, windowGlow: 0.55
+  });
+  mats.roof = make({
+    name: 'roof', map: T('roofGravel', 'concrete'), uvScale: [1, 1], roughness: 0.96,
+    vertexColors: true
+  });
+  mats.detail = make({
+    name: 'detailMetal', map: T('metal'), normalMap: T('metal_n'), uvScale: [1, 1],
+    roughness: 0.55, metallic: 0.55, vertexColors: true
+  });
+  mats.glassPanel = make({
+    name: 'glassPanel', albedo: [0.42, 0.55, 0.62], roughness: 0.08, metallic: 0.0,
+    reflectivity: 0.2, alpha: 0.32, blend: 'alpha', doubleSided: true, castShadow: false,
+    vertexColors: true
+  });
+  for (let i = 0; i < 3; i++) {
+    mats['neon' + i] = make({
+      name: 'neon' + i, map: T('neonSign' + (i + 1), 'neonSign1'), unlit: true,
+      vertexColors: true, emissive: [1, 1, 1], emissiveStrength: 1.7, roughness: 0.4,
+      castShadow: false, doubleSided: false
+    });
+  }
+  for (let i = 0; i < 2; i++) {
+    mats['billboard' + i] = make({
+      name: 'billboard' + i, map: T('billboard' + (i + 1), 'billboard1'), unlit: false,
+      emissive: [1, 1, 1], emissiveStrength: 0.28, roughness: 0.62, vertexColors: true,
+      castShadow: false
+    });
+  }
+  // Instanced prop materials.
+  mats.propPaint = make({
+    name: 'propPaint', map: T('metal'), normalMap: T('metal_n'), uvScale: [0.9, 0.9],
+    roughness: 0.52, metallic: 0.35, vertexColors: true
+  });
+  mats.propBark = make({
+    name: 'treeBark', map: T('treeBark', 'dirt'), uvScale: [1, 1], roughness: 0.94,
+    vertexColors: true
+  });
+  mats.propLeaf = make({
+    name: 'foliage', map: T('leaves', 'grass'), uvScale: [1, 1], roughness: 0.86,
+    vertexColors: true, doubleSided: true
+  });
+  mats.propGlass = make({
+    name: 'propGlass', albedo: [0.5, 0.62, 0.68], roughness: 0.07, reflectivity: 0.2,
+    alpha: 0.3, blend: 'alpha', doubleSided: true, castShadow: false, vertexColors: true
+  });
+  mats.propLamp = make({
+    name: 'propLamp', unlit: true, vertexColors: true, emissive: [1, 1, 1],
+    emissiveStrength: 1.0, albedo: [1, 1, 1], castShadow: false
+  });
+  mats.propSign = make({
+    name: 'propSign', map: T('billboard3', 'billboard1', 'graffiti1'), roughness: 0.6,
+    emissive: [1, 1, 1], emissiveStrength: 0.2, vertexColors: true, castShadow: false
+  });
+  const bulb = (r, g, b) => make({
+    name: 'bulb', unlit: true, albedo: [r, g, b], emissive: [r, g, b], emissiveStrength: 2.2,
+    castShadow: false, vertexColors: false
+  });
+  mats.bulbRed = bulb(3.4, 0.28, 0.16);
+  mats.bulbAmber = bulb(3.6, 1.7, 0.18);
+  mats.bulbGreen = bulb(0.4, 3.4, 0.9);
+  return mats;
+}
+
+/**
+ * Patches a material in place, going through the renderer when it exposes an updater so
+ * uniform blocks are invalidated correctly.
+ * @param {object} renderer Renderer.
+ * @param {object} mat Material.
+ * @param {object} patch Fields to apply.
+ * @returns {void}
+ */
+function patchMaterial(renderer, mat, patch) {
+  if (!mat) return;
+  if (typeof renderer.updateMaterial === 'function') { renderer.updateMaterial(mat, patch); return; }
+  const keys = Object.keys(patch);
+  for (let i = 0; i < keys.length; i++) mat[keys[i]] = patch[keys[i]];
+  if (typeof mat.version === 'number') mat.version++;
+  mat.dirty = true;
+}

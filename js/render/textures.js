@@ -447,6 +447,50 @@ function addValueOctave(dst, w, h, cellsX, cellsY, noise, amp, phase) {
 }
 
 /**
+ * Smallest power of two greater than or equal to `v`.
+ * @param {number} v Input.
+ * @returns {number} Power of two.
+ */
+function pow2ceil(v) {
+  let p = 8;
+  while (p < v) p *= 2;
+  return p;
+}
+
+/**
+ * Bilinearly resamples a tileable field onto a larger grid. Sampling wraps, so
+ * the enlarged field tiles exactly like the source.
+ * @param {Float32Array} src Source field.
+ * @param {number} sw Source width.
+ * @param {number} sh Source height.
+ * @param {number} w Target width.
+ * @param {number} h Target height.
+ * @returns {Float32Array} Resampled field.
+ */
+function upsampleField(src, sw, sh, w, h) {
+  if (sw === w && sh === h) return src;
+  const out = new Float32Array(w * h);
+  const ax = sw / w, ay = sh / h;
+  for (let y = 0; y < h; y++) {
+    const fy = y * ay;
+    const y0 = fy | 0;
+    const ty = fy - y0;
+    const y1 = y0 + 1 === sh ? 0 : y0 + 1;
+    const r0 = y0 * sw, r1 = y1 * sw, row = y * w;
+    for (let x = 0; x < w; x++) {
+      const fx = x * ax;
+      const x0 = fx | 0;
+      const tx = fx - x0;
+      const x1 = x0 + 1 === sw ? 0 : x0 + 1;
+      const a = src[r0 + x0] + tx * (src[r0 + x1] - src[r0 + x0]);
+      const b = src[r1 + x0] + tx * (src[r1 + x1] - src[r1 + x0]);
+      out[row + x] = a + ty * (b - a);
+    }
+  }
+  return out;
+}
+
+/**
  * Builds a seamless fBm / ridged / turbulence field.
  * @param {number} w Width.
  * @param {number} h Height.
@@ -464,15 +508,21 @@ function fbmField(w, h, noise, opts) {
   const gain = o.gain === undefined ? 0.5 : o.gain;
   const mode = o.mode === 'ridged' ? 1 : (o.mode === 'turbulence' ? 2 : 0);
   const useValue = !!o.value;
-  const out = new Float32Array(w * h);
   let fx = o.freqX || o.freq || 4;
   let fy = o.freqY || o.freq || 4;
+  /* Low-frequency fields are rasterised on a smaller torus and upsampled:
+     the result is identical to within interpolation error but far cheaper. */
+  const spread = Math.pow(lac, octaves - 1);
+  const spp = mode === 0 ? 8 : 12;
+  const gw = o.exact ? w : Math.min(w, pow2ceil(fx * spread * spp));
+  const gh = o.exact ? h : Math.min(h, pow2ceil(fy * spread * spp));
+  let out = new Float32Array(gw * gh);
   let amp = 1, norm = 0;
   for (let i = 0; i < octaves; i++) {
     const cx = Math.max(1, Math.round(fx));
     const cy = Math.max(1, Math.round(fy));
-    if (useValue) addValueOctave(out, w, h, cx, cy, noise, amp, i * 11 + 1);
-    else addPerlinOctave(out, w, h, cx, cy, noise, amp, mode, i * 7 + 1);
+    if (useValue) addValueOctave(out, gw, gh, cx, cy, noise, amp, i * 11 + 1);
+    else addPerlinOctave(out, gw, gh, cx, cy, noise, amp, mode, i * 7 + 1);
     norm += amp;
     amp *= gain;
     fx *= lac;
@@ -486,7 +536,7 @@ function fbmField(w, h, noise, opts) {
   } else {
     for (let i = 0; i < out.length; i++) out[i] *= inv;
   }
-  return out;
+  return upsampleField(out, gw, gh, w, h);
 }
 
 /**
@@ -506,8 +556,12 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
   const mode = o.mode || 'f1';
   const jitter = o.jitter === undefined ? 0.9 : o.jitter;
   const outId = o.outId || null;
-  const out = new Float32Array(w * h);
-  const cw = w / cellsX, ch = h / cellsY;
+  /* Rasterise coarse cell patterns small, then upsample (ids stay exact). */
+  const spp = mode === 'f2f1' ? 12 : 8;
+  const gw = outId ? w : Math.min(w, pow2ceil(cellsX * spp));
+  const gh = outId ? h : Math.min(h, pow2ceil(cellsY * spp));
+  const out = new Float32Array(gw * gh);
+  const cw = gw / cellsX, ch = gh / cellsY;
   const total = cellsX * cellsY;
   const fpx = new Float32Array(total);
   const fpy = new Float32Array(total);
@@ -523,9 +577,9 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
   const candY = new Float32Array(9);
   const candId = new Float32Array(9);
   for (let cy = 0; cy < cellsY; cy++) {
-    const y0 = Math.floor(cy * ch), y1 = Math.floor((cy + 1) * ch);
+    const y0 = Math.floor(cy * ch), y1 = Math.min(gh, Math.floor((cy + 1) * ch));
     for (let cx = 0; cx < cellsX; cx++) {
-      const x0 = Math.floor(cx * cw), x1 = Math.floor((cx + 1) * cw);
+      const x0 = Math.floor(cx * cw), x1 = Math.min(gw, Math.floor((cx + 1) * cw));
       let k = 0;
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
@@ -539,7 +593,7 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
         }
       }
       for (let y = y0; y < y1; y++) {
-        const row = y * w;
+        const row = y * gw;
         const py = y + 0.5;
         for (let x = x0; x < x1; x++) {
           const pxc = x + 0.5;
@@ -556,7 +610,7 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
       }
     }
   }
-  return out;
+  return upsampleField(out, gw, gh, w, h);
 }
 
 /**
