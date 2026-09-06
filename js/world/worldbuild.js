@@ -1974,3 +1974,405 @@ function buildBuilding(bc, b) {
     bc.buildingBodies++;
   }
 }
+
+/* ------------------------------------------------------------------ props */
+
+/**
+ * Multi-material accumulator for one prop prototype. Each key becomes its own instanced
+ * batch sharing the same per-instance transforms.
+ */
+class PropParts {
+  constructor() {
+    /** @type {Map<string, MeshBuilder>} */
+    this.m = new Map();
+    /** @type {Array<object>} */
+    this.collide = [];
+    /** @type {object|null} */
+    this.light = null;
+  }
+
+  /**
+   * Returns (and lazily creates) the builder for a material key.
+   * @param {string} key Material key.
+   * @returns {MeshBuilder} Builder.
+   */
+  b(key) {
+    let x = this.m.get(key);
+    if (!x) { x = new MeshBuilder(48); this.m.set(key, x); }
+    return x;
+  }
+
+  /**
+   * Adds an axis-aligned box part.
+   * @param {string} key Material key.
+   * @param {number} x Centre x.
+   * @param {number} y Centre y.
+   * @param {number} z Centre z.
+   * @param {number} hx Half extent x.
+   * @param {number} hy Half extent y.
+   * @param {number} hz Half extent z.
+   * @param {number[]} color Colour.
+   * @param {number} [yaw] Yaw.
+   * @param {number} [uv] UV scale.
+   * @returns {void}
+   */
+  box(key, x, y, z, hx, hy, hz, color, yaw, uv) {
+    this.b(key).addBox(x, y, z, hx, hy, hz, yaw || 0, { color, uScale: uv === undefined ? 1.2 : uv });
+  }
+
+  /**
+   * Adds a transformed geometry part.
+   * @param {string} key Material key.
+   * @param {object} geo Geometry.
+   * @param {ArrayLike<number>} m Transform.
+   * @param {number[]} color Colour.
+   * @returns {void}
+   */
+  geo(key, geo, m, color) {
+    this.b(key).addGeometry(geo, m, color);
+  }
+
+  /**
+   * Finalises every part into geometry objects.
+   * @returns {Object<string, object>} Geometry per material key.
+   */
+  finish() {
+    const out = {};
+    for (const [k, v] of this.m) {
+      const g = v.toGeometry();
+      if (g) out[k] = g;
+    }
+    return out;
+  }
+}
+
+/**
+ * Builds the geometry prototypes for every street prop. Each prop is modelled from real
+ * primitives so it reads as the object it represents, not as a box.
+ *
+ * @param {object} proto Shared primitive cache.
+ * @returns {Object<string, {parts:Object<string,object>, collide:object[], light:object|null}>} Prototypes.
+ */
+function buildPropPrototypes(proto) {
+  const M = new Float32Array(16);
+  const out = {};
+  const dark = [0.15, 0.15, 0.17];
+  const steel = [0.5, 0.52, 0.55];
+  const green = [0.16, 0.3, 0.18];
+  const wood = [0.42, 0.27, 0.15];
+
+  /**
+   * Registers a prototype.
+   * @param {string} name Prop type.
+   * @param {PropParts} p Parts.
+   * @returns {void}
+   */
+  const reg = (name, p) => {
+    out[name] = { parts: p.finish(), collide: p.collide, light: p.light };
+  };
+
+  // --- streetlight --------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.24, 0, 0, 0.2, 0.24, 0.2), dark);
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 4.0, 0, 0, 0.085, 3.8, 0.085), steel);
+    p.box('propPaint', 0, 7.72, 0.55, 0.05, 0.06, 0.62, steel);
+    p.box('propPaint', 0, 7.45, 0.28, 0.05, 0.28, 0.05, steel, 0.6);
+    p.box('propPaint', 0, 7.58, 1.24, 0.26, 0.1, 0.42, steel);
+    p.box('propLamp', 0, 7.44, 1.24, 0.22, 0.04, 0.34, [2.6, 2.3, 1.7]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.17, h: 7.9 });
+    p.light = { x: 0, y: 7.4, z: 1.24, r: 1.0, g: 0.87, b: 0.66, radius: 17, intensity: 2.6 };
+    reg('streetlight', p);
+  }
+
+  // --- ornamental lamp ----------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.18, 0, 0, 0.24, 0.18, 0.24), dark);
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 2.1, 0, 0, 0.07, 1.95, 0.07), dark);
+    p.box('propPaint', 0, 4.06, 0, 0.5, 0.045, 0.05, dark);
+    for (let i = 0; i < 3; i++) {
+      const x = i === 0 ? 0 : (i === 1 ? -0.44 : 0.44);
+      const y = i === 0 ? 4.28 : 4.0;
+      p.geo('propLamp', proto.sphere8, trs(M, x, y, 0, 0, 0.19, 0.22, 0.19), [2.8, 2.5, 1.9]);
+      p.geo('propPaint', proto.cone8, trs(M, x, y + 0.26, 0, 0, 0.2, 0.16, 0.2), dark);
+    }
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.16, h: 4.2 });
+    p.light = { x: 0, y: 4.1, z: 0, r: 1.0, g: 0.9, b: 0.72, radius: 12, intensity: 1.6 };
+    reg('lamp', p);
+  }
+
+  // --- traffic light ------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.2, 0, 0, 0.22, 0.2, 0.22), dark);
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 3.0, 0, 0, 0.1, 2.8, 0.1), dark);
+    p.box('propPaint', 0, 5.68, 1.5, 0.06, 0.07, 1.55, dark);
+    p.box('propPaint', 0, 5.3, 0.42, 0.05, 0.36, 0.05, dark, 0.7);
+    // Main head over the carriageway.
+    p.box('propPaint', 0, 4.86, 2.95, 0.21, 0.62, 0.18, [0.12, 0.13, 0.13]);
+    for (let i = 0; i < 3; i++) {
+      const y = 5.32 - i * 0.42;
+      p.geo('propPaint', proto.ring, trs(M, 0, y, 3.14, 0, 0.15, 0.15, 0.06), [0.08, 0.08, 0.09]);
+      p.box('propPaint', 0, y + 0.16, 3.2, 0.17, 0.03, 0.11, [0.1, 0.1, 0.11]);
+    }
+    // Pedestrian head on the post.
+    p.box('propPaint', 0, 2.62, 0.28, 0.17, 0.28, 0.14, [0.12, 0.13, 0.13]);
+    p.box('propLamp', 0, 2.62, 0.44, 0.12, 0.2, 0.02, [1.6, 0.5, 0.18]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.18, h: 5.8 });
+    reg('trafficlight', p);
+  }
+
+  // --- tree ---------------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propBark', proto.cyl8, trs(M, 0, 1.3, 0, 0, 0.24, 1.3, 0.24), [0.34, 0.25, 0.17]);
+    p.geo('propBark', proto.cyl8, trs(M, 0.24, 2.5, 0.1, 0.5, 0.08, 0.6, 0.08), [0.32, 0.24, 0.16]);
+    p.geo('propLeaf', proto.sphere10, trs(M, 0, 3.3, 0, 0, 1.62, 1.5, 1.62), [0.24, 0.46, 0.18]);
+    p.geo('propLeaf', proto.sphere8, trs(M, 0.9, 2.75, 0.5, 0, 1.05, 0.95, 1.05), [0.2, 0.4, 0.15]);
+    p.geo('propLeaf', proto.sphere8, trs(M, -0.8, 2.95, -0.6, 0, 1.15, 1.0, 1.15), [0.27, 0.5, 0.2]);
+    p.geo('propLeaf', proto.sphere8, trs(M, 0.1, 4.2, -0.3, 0, 0.95, 0.85, 0.95), [0.3, 0.55, 0.22]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.3, h: 2.4 });
+    reg('tree', p);
+  }
+
+  // --- palm ---------------------------------------------------------------
+  {
+    const p = new PropParts();
+    let x = 0, y = 0, lean = 0;
+    for (let i = 0; i < 7; i++) {
+      const h = 0.72;
+      lean += 0.035;
+      x += Math.sin(lean * 3) * 0.12;
+      p.geo('propBark', proto.cyl8, trsPitch(M, x, y + h * 0.5, 0, 0, lean * 0.5, 1),
+        [0.36, 0.3, 0.22]);
+      const s = 0.19 - i * 0.012;
+      p.geo('propBark', proto.cyl8, trs(M, x, y + h * 0.5, 0, 0, s, h * 0.5, s), [0.36 - i * 0.01, 0.3, 0.22]);
+      y += h;
+    }
+    for (let i = 0; i < 9; i++) {
+      const a = (i / 9) * Math.PI * 2;
+      const droop = -0.55 - (i % 3) * 0.12;
+      const m = trsPitch(M, x + Math.cos(a) * 0.7, y + 0.35, Math.sin(a) * 0.7, -a + Math.PI * 0.5, droop, 1);
+      p.geo('propLeaf', proto.frond, m, [0.22, 0.44, 0.18]);
+    }
+    p.geo('propLeaf', proto.sphere8, trs(M, x, y + 0.16, 0, 0, 0.34, 0.26, 0.34), [0.3, 0.34, 0.18]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.26, h: 4.6 });
+    reg('palm', p);
+  }
+
+  // --- bench --------------------------------------------------------------
+  {
+    const p = new PropParts();
+    for (let s = -1; s <= 1; s += 2) {
+      p.box('propPaint', s * 0.72, 0.22, 0, 0.05, 0.22, 0.26, dark);
+      p.box('propPaint', s * 0.72, 0.68, -0.24, 0.05, 0.26, 0.05, dark, 0.16);
+    }
+    for (let i = 0; i < 3; i++) {
+      p.box('propPaint', 0, 0.45, -0.18 + i * 0.18, 0.85, 0.03, 0.075, wood);
+    }
+    for (let i = 0; i < 3; i++) {
+      p.box('propPaint', 0, 0.62 + i * 0.17, -0.28, 0.85, 0.07, 0.03, wood);
+    }
+    p.collide.push({ type: 'box', x: 0, y: 0.45, z: 0, hx: 0.9, hy: 0.45, hz: 0.32 });
+    reg('bench', p);
+  }
+
+  // --- litter bin ---------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.46, 0, 0, 0.3, 0.44, 0.3), [0.2, 0.26, 0.22]);
+    p.geo('propPaint', proto.ring, trs(M, 0, 0.9, 0, 0, 0.32, 0.32, 0.06), [0.34, 0.36, 0.34]);
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.96, 0, 0, 0.31, 0.05, 0.31), [0.26, 0.3, 0.27]);
+    p.box('propPaint', 0, 0.96, 0.16, 0.16, 0.06, 0.14, [0.05, 0.05, 0.06]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.32, h: 1.0 });
+    reg('bin', p);
+  }
+
+  // --- fire hydrant -------------------------------------------------------
+  {
+    const p = new PropParts();
+    const red = [0.62, 0.08, 0.07];
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.06, 0, 0, 0.24, 0.06, 0.24), red);
+    p.geo('propPaint', proto.cyl12, trs(M, 0, 0.38, 0, 0, 0.15, 0.34, 0.15), red);
+    p.geo('propPaint', proto.sphere8, trs(M, 0, 0.74, 0, 0, 0.16, 0.14, 0.16), red);
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 0.86, 0, 0, 0.05, 0.06, 0.05), [0.7, 0.68, 0.2]);
+    for (let s = -1; s <= 1; s += 2) {
+      p.geo('propPaint', proto.cyl8, trsPitch(M, s * 0.17, 0.5, 0, s * Math.PI * 0.5, Math.PI * 0.5, 0.9),
+        [0.66, 0.12, 0.1]);
+    }
+    p.box('propPaint', 0, 0.5, 0.17, 0.08, 0.08, 0.05, [0.7, 0.68, 0.2]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.24, h: 0.9 });
+    reg('hydrant', p);
+  }
+
+  // --- bollard ------------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 0.44, 0, 0, 0.09, 0.44, 0.09), [0.16, 0.17, 0.2]);
+    p.geo('propPaint', proto.sphere8, trs(M, 0, 0.9, 0, 0, 0.09, 0.08, 0.09), [0.16, 0.17, 0.2]);
+    p.geo('propPaint', proto.ring, trs(M, 0, 0.74, 0, 0, 0.1, 0.1, 0.03), [1.1, 1.05, 0.9]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.13, h: 1.0 });
+    reg('bollard', p);
+  }
+
+  // --- planter ------------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.box('propPaint', 0, 0.3, 0, 0.62, 0.3, 0.62, [0.46, 0.44, 0.42], 0, 0.9);
+    p.box('propPaint', 0, 0.62, 0, 0.66, 0.05, 0.66, [0.38, 0.36, 0.34], 0, 0.9);
+    p.box('propBark', 0, 0.66, 0, 0.52, 0.04, 0.52, [0.18, 0.13, 0.09]);
+    p.geo('propLeaf', proto.sphere8, trs(M, 0, 0.98, 0, 0, 0.5, 0.4, 0.5), green);
+    p.geo('propLeaf', proto.sphere8, trs(M, 0.22, 1.14, -0.15, 0, 0.3, 0.26, 0.3), [0.2, 0.38, 0.2]);
+    p.collide.push({ type: 'box', x: 0, y: 0.32, z: 0, hx: 0.66, hy: 0.32, hz: 0.66 });
+    reg('planter', p);
+  }
+
+  // --- street sign --------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 1.2, 0, 0, 0.045, 1.2, 0.045), steel);
+    p.box('propSign', 0, 2.32, 0.03, 0.62, 0.3, 0.02, [1, 1, 1]);
+    p.box('propPaint', 0, 2.32, -0.01, 0.64, 0.32, 0.02, [0.2, 0.22, 0.25]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.1, h: 2.4 });
+    reg('sign', p);
+  }
+
+  // --- parking meter ------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.geo('propPaint', proto.cyl8, trs(M, 0, 0.55, 0, 0, 0.045, 0.55, 0.045), dark);
+    p.box('propPaint', 0, 1.24, 0, 0.13, 0.24, 0.09, [0.28, 0.3, 0.33]);
+    p.box('propLamp', 0, 1.3, 0.1, 0.08, 0.09, 0.01, [0.4, 1.6, 1.4]);
+    p.collide.push({ type: 'cyl', x: 0, y: 0, z: 0, r: 0.12, h: 1.4 });
+    reg('parkingmeter', p);
+  }
+
+  // --- billboard ----------------------------------------------------------
+  {
+    const p = new PropParts();
+    for (let s = -1; s <= 1; s += 2) {
+      p.geo('propPaint', proto.cyl8, trs(M, s * 1.9, 1.9, 0, 0, 0.11, 1.9, 0.11), dark);
+    }
+    p.box('propSign', 0, 4.1, 0.06, 3.0, 1.35, 0.06, [1, 1, 1]);
+    p.box('propPaint', 0, 4.1, -0.06, 3.1, 1.45, 0.08, [0.18, 0.19, 0.21]);
+    p.box('propPaint', 0, 5.62, 0.3, 2.6, 0.05, 0.05, steel);
+    for (let i = -1; i <= 1; i++) {
+      p.box('propLamp', i * 1.5, 5.55, 0.42, 0.16, 0.06, 0.05, [2.2, 2.1, 1.8]);
+    }
+    p.collide.push({ type: 'box', x: 0, y: 2.0, z: 0, hx: 2.0, hy: 2.0, hz: 0.25 });
+    p.light = { x: 0, y: 5.4, z: 0.5, r: 0.9, g: 0.88, b: 0.8, radius: 10, intensity: 1.4 };
+    reg('billboard', p);
+  }
+
+  // --- bus stop -----------------------------------------------------------
+  {
+    const p = new PropParts();
+    for (let s = -1; s <= 1; s += 2) {
+      p.box('propPaint', s * 1.55, 1.2, -0.62, 0.06, 1.2, 0.06, dark);
+      p.box('propPaint', s * 1.55, 1.2, 0.62, 0.06, 1.2, 0.06, dark);
+    }
+    p.box('propPaint', 0, 2.46, 0, 1.72, 0.06, 0.76, [0.24, 0.26, 0.3]);
+    p.box('propGlass', 0, 1.35, -0.66, 1.5, 1.0, 0.02, [0.55, 0.68, 0.72]);
+    p.box('propGlass', -1.5, 1.35, 0, 0.02, 1.0, 0.6, [0.55, 0.68, 0.72]);
+    p.box('propPaint', 0, 0.5, -0.4, 1.4, 0.04, 0.22, wood);
+    p.box('propPaint', 0, 0.26, -0.4, 1.4, 0.22, 0.03, [0.2, 0.21, 0.24]);
+    p.box('propSign', 1.62, 2.05, 0.0, 0.02, 0.42, 0.34, [1, 1, 1]);
+    p.box('propLamp', 0, 2.38, 0, 1.2, 0.03, 0.3, [1.7, 1.7, 1.6]);
+    p.collide.push({ type: 'box', x: 0, y: 1.2, z: -0.6, hx: 1.7, hy: 1.2, hz: 0.16 });
+    p.light = { x: 0, y: 2.3, z: 0, r: 0.85, g: 0.9, b: 1.0, radius: 8, intensity: 1.1 };
+    reg('busstop', p);
+  }
+
+  // --- dumpster -----------------------------------------------------------
+  {
+    const p = new PropParts();
+    const body = [0.16, 0.32, 0.24];
+    p.box('propPaint', 0, 0.62, 0, 0.95, 0.46, 0.6, body, 0, 0.8);
+    p.box('propPaint', 0, 1.12, -0.32, 0.97, 0.05, 0.3, [0.2, 0.38, 0.28], 0, 0.8);
+    p.box('propPaint', 0, 1.14, 0.3, 0.97, 0.05, 0.32, [0.2, 0.38, 0.28], 0, 0.8);
+    for (let sx = -1; sx <= 1; sx += 2) {
+      for (let sz = -1; sz <= 1; sz += 2) {
+        p.geo('propPaint', proto.cyl8, trsPitch(M, sx * 0.82, 0.12, sz * 0.5, Math.PI * 0.5, Math.PI * 0.5, 1),
+          [0.08, 0.08, 0.09]);
+      }
+    }
+    p.collide.push({ type: 'box', x: 0, y: 0.6, z: 0, hx: 0.98, hy: 0.6, hz: 0.62 });
+    reg('dumpster', p);
+  }
+
+  // --- traffic cone -------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.box('propPaint', 0, 0.03, 0, 0.24, 0.03, 0.24, [0.5, 0.16, 0.05]);
+    p.geo('propPaint', proto.cone8, trs(M, 0, 0.36, 0, 0, 0.17, 0.36, 0.17), [0.78, 0.24, 0.06]);
+    p.geo('propPaint', proto.ring, trs(M, 0, 0.42, 0, 0, 0.13, 0.13, 0.05), [1.2, 1.2, 1.15]);
+    reg('cone', p);
+  }
+
+  // --- barrier ------------------------------------------------------------
+  {
+    const p = new PropParts();
+    for (let s = -1; s <= 1; s += 2) {
+      p.box('propPaint', s * 0.8, 0.42, 0, 0.05, 0.42, 0.05, [0.5, 0.5, 0.52], s * 0.28);
+      p.box('propPaint', s * 0.8, 0.42, 0, 0.05, 0.42, 0.05, [0.5, 0.5, 0.52], -s * 0.28);
+    }
+    p.box('propPaint', 0, 0.88, 0, 1.0, 0.14, 0.05, [0.92, 0.36, 0.08]);
+    p.box('propPaint', -0.5, 0.88, 0.01, 0.24, 0.14, 0.05, [0.95, 0.95, 0.92]);
+    p.box('propPaint', 0.5, 0.88, 0.01, 0.24, 0.14, 0.05, [0.95, 0.95, 0.92]);
+    p.box('propLamp', 0.95, 1.06, 0, 0.06, 0.06, 0.06, [2.4, 0.6, 0.1]);
+    p.collide.push({ type: 'box', x: 0, y: 0.5, z: 0, hx: 1.0, hy: 0.5, hz: 0.16 });
+    reg('barrier', p);
+  }
+
+  // --- ATM ----------------------------------------------------------------
+  {
+    const p = new PropParts();
+    p.box('propPaint', 0, 1.0, 0, 0.45, 1.0, 0.3, [0.22, 0.24, 0.28], 0, 1.0);
+    p.box('propPaint', 0, 2.06, 0, 0.5, 0.08, 0.36, [0.16, 0.17, 0.2]);
+    p.box('propLamp', 0, 1.42, 0.31, 0.24, 0.18, 0.01, [0.5, 1.4, 1.7]);
+    p.box('propPaint', 0, 1.1, 0.31, 0.2, 0.14, 0.02, [0.1, 0.1, 0.12]);
+    p.box('propSign', 0, 1.86, 0.31, 0.34, 0.12, 0.01, [1, 1, 1]);
+    p.collide.push({ type: 'box', x: 0, y: 1.0, z: 0, hx: 0.48, hy: 1.05, hz: 0.34 });
+    p.light = { x: 0, y: 1.6, z: 0.6, r: 0.4, g: 0.9, b: 1.1, radius: 5, intensity: 0.8 };
+    reg('atm', p);
+  }
+
+  // --- phone box ----------------------------------------------------------
+  {
+    const p = new PropParts();
+    const red = [0.5, 0.06, 0.06];
+    for (let sx = -1; sx <= 1; sx += 2) {
+      for (let sz = -1; sz <= 1; sz += 2) {
+        p.box('propPaint', sx * 0.44, 1.15, sz * 0.44, 0.07, 1.15, 0.07, red);
+      }
+    }
+    p.box('propPaint', 0, 2.36, 0, 0.52, 0.09, 0.52, red);
+    p.box('propLamp', 0, 2.5, 0, 0.4, 0.06, 0.4, [1.5, 0.5, 0.45]);
+    p.box('propGlass', 0, 1.3, -0.45, 0.4, 0.95, 0.02, [0.6, 0.7, 0.72]);
+    p.box('propGlass', 0.45, 1.3, 0, 0.02, 0.95, 0.4, [0.6, 0.7, 0.72]);
+    p.box('propGlass', -0.45, 1.3, 0, 0.02, 0.95, 0.4, [0.6, 0.7, 0.72]);
+    p.collide.push({ type: 'box', x: 0, y: 1.2, z: 0, hx: 0.52, hy: 1.2, hz: 0.52 });
+    p.light = { x: 0, y: 2.3, z: 0, r: 1.0, g: 0.4, b: 0.35, radius: 6, intensity: 0.9 };
+    reg('phonebox', p);
+  }
+
+  // --- street vendor cart -------------------------------------------------
+  {
+    const p = new PropParts();
+    p.box('propPaint', 0, 0.72, 0, 0.9, 0.34, 0.55, [0.62, 0.58, 0.5], 0, 1.0);
+    p.box('propPaint', 0, 1.1, 0, 0.96, 0.05, 0.6, [0.3, 0.32, 0.34]);
+    for (let s = -1; s <= 1; s += 2) {
+      p.geo('propPaint', proto.cyl8, trsPitch(M, s * 0.7, 0.26, 0, Math.PI * 0.5, Math.PI * 0.5, 1.3), dark);
+      p.box('propPaint', s * 0.85, 1.7, 0, 0.04, 0.6, 0.04, [0.4, 0.42, 0.45]);
+    }
+    p.box('propPaint', 0, 2.32, 0, 1.05, 0.05, 0.7, [0.72, 0.14, 0.12]);
+    p.box('propPaint', 0, 2.2, 0.72, 1.05, 0.16, 0.03, [0.9, 0.9, 0.88]);
+    p.box('propLamp', 0, 2.18, 0, 0.5, 0.04, 0.2, [2.0, 1.7, 1.1]);
+    p.collide.push({ type: 'box', x: 0, y: 0.7, z: 0, hx: 0.95, hy: 0.7, hz: 0.6 });
+    p.light = { x: 0, y: 2.1, z: 0, r: 1.0, g: 0.8, b: 0.5, radius: 7, intensity: 1.2 };
+    reg('streetvendor', p);
+  }
+
+  return out;
+}

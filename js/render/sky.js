@@ -41,6 +41,12 @@ const HM = 1.2;
 const BETA_R = [5.8e-3, 13.5e-3, 33.1e-3];
 /** Base Mie scattering coefficient per km at sea level (turbidity 1). */
 const BETA_M_BASE = 4.0e-3;
+/** Ozone (Chappuis band) absorption per km at the layer peak. */
+const BETA_O3 = [0.650e-3, 1.881e-3, 0.085e-3];
+/** Ozone layer peak altitude and half width, km, plus its vertical column in peak-km. */
+const O3_PEAK = 25.0;
+const O3_HALF = 15.0;
+const O3_COLUMN = 15.0;
 /** Desaturated Rayleigh coefficients used by the isotropic multiple-scattering term. */
 const BETA_MS = [0.0072, 0.0152, 0.0310];
 /** Softening applied to the sun-path optical depth inside the multiple-scattering term. */
@@ -219,6 +225,12 @@ const float HM = 1.2;
 const vec3 BETA_R = vec3(5.8e-3, 13.5e-3, 33.1e-3);
 // Desaturated Rayleigh coefficients driving the isotropic multiple-scattering term: real
 // skies keep plenty of blue at low sun because light bounces more than once.
+// Ozone absorbs in the Chappuis band (green/red). Without it twilight skies come out grey
+// instead of the deep blue everybody recognises.
+const vec3 BETA_O3 = vec3(0.650e-3, 1.881e-3, 0.085e-3);
+const float O3_PEAK = 25.0;
+const float O3_HALF = 15.0;
+const float O3_COLUMN = 15.0;
 const vec3 BETA_MS = vec3(0.0072, 0.0152, 0.0310);
 const float MS_SOFT = 0.40;
 const float STEP_K = 6.0;
@@ -254,13 +266,17 @@ float phaseHG(float mu, float g) {
   return (1.0 - g2) / (12.5663706 * d * sqrt(d));
 }
 
-/** Optical depth from a point in the atmosphere toward a light, analytic in both species. */
-void lightOpticalDepth(vec3 p, vec3 l, out float odR, out float odM) {
+/** Extinction optical depth from a point in the atmosphere toward a light, fully analytic. */
+vec3 lightTau(vec3 p, vec3 l) {
   float r = length(p);
   float alt = max(r - RG, 0.0);
   float cosZ = dot(p, l) / r;
-  odR = HR * exp(-alt / HR) * chapman(r / HR, cosZ);
-  odM = HM * exp(-alt / HM) * chapman(r / HM, cosZ);
+  float airMass = chapman(r / HR, cosZ);
+  float odR = HR * exp(-alt / HR) * airMass;
+  float odM = HM * exp(-alt / HM) * chapman(r / HM, cosZ);
+  // Ozone column remaining above this altitude, swept by the same air-mass factor.
+  float odO = O3_COLUMN * clamp(1.0 - 0.5 * max(alt - 10.0, 0.0) / O3_HALF, 0.0, 1.0) * airMass;
+  return BETA_R * odR + (uMieBeta / 0.9) * odM + BETA_O3 * odO;
 }
 
 /* --------------------------------------------------------------- atmosphere */
@@ -288,6 +304,7 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
 
   float odR = 0.0;
   float odM = 0.0;
+  float odO = 0.0;
   vec3 sumR = vec3(0.0);
   vec3 sumM = vec3(0.0);
   vec3 sumMS = vec3(0.0);
@@ -306,11 +323,10 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
     float dM = exp(-alt / HM) * dt;
     odR += dR;
     odM += dM;
+    odO += max(0.0, 1.0 - abs(alt - O3_PEAK) / O3_HALF) * dt;
 
-    float sR, sM;
-    lightOpticalDepth(p, uSunDir, sR, sM);
-    vec3 tauView = BETA_R * odR + betaMe * odM;
-    vec3 tauSun = BETA_R * sR + betaMe * sM;
+    vec3 tauView = BETA_R * odR + betaMe * odM + BETA_O3 * odO;
+    vec3 tauSun = lightTau(p, uSunDir);
     vec3 T = exp(-min(tauView + tauSun, 60.0));
     sumR += T * dR;
     sumM += T * dM;
@@ -320,7 +336,7 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
     sumMS += exp(-min(tauView + tauSun * MS_SOFT, 60.0)) * (dR + dM);
   }
 
-  viewT = exp(-min(BETA_R * odR + betaMe * odM, 60.0));
+  viewT = exp(-min(BETA_R * odR + betaMe * odM + BETA_O3 * odO, 60.0));
   return uSunIrradiance * (BETA_R * (phR * sumR) + betaMs * (phM * sumM)
     + BETA_MS * (uMultiScatter * 0.0795775 * sumMS));
 }
@@ -565,9 +581,7 @@ void main() {
   if (tGround > 0.0) {
     vec3 gp = ro + rd * tGround;
     vec3 gn = gp / length(gp);
-    float sR, sM;
-    lightOpticalDepth(gp, uSunDir, sR, sM);
-    vec3 sunT = exp(-min(BETA_R * sR + (uMieBeta / 0.9) * sM, 60.0));
+    vec3 sunT = exp(-min(lightTau(gp, uSunDir), 60.0));
     vec3 lit = sunT * uSunIrradiance * max(dot(gn, uSunDir), 0.0) * 0.318;
     col += uGroundAlbedo * (lit + uAmbientSky * 0.6 + uNightSky * 12.0 * uNightFactor) * viewT;
   } else {
@@ -1012,12 +1026,14 @@ export class Sky {
     const camAlt = 0.02;
     const r = RG + camAlt;
     const cosZ = Math.max(sunY, 0.015);
-    const odR = HR * Math.exp(-camAlt / HR) * chapman(r / HR, cosZ);
+    const airMass = chapman(r / HR, cosZ);
+    const odR = HR * Math.exp(-camAlt / HR) * airMass;
     const odM = HM * Math.exp(-camAlt / HM) * chapman(r / HM, cosZ);
+    const odO = O3_COLUMN * airMass;
     const betaMe = this._betaM / MIE_ALBEDO;
     let peak = 1e-4;
     for (let i = 0; i < 3; i++) {
-      const t = Math.exp(-Math.min(BETA_R[i] * odR + betaMe * odM, 60.0));
+      const t = Math.exp(-Math.min(BETA_R[i] * odR + betaMe * odM + BETA_O3[i] * odO, 60.0));
       _rgb[i] = t;
       if (t > peak) peak = t;
     }
@@ -1130,6 +1146,7 @@ export class Sky {
 
     let odR = 0.0;
     let odM = 0.0;
+    let odO = 0.0;
     let sumR0 = 0.0, sumR1 = 0.0, sumR2 = 0.0;
     let sumM0 = 0.0, sumM1 = 0.0, sumM2 = 0.0;
     let sumS0 = 0.0, sumS1 = 0.0, sumS2 = 0.0;
@@ -1150,15 +1167,18 @@ export class Sky {
       const dM = Math.exp(-alt / HM) * dt;
       odR += dR;
       odM += dM;
+      odO += Math.max(0.0, 1.0 - Math.abs(alt - O3_PEAK) / O3_HALF) * dt;
       const cosZ = (px * sun[0] + py * sun[1] + pz * sun[2]) / pr;
-      const sR = HR * Math.exp(-alt / HR) * chapman(pr / HR, cosZ);
+      const airMass = chapman(pr / HR, cosZ);
+      const sR = HR * Math.exp(-alt / HR) * airMass;
       const sM = HM * Math.exp(-alt / HM) * chapman(pr / HM, cosZ);
-      const tv0 = BETA_R[0] * odR + betaMe * odM;
-      const tv1 = BETA_R[1] * odR + betaMe * odM;
-      const tv2 = BETA_R[2] * odR + betaMe * odM;
-      const ts0 = BETA_R[0] * sR + betaMe * sM;
-      const ts1 = BETA_R[1] * sR + betaMe * sM;
-      const ts2 = BETA_R[2] * sR + betaMe * sM;
+      const sO = O3_COLUMN * clamp(1.0 - 0.5 * Math.max(alt - 10.0, 0.0) / O3_HALF, 0, 1) * airMass;
+      const tv0 = BETA_R[0] * odR + betaMe * odM + BETA_O3[0] * odO;
+      const tv1 = BETA_R[1] * odR + betaMe * odM + BETA_O3[1] * odO;
+      const tv2 = BETA_R[2] * odR + betaMe * odM + BETA_O3[2] * odO;
+      const ts0 = BETA_R[0] * sR + betaMe * sM + BETA_O3[0] * sO;
+      const ts1 = BETA_R[1] * sR + betaMe * sM + BETA_O3[1] * sO;
+      const ts2 = BETA_R[2] * sR + betaMe * sM + BETA_O3[2] * sO;
       const t0 = Math.exp(-Math.min(tv0 + ts0, 60.0));
       const t1 = Math.exp(-Math.min(tv1 + ts1, 60.0));
       const t2 = Math.exp(-Math.min(tv2 + ts2, 60.0));
@@ -1171,9 +1191,9 @@ export class Sky {
     }
 
     const I = this.params.sunIrradiance;
-    _trans[0] = Math.exp(-Math.min(BETA_R[0] * odR + betaMe * odM, 60.0));
-    _trans[1] = Math.exp(-Math.min(BETA_R[1] * odR + betaMe * odM, 60.0));
-    _trans[2] = Math.exp(-Math.min(BETA_R[2] * odR + betaMe * odM, 60.0));
+    _trans[0] = Math.exp(-Math.min(BETA_R[0] * odR + betaMe * odM + BETA_O3[0] * odO, 60.0));
+    _trans[1] = Math.exp(-Math.min(BETA_R[1] * odR + betaMe * odM + BETA_O3[1] * odO, 60.0));
+    _trans[2] = Math.exp(-Math.min(BETA_R[2] * odR + betaMe * odM + BETA_O3[2] * odO, 60.0));
     const ms = this.params.multiScatter * 0.0795775;
     out[0] = I * (BETA_R[0] * phR * sumR0 + betaMs * phM * sumM0 + BETA_MS[0] * ms * sumS0);
     out[1] = I * (BETA_R[1] * phR * sumR1 + betaMs * phM * sumM1 + BETA_MS[1] * ms * sumS1);
@@ -1199,12 +1219,14 @@ export class Sky {
       const pr = Math.sqrt(px * px + py * py + pz * pz);
       const alt = Math.max(pr - RG, 0.0);
       const cosZ = (px * sun[0] + py * sun[1] + pz * sun[2]) / pr;
-      const sR = HR * Math.exp(-alt / HR) * chapman(pr / HR, cosZ);
+      const airMass = chapman(pr / HR, cosZ);
+      const sR = HR * Math.exp(-alt / HR) * airMass;
       const sM = HM * Math.exp(-alt / HM) * chapman(pr / HM, cosZ);
-      const ndl = Math.max((px * sun[0] + py * sun[1] + pz * sun[2]) / pr, 0.0);
+      const sO = O3_COLUMN * clamp(1.0 - 0.5 * Math.max(alt - 10.0, 0.0) / O3_HALF, 0, 1) * airMass;
+      const ndl = Math.max(cosZ, 0.0);
       const ga = this.params.groundAlbedo;
       for (let i = 0; i < 3; i++) {
-        const sunT = Math.exp(-Math.min(BETA_R[i] * sR + betaMe * sM, 60.0));
+        const sunT = Math.exp(-Math.min(BETA_R[i] * sR + betaMe * sM + BETA_O3[i] * sO, 60.0));
         const lit = sunT * this.params.sunIrradiance * ndl * 0.318;
         out[i] += ga[i] * (lit + this.ambientSky[i] * 0.6 +
           NIGHT_SKY_TINT[i] * 12.0 * this.nightFactor) * _trans[i];

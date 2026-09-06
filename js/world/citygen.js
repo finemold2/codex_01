@@ -61,6 +61,11 @@ const HASH_CELL = 24;
 /** Full circle in radians (local copy so the import list stays minimal). */
 const TAU_LOCAL = Math.PI * 2;
 
+/** Radius within which two sidewalk ends at a node collapse to one kerb corner.
+ * Perpendicular roads land on the exact same point, skewed ones a few decimetres
+ * apart; anything further apart is a genuinely separate corner. */
+const CORNER_MERGE = 6.0;
+
 /* ------------------------------------------------------------------ *
  * Static tables (pure constants — no side effects at import time)
  * ------------------------------------------------------------------ */
@@ -1938,8 +1943,8 @@ function buildLanes(ctx) {
  * ------------------------------------------------------------------ */
 
 /**
- * Snaps a sidewalk endpoint onto one of a node's kerb corners, creating the
- * corner the first time it is seen.
+ * Snaps a sidewalk endpoint onto one of a node's kerb corners (within
+ * {@link CORNER_MERGE}), creating the corner the first time it is seen.
  * @param {object} ctx Generation context.
  * @param {number} nodeId Node id.
  * @param {number} x Endpoint x.
@@ -1953,7 +1958,7 @@ function snapCorner(ctx, nodeId, x, z) {
     ctx.corners.set(nodeId, list);
   }
   let best = null;
-  let bestD = 16 * 16;
+  let bestD = CORNER_MERGE * CORNER_MERGE;
   for (let i = 0; i < list.length; i++) {
     const c = list[i];
     const dx = c[0] - x;

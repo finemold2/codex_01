@@ -159,32 +159,50 @@ function hsl(h, s, l) {
  */
 function bleedAlpha(px, w, h, passes) {
   const n = passes === undefined ? 4 : passes;
-  const src = new Uint8ClampedArray(px.length);
-  for (let pass = 0; pass < n; pass++) {
-    src.set(px);
-    let changed = 0;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = (y * w + x) * 4;
-        if (src[i + 3] > 0) continue;
-        let r = 0, g = 0, b = 0, c = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          const yy = y + dy;
-          if (yy < 0 || yy >= h) continue;
-          for (let dx = -1; dx <= 1; dx++) {
-            const xx = x + dx;
-            if (xx < 0 || xx >= w) continue;
-            const j = (yy * w + xx) * 4;
-            if (src[j + 3] === 0) continue;
-            r += src[j]; g += src[j + 1]; b += src[j + 2]; c++;
+  const total = w * h;
+  const filled = new Uint8Array(total);
+  for (let i = 0, p = 3; i < total; i++, p += 4) filled[i] = px[p] > 0 ? 1 : 0;
+  /* Only pixels next to the current frontier can be filled, so each pass walks
+     the border instead of rescanning the whole image. */
+  let frontier = [];
+  for (let i = 0; i < total; i++) if (filled[i]) frontier.push(i);
+  for (let pass = 0; pass < n && frontier.length; pass++) {
+    const next = [];
+    const seen = new Uint8Array(total);
+    for (let f = 0; f < frontier.length; f++) {
+      const idx = frontier[f];
+      const x = idx % w, y = (idx / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= w) continue;
+          const j = yy * w + xx;
+          if (filled[j] || seen[j]) continue;
+          seen[j] = 1;
+          let r = 0, g = 0, b = 0, c = 0;
+          for (let ky = -1; ky <= 1; ky++) {
+            const ny = yy + ky;
+            if (ny < 0 || ny >= h) continue;
+            for (let kx = -1; kx <= 1; kx++) {
+              const nx = xx + kx;
+              if (nx < 0 || nx >= w) continue;
+              const k = ny * w + nx;
+              if (!filled[k]) continue;
+              const q = k * 4;
+              r += px[q]; g += px[q + 1]; b += px[q + 2]; c++;
+            }
           }
+          if (c === 0) continue;
+          const q = j * 4;
+          px[q] = r / c; px[q + 1] = g / c; px[q + 2] = b / c;
+          next.push(j);
         }
-        if (c === 0) continue;
-        px[i] = r / c; px[i + 1] = g / c; px[i + 2] = b / c;
-        changed++;
       }
     }
-    if (changed === 0) break;
+    for (let f = 0; f < next.length; f++) filled[next[f]] = 1;
+    frontier = next;
   }
 }
 
@@ -724,7 +742,18 @@ function warpField(src, w, h, wx, wy, amount) {
     const row = y * w;
     for (let x = 0; x < w; x++) {
       const i = row + x;
-      out[i] = sampleField(src, w, h, x + (wx[i] - 0.5) * amount, y + (wy[i] - 0.5) * amount);
+      const sx = x + (wx[i] - 0.5) * amount;
+      const sy = y + (wy[i] - 0.5) * amount;
+      let x0 = Math.floor(sx), y0 = Math.floor(sy);
+      const tx = sx - x0, ty = sy - y0;
+      x0 %= w; if (x0 < 0) x0 += w;
+      y0 %= h; if (y0 < 0) y0 += h;
+      const x1 = x0 + 1 === w ? 0 : x0 + 1;
+      const y1 = y0 + 1 === h ? 0 : y0 + 1;
+      const r0 = y0 * w, r1 = y1 * w;
+      const a = src[r0 + x0] + tx * (src[r0 + x1] - src[r0 + x0]);
+      const b = src[r1 + x0] + tx * (src[r1 + x1] - src[r1 + x0]);
+      out[i] = a + ty * (b - a);
     }
   }
   return out;
@@ -860,7 +889,7 @@ function blueNoiseField(w, h, seed) {
     splat(i, 1);
     placed++;
   }
-  for (let iter = 0; iter < ones * 4; iter++) {
+  for (let iter = 0; iter < ones; iter++) {
     const c = tightest();
     pattern[c] = 0; splat(c, -1);
     const v = largestVoid();
@@ -997,10 +1026,10 @@ function normalCanvasFromField(field, w, h, strength) {
   const px = img.data;
   const s = strength === undefined ? 2 : strength;
   for (let y = 0; y < h; y++) {
-    const ym = ((y - 1) + h) % h, yp = (y + 1) % h;
+    const ym = y === 0 ? h - 1 : y - 1, yp = y === h - 1 ? 0 : y + 1;
     const r0 = ym * w, r1 = y * w, r2 = yp * w;
     for (let x = 0; x < w; x++) {
-      const xm = ((x - 1) + w) % w, xp = (x + 1) % w;
+      const xm = x === 0 ? w - 1 : x - 1, xp = x === w - 1 ? 0 : x + 1;
       const h00 = field[r0 + xm], h10 = field[r0 + x], h20 = field[r0 + xp];
       const h01 = field[r1 + xm], h21 = field[r1 + xp];
       const h02 = field[r2 + xm], h12 = field[r2 + x], h22 = field[r2 + xp];
@@ -1018,6 +1047,41 @@ function normalCanvasFromField(field, w, h, strength) {
   }
   ctx.putImageData(img, 0, 0);
   return canvas;
+}
+
+/**
+ * Box-downsamples a tileable height field by 2 (stays tileable).
+ * @param {Float32Array} field Source field.
+ * @param {number} w Source width (even).
+ * @param {number} h Source height (even).
+ * @returns {Float32Array} Half-resolution field.
+ */
+function halveField(field, w, h) {
+  const hw = w >> 1, hh = h >> 1;
+  const out = new Float32Array(hw * hh);
+  for (let y = 0; y < hh; y++) {
+    const r0 = (y * 2) * w, r1 = (y * 2 + 1) * w, dr = y * hw;
+    for (let x = 0; x < hw; x++) {
+      const x0 = x * 2, x1 = x0 + 1;
+      out[dr + x] = (field[r0 + x0] + field[r0 + x1] + field[r1 + x0] + field[r1 + x1]) * 0.25;
+    }
+  }
+  return out;
+}
+
+/**
+ * Builds the normal map for a material. Normal maps are generated at half the
+ * albedo resolution: their useful signal is low frequency, and it halves both
+ * build time and VRAM.
+ * @param {Float32Array} height Height field at texture resolution.
+ * @param {number} S Texture size.
+ * @param {number} strength Bump strength.
+ * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas)}} Generator-style result.
+ */
+function materialNormal(height, S, strength) {
+  const half = S >= 256 ? halveField(height, S, S) : height;
+  const hs = S >= 256 ? S >> 1 : S;
+  return { canvas: normalCanvasFromField(half, hs, hs, strength) };
 }
 
 /**
@@ -1285,7 +1349,7 @@ function genRoadLines(S, seed) {
 
   /* Wear the paint with noise so markings never look like decals. */
   const noise = new NoiseSource(seed);
-  const wear = fbmField(S, S, noise, { freq: 14, octaves: 4, gain: 0.55 });
+  const wear = fbmField(S, S, noise, { freq: 14, octaves: 3, gain: 0.55 });
   const scuff = fbmField(S, S, new NoiseSource(seed + 4), { freq: Math.max(40, S / 6), octaves: 1, value: true });
   const img = ctx.getImageData(0, 0, S, S);
   const px = img.data;
@@ -1325,7 +1389,7 @@ function genSidewalk(S, seed) {
 
   const speck = fbmField(S, S, noise, { freq: Math.max(48, S / 4), octaves: 1, value: true });
   const mottle = fbmField(S, S, new NoiseSource(seed + 2), { freq: 7, octaves: 4, gain: 0.5 });
-  const chipN = fbmField(S, S, new NoiseSource(seed + 3), { freq: 26, octaves: 3 });
+  const chipN = fbmField(S, S, new NoiseSource(seed + 3), { freq: 26, octaves: 2 });
   const stain = new Float32Array(S * S);
   const stainJ = fbmField(S, S, new NoiseSource(seed + 5), { freq: 16, octaves: 3 });
   for (let i = 0; i < 7; i++) {
@@ -1387,7 +1451,7 @@ function genConcrete(S, seed) {
   const mottle = warpField(base, S, S, wx, wy, S * 0.06);
   const grain = fbmField(S, S, new NoiseSource(seed + 23), { freq: Math.max(64, S / 4), octaves: 1, value: true });
   const pits = worleyField(S, S, new NoiseSource(seed + 24), Math.max(14, Math.round(S / 12)), Math.max(14, Math.round(S / 12)), { mode: 'f1' });
-  const streak = fbmField(S, S, new NoiseSource(seed + 25), { freqX: 6, freqY: 40, octaves: 3 });
+  const streak = fbmField(S, S, new NoiseSource(seed + 25), { freqX: 6, freqY: 32, octaves: 2 });
 
   const height = new Float32Array(S * S);
   for (let y = 0; y < S; y++) {
@@ -1439,8 +1503,8 @@ function genBrick(S, seed) {
 
   const grain = fbmField(S, S, noise, { freq: Math.max(40, S / 5), octaves: 3, value: true });
   const blotch = fbmField(S, S, new NoiseSource(seed + 31), { freq: 9, octaves: 3 });
-  const chip = fbmField(S, S, new NoiseSource(seed + 32), { freq: 30, octaves: 3 });
-  const mortarN = fbmField(S, S, new NoiseSource(seed + 33), { freq: Math.max(30, S / 8), octaves: 3 });
+  const chip = fbmField(S, S, new NoiseSource(seed + 32), { freq: 30, octaves: 2 });
+  const mortarN = fbmField(S, S, new NoiseSource(seed + 33), { freq: Math.max(24, S / 12), octaves: 2 });
   const dirt = fbmField(S, S, new NoiseSource(seed + 34), { freqX: 5, freqY: 14, octaves: 3 });
 
   const height = new Float32Array(S * S);
@@ -1501,9 +1565,9 @@ function genMetal(S, seed) {
   const img = newImage(ctx, S, S);
   const px = img.data;
 
-  const brush = fbmField(S, S, noise, { freqX: Math.max(96, S / 3), freqY: 4, octaves: 3, value: true });
-  const rust = fbmField(S, S, new NoiseSource(seed + 41), { freq: 6, octaves: 5, gain: 0.55 });
-  const rustFine = fbmField(S, S, new NoiseSource(seed + 42), { freq: 34, octaves: 3 });
+  const brush = fbmField(S, S, noise, { freqX: Math.max(96, S / 4), freqY: 4, octaves: 2, value: true });
+  const rust = fbmField(S, S, new NoiseSource(seed + 41), { freq: 6, octaves: 4, gain: 0.55 });
+  const rustFine = fbmField(S, S, new NoiseSource(seed + 42), { freq: 34, octaves: 2 });
   const dents = fbmField(S, S, new NoiseSource(seed + 43), { freq: 9, octaves: 3 });
 
   const PANELS = 2;
@@ -1561,7 +1625,7 @@ function genRoofGravel(S, seed) {
   const cells = Math.max(24, Math.round(S / 6));
   const id = new Float32Array(S * S);
   const stones = worleyField(S, S, noise, cells, cells, { mode: 'f1', jitter: 1, outId: id });
-  const small = worleyField(S, S, new NoiseSource(seed + 51), Math.round(cells * 1.6), Math.round(cells * 1.6), { mode: 'f1', jitter: 1 });
+  const small = worleyField(S, S, new NoiseSource(seed + 51), Math.round(cells * 1.25), Math.round(cells * 1.25), { mode: 'f1', jitter: 1 });
   const tar = fbmField(S, S, new NoiseSource(seed + 52), { freq: 5, octaves: 4 });
   const grain = fbmField(S, S, new NoiseSource(seed + 53), { freq: Math.max(60, S / 4), octaves: 1, value: true });
 
@@ -1651,8 +1715,8 @@ function genTileFloor(S, seed) {
 function genGrass(S, seed) {
   const noise = new NoiseSource(seed);
   const clump = fbmField(S, S, noise, { freq: 5, octaves: 4, gain: 0.55 });
-  const blades = fbmField(S, S, new NoiseSource(seed + 71), { freqX: Math.max(80, S / 3), freqY: Math.max(30, S / 8), octaves: 2, value: true });
-  const blades2 = fbmField(S, S, new NoiseSource(seed + 72), { freqX: Math.max(30, S / 8), freqY: Math.max(80, S / 3), octaves: 2, value: true });
+  const blades = fbmField(S, S, new NoiseSource(seed + 71), { freqX: Math.max(80, S / 3), freqY: Math.max(30, S / 8), octaves: 1, value: true });
+  const blades2 = fbmField(S, S, new NoiseSource(seed + 72), { freqX: Math.max(30, S / 8), freqY: Math.max(80, S / 3), octaves: 1, value: true });
   const bare = fbmField(S, S, new NoiseSource(seed + 73), { freq: 3, octaves: 3 });
   const dry = fbmField(S, S, new NoiseSource(seed + 74), { freq: 11, octaves: 3 });
 
@@ -1771,7 +1835,7 @@ function genTreeBark(S, seed) {
   const wx = fbmField(S, S, new NoiseSource(seed + 101), { freqX: 6, freqY: 2, octaves: 2 });
   const wy = fbmField(S, S, new NoiseSource(seed + 102), { freqX: 6, freqY: 2, octaves: 2 });
   const warped = warpField(furrow, S, S, wx, wy, S * 0.05);
-  const fine = fbmField(S, S, new NoiseSource(seed + 103), { freqX: 40, freqY: 12, octaves: 3, value: true });
+  const fine = fbmField(S, S, new NoiseSource(seed + 103), { freqX: 36, freqY: 12, octaves: 2, value: true });
   const moss = fbmField(S, S, new NoiseSource(seed + 104), { freq: 6, octaves: 3 });
   const knots = worleyField(S, S, new NoiseSource(seed + 105), 4, 3, { mode: 'f1', jitter: 1 });
 
@@ -2118,7 +2182,7 @@ function genGlassFacade(S, seed) {
     paneRefl[i] = rng.range(0.6, 1.35);
   }
   const clouds = fbmField(S, S, noise, { freqX: 4, freqY: 6, octaves: 4, gain: 0.55 });
-  const grime = fbmField(S, S, new NoiseSource(seed + 151), { freqX: 8, freqY: 30, octaves: 3 });
+  const grime = fbmField(S, S, new NoiseSource(seed + 151), { freqX: 8, freqY: 26, octaves: 2 });
   const dust = fbmField(S, S, new NoiseSource(seed + 152), { freq: Math.max(48, S / 6), octaves: 1, value: true });
 
   const canvas = createCanvas(S, S);
@@ -2208,7 +2272,7 @@ function genOfficeFacade(S, seed) {
   }
   const wallN = fbmField(S, S, noise, { freq: 6, octaves: 4, gain: 0.55 });
   const wallFine = fbmField(S, S, new NoiseSource(seed + 161), { freq: Math.max(64, S / 4), octaves: 1, value: true });
-  const runoff = fbmField(S, S, new NoiseSource(seed + 162), { freqX: 22, freqY: 5, octaves: 3 });
+  const runoff = fbmField(S, S, new NoiseSource(seed + 162), { freqX: 20, freqY: 5, octaves: 2 });
   const clouds = fbmField(S, S, new NoiseSource(seed + 163), { freqX: 5, freqY: 7, octaves: 3 });
 
   const canvas = createCanvas(S, S);
@@ -2302,7 +2366,7 @@ function genApartmentFacade(S, seed) {
   }
   const stucco = fbmField(S, S, noise, { freq: 9, octaves: 4, gain: 0.55 });
   const fine = fbmField(S, S, new NoiseSource(seed + 171), { freq: Math.max(70, S / 4), octaves: 1, value: true });
-  const streak = fbmField(S, S, new NoiseSource(seed + 172), { freqX: 26, freqY: 6, octaves: 3 });
+  const streak = fbmField(S, S, new NoiseSource(seed + 172), { freqX: 22, freqY: 6, octaves: 2 });
   const sky = fbmField(S, S, new NoiseSource(seed + 173), { freqX: 4, freqY: 6, octaves: 3 });
 
   const canvas = createCanvas(S, S);
@@ -3141,6 +3205,16 @@ function genMuzzle(S, seed) {
   const img = newImage(ctx, S, S);
   const px = img.data;
   const c = (S - 1) * 0.5;
+  /* Petals: an angular noise ring so the flash is never symmetric. */
+  const LUT = 256;
+  const petalLut = new Float32Array(LUT);
+  for (let k = 0; k < LUT; k++) {
+    const a = k / LUT * TWO_PI;
+    const pc = Math.abs(Math.cos(a * 3 + 0.7));
+    petalLut[k] = 0.42 + 0.30 * (pc * Math.sqrt(pc))
+      + 0.16 * noise.perlin2(Math.cos(a) * 3 + 8, Math.sin(a) * 3 + 8, 64, 64);
+  }
+  const angScale = LUT / TWO_PI;
   for (let y = 0; y < S; y++) {
     const row = y * S;
     const dy = (y - c) / c;
@@ -3148,10 +3222,7 @@ function genMuzzle(S, seed) {
       const dx = (x - c) / c;
       const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
       const ang = Math.atan2(dy, dx);
-      /* Petals: an angular noise ring so the flash is never symmetric. */
-      const pc = Math.abs(Math.cos(ang * 3 + 0.7));
-      const petal = 0.42 + 0.30 * (pc * Math.sqrt(pc))
-        + 0.16 * noise.perlin2(Math.cos(ang) * 3 + 8, Math.sin(ang) * 3 + 8, 64, 64);
+      const petal = petalLut[(((ang * angScale) | 0) + LUT) % LUT];
       const body = 1 - ss(petal * 0.55, petal, d);
       const core = Math.exp(-d * d * 44);
       const c2 = Math.max(0, Math.cos(ang * 2));
@@ -3184,6 +3255,14 @@ function genBulletHole(S, seed) {
   const img = newImage(ctx, S, S);
   const px = img.data;
   const c = (S - 1) * 0.5;
+  /* Angular wobble baked into a LUT: sampling noise per pixel is far slower. */
+  const LUT = 256;
+  const wobLut = new Float32Array(LUT);
+  for (let k = 0; k < LUT; k++) {
+    const a = k / LUT * TWO_PI;
+    wobLut[k] = 1 + 0.22 * noise.perlin2(Math.cos(a) * 4 + 5, Math.sin(a) * 4 + 5, 64, 64);
+  }
+  const angScale = LUT / TWO_PI;
   for (let y = 0; y < S; y++) {
     const row = y * S;
     const dy = (y - c) / c;
@@ -3192,7 +3271,7 @@ function genBulletHole(S, seed) {
       const dx = (x - c) / c;
       const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
       const ang = Math.atan2(dy, dx);
-      const wob = 1 + 0.22 * noise.perlin2(Math.cos(ang) * 4 + 5, Math.sin(ang) * 4 + 5, 64, 64);
+      const wob = wobLut[(((ang * angScale) | 0) + LUT) % LUT];
       const hole = 1 - ss(0.10 * wob, 0.16 * wob, d);
       const rim = (1 - ss(0.16 * wob, 0.30 * wob, d)) * (1 - hole);
       /* Radial cracks. */
@@ -3328,7 +3407,7 @@ function genSkyStars(W, H, seed) {
   const rng = new Rand(seed ^ 0x57a45);
   const noise = new NoiseSource(seed);
   const cloud = fbmField(W, H, noise, { freqX: 6, freqY: 3, octaves: 4, gain: 0.6 });
-  const dust = fbmField(W, H, new NoiseSource(seed + 1), { freqX: 14, freqY: 7, octaves: 3 });
+  const dust = fbmField(W, H, new NoiseSource(seed + 1), { freqX: 14, freqY: 7, octaves: 2 });
   const bright = new Float32Array(W * H);
   const warm = new Float32Array(W * H);
 
@@ -3606,24 +3685,24 @@ export function buildTextureLibrary(gl, opts) {
   /* --- roads and ground ------------------------------------------------- */
   const asphalt = genAsphalt(S, seed);
   add('asphalt', asphalt, TILE, _mark());
-  add('asphalt_n', { canvas: normalCanvasFromField(asphalt.height, S, S, 2.4) }, NORMAL, _mark());
+  add('asphalt_n', materialNormal(asphalt.height, S, 2.4), NORMAL, _mark());
   add('roadLines', genRoadLines(S, seed + 1), TILE_MASK, _mark());
 
   const sidewalk = genSidewalk(S, seed + 2);
   add('sidewalk', sidewalk, TILE, _mark());
-  add('sidewalk_n', { canvas: normalCanvasFromField(sidewalk.height, S, S, 3.0) }, NORMAL, _mark());
+  add('sidewalk_n', materialNormal(sidewalk.height, S, 3.0), NORMAL, _mark());
 
   const concrete = genConcrete(S, seed + 3);
   add('concrete', concrete, TILE, _mark());
-  add('concrete_n', { canvas: normalCanvasFromField(concrete.height, S, S, 2.0) }, NORMAL, _mark());
+  add('concrete_n', materialNormal(concrete.height, S, 2.0), NORMAL, _mark());
 
   const brick = genBrick(S, seed + 4);
   add('brick', brick, TILE, _mark());
-  add('brick_n', { canvas: normalCanvasFromField(brick.height, S, S, 3.4) }, NORMAL, _mark());
+  add('brick_n', materialNormal(brick.height, S, 3.4), NORMAL, _mark());
 
   const metal = genMetal(S, seed + 5);
   add('metal', metal, TILE, _mark());
-  add('metal_n', { canvas: normalCanvasFromField(metal.height, S, S, 2.6) }, NORMAL, _mark());
+  add('metal_n', materialNormal(metal.height, S, 2.6), NORMAL, _mark());
 
   add('roofGravel', genRoofGravel(S, seed + 6), TILE, _mark());
   add('tileFloor', genTileFloor(S, seed + 7), TILE, _mark());
@@ -3633,7 +3712,7 @@ export function buildTextureLibrary(gl, opts) {
 
   const water = genWater(S, seed + 11);
   add('water', water, TILE, _mark());
-  add('waterNormal', { canvas: normalCanvasFromField(water.height, S, S, 3.2) }, NORMAL, _mark());
+  add('waterNormal', materialNormal(water.height, S, 3.2), NORMAL, _mark());
 
   /* --- vegetation and vehicles ------------------------------------------ */
   add('treeBark', genTreeBark(S, seed + 12), TILE, _mark());

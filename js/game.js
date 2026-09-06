@@ -9,6 +9,7 @@ import { box as boxGeo, cylinder as cylinderGeo, mergeGeometries } from './core/
 import { Input } from './core/input.js';
 import { vec3, mat4, clamp, damp, angleDamp, lerp, wrapAngle, Rand, smoothstep } from './core/math.js';
 import { Renderer, Camera } from './render/renderer.js';
+import { createMaterial, updateMaterial } from './render/materials.js';
 import { buildTextureLibrary } from './render/textures.js';
 import { generateCity, districtAt, laneAt } from './world/citygen.js';
 import { buildWorld } from './world/worldbuild.js';
@@ -116,6 +117,7 @@ export class Game {
 
     await step(0.02, '렌더러 초기화 중…');
     this.renderer = new Renderer(this.gl, this.canvas, {});
+    this._patchRendererCompat(this.renderer);
     this.particles = this.renderer.particles;
     this.resize();
     window.addEventListener('resize', this._resizeHandler);
@@ -197,6 +199,30 @@ export class Game {
    * helpers. Patch in safe fallbacks once, at boot, rather than sprinkling `?.` everywhere in the
    * hot path.
    */
+  /**
+   * The contract exposes material creation on the renderer (section 5) while the implementation
+   * keeps it in render/materials.js. Bridge the two before anything builds geometry, because
+   * world/worldbuild.js and the pickup assets both call renderer.createMaterial().
+   * @param {Renderer} renderer
+   */
+  _patchRendererCompat(renderer) {
+    if (typeof renderer.createMaterial !== 'function') {
+      renderer.createMaterial = (desc) => createMaterial(desc);
+    }
+    if (typeof renderer.updateMaterial !== 'function') {
+      renderer.updateMaterial = (mat, patch) => updateMaterial(mat, patch);
+    }
+    if (typeof renderer.setEnvironment !== 'function') {
+      renderer.setEnvironment = (desc) => {
+        if (!desc) return;
+        if (desc.exposure !== undefined && renderer.setExposure) renderer.setExposure(desc.exposure);
+        if (desc.fogColor || desc.fogDensity !== undefined) {
+          renderer.setFog({ color: desc.fogColor, density: desc.fogDensity });
+        }
+      };
+    }
+  }
+
   /**
    * Modules are written against docs/ARCHITECTURE.md, but the integration layer calls a handful of
    * richer helpers. Patch in safe fallbacks once, at boot, instead of sprinkling optional chaining

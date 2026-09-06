@@ -1736,7 +1736,6 @@ export class Renderer {
         ? this.stats.fps + (instant - this.stats.fps) * Math.min(1, dt * 2)
         : instant;
     }
-
   }
 
   /**
