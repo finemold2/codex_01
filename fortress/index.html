@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0c10" />
+  <meta name="description" content="Fortress — AI와 대결하는 턴제 포격 게임. 개인전·팀전 지원." />
+  <title>Fortress · 포트리스 대전</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%A3%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- ===== 메뉴 화면 ===== -->
+  <section id="menu" class="screen">
+    <div class="menu-card">
+      <h1><span class="logo">💣</span> FORTRESS</h1>
+      <p class="sub">AI와 대결하는 턴제 포격 게임 · 개인전 / 팀전</p>
+
+      <div class="form-row">
+        <label>플레이어 수</label>
+        <div class="seg" id="segCount"></div>
+      </div>
+      <div class="form-row">
+        <label>게임 모드</label>
+        <div class="seg" id="segMode"></div>
+      </div>
+      <div class="form-row">
+        <label>AI 난이도</label>
+        <div class="seg" id="segDiff"></div>
+      </div>
+      <div class="form-row">
+        <label>지형</label>
+        <div class="seg" id="segTheme"></div>
+      </div>
+
+      <div class="slots-head">
+        <span>참가자</span>
+        <span id="slotsHint" class="hint"></span>
+      </div>
+      <div id="slots" class="slots"></div>
+      <p id="menuError" class="error" hidden></p>
+
+      <button id="btnStart" class="primary">게임 시작</button>
+
+      <details class="help">
+        <summary>조작법</summary>
+        <ul>
+          <li><b>← →</b> 이동 (턴마다 이동력 제한) · 방향 전환</li>
+          <li><b>↑ ↓</b> 포신 각도 조절</li>
+          <li><b>Space</b> 누르고 있으면 파워 충전, 놓으면 발사</li>
+          <li><b>PgUp / PgDn</b> 파워 미세 조절, <b>Enter</b> 현재 파워로 발사</li>
+          <li><b>1 ~ 4</b> 또는 <b>Tab</b> 무기 선택</li>
+          <li>바람(상단)이 탄도를 휘게 합니다. 이전 사격의 궤적이 점선으로 남습니다.</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <!-- ===== 게임 화면 ===== -->
+  <section id="game" class="screen" hidden>
+    <header class="hud-top">
+      <div class="hud-player">
+        <span class="dot" id="hudDot"></span>
+        <span id="hudName">-</span>
+        <span id="hudTeam" class="badge" hidden></span>
+        <span id="hudYou" class="you" hidden>YOU</span>
+      </div>
+      <div class="hud-wind" title="바람">
+        <span class="lbl">바람</span>
+        <canvas id="windCanvas" width="120" height="26"></canvas>
+        <span id="hudWind">0</span>
+      </div>
+      <div class="hud-round">라운드 <b id="hudRound">1</b></div>
+      <div class="hud-actions">
+        <button id="btnMute" class="icon-btn" title="소리">🔊</button>
+        <button id="btnQuit" class="icon-btn" title="메뉴로">✕</button>
+      </div>
+    </header>
+
+    <div class="stage" id="stage">
+      <div class="stage-inner" id="stageInner">
+        <canvas id="canvas" width="1600" height="800"></canvas>
+        <div id="banner" class="banner" hidden></div>
+        <aside id="roster" class="roster"></aside>
+      </div>
+    </div>
+
+    <footer class="hud-bottom">
+      <div class="weapons" id="weapons"></div>
+
+      <div class="gauges">
+        <div class="gauge">
+          <span class="g-lbl">각도</span>
+          <b id="hudAngle">45°</b>
+        </div>
+        <div class="gauge gauge--wide">
+          <span class="g-lbl">파워</span>
+          <div class="pbar"><div id="pfill" class="pfill"></div><div id="pmark" class="pmark"></div></div>
+          <b id="hudPower">50</b>
+        </div>
+        <div class="gauge gauge--wide">
+          <span class="g-lbl">이동</span>
+          <div class="pbar pbar--fuel"><div id="ffill" class="pfill"></div></div>
+        </div>
+      </div>
+
+      <div class="pad" id="pad">
+        <button class="pad-btn" data-act="left" title="왼쪽 이동">◀</button>
+        <button class="pad-btn" data-act="right" title="오른쪽 이동">▶</button>
+        <button class="pad-btn" data-act="up" title="각도 올리기">▲</button>
+        <button class="pad-btn" data-act="down" title="각도 내리기">▼</button>
+        <button class="pad-btn" data-act="pdown" title="파워 −">−</button>
+        <button class="pad-btn" data-act="pup" title="파워 +">+</button>
+        <button id="btnFire" class="fire" title="누르고 있으면 충전, 놓으면 발사">발사</button>
+      </div>
+    </footer>
+  </section>
+
+  <!-- ===== 게임 종료 모달 ===== -->
+  <div id="gameover" class="modal" hidden>
+    <div class="modal-card">
+      <h2 id="goTitle">🏆 승리!</h2>
+      <p id="goSub" class="sub"></p>
+      <table class="result">
+        <thead><tr><th>#</th><th>이름</th><th>팀</th><th>HP</th><th>격파</th></tr></thead>
+        <tbody id="goBody"></tbody>
+      </table>
+      <div class="modal-actions">
+        <button id="goMenu" class="ghost">메뉴로</button>
+        <button id="goAgain" class="primary">다시하기</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/terrain.js"></script>
+  <script src="js/entities.js"></script>
+  <script src="js/sfx.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
