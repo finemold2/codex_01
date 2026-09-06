@@ -118,6 +118,7 @@ export class Game {
     await step(0.02, '렌더러 초기화 중…');
     this.renderer = new Renderer(this.gl, this.canvas, {});
     this._patchRendererCompat(this.renderer);
+    this._applyArtDirection();
     this.particles = this.renderer.particles;
     this.resize();
     window.addEventListener('resize', this._resizeHandler);
@@ -199,6 +200,30 @@ export class Game {
    * helpers. Patch in safe fallbacks once, at boot, rather than sprinkling `?.` everywhere in the
    * hot path.
    */
+  /**
+   * Art direction for the post chain.
+   *
+   * The engine ships neutral defaults (exposure 1.0, grain 0.03, chromatic 0.35). Measured against
+   * real frames those crush shadows to pure black, make dark surfaces boil with grain, and put
+   * visible rainbow fringes on every high-contrast edge near the screen border. These values were
+   * tuned by rendering the city at street level and comparing.
+   * @param {object} [over] Optional overrides (used by the settings screen).
+   */
+  _applyArtDirection(over) {
+    const r = this.renderer;
+    if (!r) return;
+    if (r.setExposure) r.setExposure((over && over.exposure) || 1.45);
+    const p = r.postParams;
+    if (!p) return;
+    p.grain = over && over.grain !== undefined ? over.grain : 0.008;
+    p.chromatic = over && over.chromatic !== undefined ? over.chromatic : 0.07;
+    p.vignette = over && over.vignette !== undefined ? over.vignette : 0.26;
+    p.bloomStrength = 0.5;
+    p.bloomThreshold = 1.15;
+    p.saturation = 1.07;
+    p.contrast = 1.03;
+  }
+
   /**
    * The contract exposes material creation on the renderer (section 5) while the implementation
    * keeps it in render/materials.js. Bridge the two before anything builds geometry, because
@@ -359,7 +384,10 @@ export class Game {
 
   applySettings(s) {
     if (!s) return;
-    if (this.renderer && s.quality) this.renderer.setQuality(s.quality);
+    if (this.renderer && s.quality) {
+      this.renderer.setQuality(s.quality);
+      this._applyArtDirection();
+    }
     if (this.audio) {
       this.audio.setVolume('master', s.masterVolume ?? 0.85);
       this.audio.setVolume('music', s.musicVolume ?? 0.6);

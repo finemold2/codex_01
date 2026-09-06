@@ -1249,63 +1249,62 @@ function buildPartGeometries() {
   const SEG = 14;
 
   /* --- head ------------------------------------------------------------- */
+  // The head bone sits at the base of the skull (ear height), so the profile runs from the
+  // chin at -0.04 up to a crown at ~0.20: a 0.25 m head on a 1.8 m body.
   const skull = ringStack([
-    { y: 0.190, rx: 0.086, rz: 0.090 },
-    { y: 0.140, rx: 0.098, rz: 0.101 },
-    { y: 0.090, rx: 0.096, rz: 0.100 },
-    { y: 0.042, rx: 0.083, rz: 0.091 },
-    { y: 0.000, rx: 0.063, rz: 0.074 },
-    { y: -0.028, rx: 0.049, rz: 0.058 }
-  ], 14, { capTop: 'round', capBottom: 'round', capSeg: 2, capScale: 0.9 });
+    { y: 0.130, rx: 0.084, rz: 0.089 },
+    { y: 0.098, rx: 0.096, rz: 0.102 },
+    { y: 0.062, rx: 0.095, rz: 0.101 },
+    { y: 0.030, rx: 0.088, rz: 0.097 },
+    { y: 0.004, rx: 0.079, rz: 0.090 },
+    { y: -0.020, rx: 0.066, rz: 0.078 },
+    { y: -0.038, rx: 0.052, rz: 0.064 }
+  ], 14, { capTop: 'round', capBottom: 'round', capSeg: 2, capScale: 0.72 });
   place(skull, 0, 0, -0.004);
-  const nose = place(cone(0.017, 0.038, 6), 0, 0.086, -0.086, -96);
-  const earL = place(sphere(0.027, 8, 6), -0.094, 0.086, 0.012, 0, 0, 0, [0.42, 1.0, 0.72]);
-  const earR = place(sphere(0.027, 8, 6), 0.094, 0.086, 0.012, 0, 0, 0, [0.42, 1.0, 0.72]);
-  const brow = place(box(0.132, 0.020, 0.026), 0, 0.118, -0.078, -8);
-  const eyeL = place(sphere(0.015, 7, 5), -0.036, 0.098, -0.076, 0, 0, 0, [1, 0.7, 0.6]);
-  const eyeR = place(sphere(0.015, 7, 5), 0.036, 0.098, -0.076, 0, 0, 0, [1, 0.7, 0.6]);
+  const nose = place(cone(0.016, 0.038, 6), 0, 0.036, -0.086, -100);
+  const earL = place(sphere(0.026, 8, 6), -0.092, 0.040, 0.012, 0, 0, 0, [0.42, 1.05, 0.72]);
+  const earR = place(sphere(0.026, 8, 6), 0.092, 0.040, 0.012, 0, 0, 0, [0.42, 1.05, 0.72]);
+  const eyeL = place(sphere(0.013, 7, 5), -0.034, 0.058, -0.079, 0, 0, 0, [1, 0.62, 0.5]);
+  const eyeR = place(sphere(0.013, 7, 5), 0.034, 0.058, -0.079, 0, 0, 0, [1, 0.62, 0.5]);
+  const mouth = place(box(0.032, 0.007, 0.011), 0, -0.008, -0.072);
   g.head = mergeGeometries([
     { geometry: skull },
     { geometry: nose },
     { geometry: earL }, { geometry: earR },
-    { geometry: brow, color: C_SHADE },
-    { geometry: eyeL, color: C_DARKER }, { geometry: eyeR, color: C_DARKER }
+    { geometry: eyeL, color: C_DARKER }, { geometry: eyeR, color: C_DARKER },
+    { geometry: mouth, color: [0.66, 0.42, 0.40] }
   ]);
 
-  /* --- hair ------------------------------------------------------------- */
+  /* --- hair: a thin shell over the crown plus a nape and sideburns -------- */
   const hairShell = ringStack([
-    { y: 0.186, rx: 0.094, rz: 0.098 },
-    { y: 0.140, rx: 0.106, rz: 0.109 },
-    { y: 0.096, rx: 0.104, rz: 0.108 },
-    { y: 0.058, rx: 0.096, rz: 0.103 }
-  ], 14, { capTop: 'round', capBottom: 'flat', capSeg: 2, capScale: 0.85 });
-  const fringe = place(roundedBox(0.170, 0.052, 0.048, 0.018, 1), 0, 0.148, -0.078, -14);
-  const sideL = place(box(0.030, 0.110, 0.130), -0.098, 0.108, 0.006);
-  const sideR = place(box(0.030, 0.110, 0.130), 0.098, 0.108, 0.006);
-  const nape = place(roundedBox(0.150, 0.090, 0.050, 0.020, 1), 0, 0.060, 0.078);
+    { y: 0.148, rx: 0.078, rz: 0.084, z: 0.004 },
+    { y: 0.120, rx: 0.099, rz: 0.105, z: 0.005 },
+    { y: 0.088, rx: 0.104, rz: 0.109, z: 0.011 },
+    { y: 0.048, rx: 0.101, rz: 0.104, z: 0.022 },
+    { y: 0.006, rx: 0.092, rz: 0.094, z: 0.034 }
+  ], 14, { capTop: 'round', capBottom: 'flat', capSeg: 2, capScale: 0.9 });
+  const fringe = place(roundedBox(0.128, 0.034, 0.052, 0.014, 1), 0, 0.126, -0.052, -22);
   g.hair = mergeGeometries([
     { geometry: hairShell },
-    { geometry: fringe, color: C_LIGHT },
-    { geometry: sideL }, { geometry: sideR },
-    { geometry: nape, color: C_SHADE }
+    { geometry: fringe, color: C_SHADE }
   ]);
   g.ponytail = mergeGeometries([
-    { geometry: place(capsule(0.038, 0.13, 8, 3), 0, 0.030, 0.118, 22) },
-    { geometry: place(cylinder(0.026, 0.034, 0.03, 8), 0, 0.098, 0.100), color: C_DARKER }
+    { geometry: place(capsule(0.038, 0.13, 8, 3), 0, -0.020, 0.118, 20) },
+    { geometry: place(cylinder(0.026, 0.034, 0.03, 8), 0, 0.046, 0.104), color: C_DARKER }
   ]);
 
   /* --- cop cap ---------------------------------------------------------- */
   const capCrown = ringStack([
-    { y: 0.212, rx: 0.092, rz: 0.096 },
-    { y: 0.170, rx: 0.106, rz: 0.110 },
-    { y: 0.132, rx: 0.108, rz: 0.112 }
-  ], 14, { capTop: 'round', capBottom: 'flat', capSeg: 2, capScale: 0.7 });
-  const capBrim = place(cylinder(0.112, 0.116, 0.014, 14), 0, 0.126, -0.070, -10, 0, 0, [1.0, 1, 1.35]);
+    { y: 0.184, rx: 0.086, rz: 0.092 },
+    { y: 0.146, rx: 0.106, rz: 0.111 },
+    { y: 0.114, rx: 0.108, rz: 0.113 }
+  ], 14, { capTop: 'round', capBottom: 'flat', capSeg: 2, capScale: 0.68 });
+  const capBrim = place(cylinder(0.106, 0.110, 0.012, 14), 0, 0.110, -0.078, -12, 0, 0, [1.0, 1, 1.30]);
   const capBand = ringStack([
-    { y: 0.136, rx: 0.110, rz: 0.114 },
-    { y: 0.118, rx: 0.110, rz: 0.114 }
+    { y: 0.118, rx: 0.110, rz: 0.115 },
+    { y: 0.100, rx: 0.110, rz: 0.115 }
   ], 14, { capTop: 'none', capBottom: 'none' });
-  const capBadge = place(box(0.040, 0.036, 0.014), 0, 0.166, -0.104, -12);
+  const capBadge = place(box(0.036, 0.030, 0.012), 0, 0.146, -0.104, -12);
   g.cap = mergeGeometries([
     { geometry: capCrown },
     { geometry: capBrim, color: C_DARK },
@@ -1322,21 +1321,25 @@ function buildPartGeometries() {
 
   /* --- chest ------------------------------------------------------------ */
   const torso = ringStack([
-    { y: 0.212, rx: 0.116, rz: 0.092 },
-    { y: 0.160, rx: 0.150, rz: 0.108 },
-    { y: 0.085, rx: 0.150, rz: 0.113 },
-    { y: 0.005, rx: 0.141, rz: 0.107 },
-    { y: -0.090, rx: 0.130, rz: 0.099 }
+    { y: 0.205, rx: 0.101, rz: 0.087 },
+    { y: 0.172, rx: 0.149, rz: 0.106 },
+    { y: 0.118, rx: 0.159, rz: 0.114 },
+    { y: 0.042, rx: 0.150, rz: 0.115 },
+    { y: -0.030, rx: 0.139, rz: 0.107 },
+    { y: -0.095, rx: 0.130, rz: 0.100 }
   ], SEG + 2, { capTop: 'flat', capBottom: 'none', capSeg: 2 });
   const collar = ringStack([
-    { y: 0.222, rx: 0.086, rz: 0.080 },
-    { y: 0.186, rx: 0.104, rz: 0.094 }
+    { y: 0.218, rx: 0.083, rz: 0.078 },
+    { y: 0.188, rx: 0.100, rz: 0.090 }
   ], SEG + 2, { capTop: 'none', capBottom: 'none' });
+  const deltoidL = place(sphere(0.070, 10, 8), -0.136, 0.144, 0.002, 0, 0, 0, [1.02, 0.74, 0.88]);
+  const deltoidR = place(sphere(0.070, 10, 8), 0.136, 0.144, 0.002, 0, 0, 0, [1.02, 0.74, 0.88]);
   const lapelL = place(box(0.052, 0.150, 0.020), -0.046, 0.110, -0.100, 0, 0, 10);
   const lapelR = place(box(0.052, 0.150, 0.020), 0.046, 0.110, -0.100, 0, 0, -10);
   const zip = place(box(0.014, 0.290, 0.016), 0, 0.060, -0.106);
   g.chest = mergeGeometries([
     { geometry: torso },
+    { geometry: deltoidL }, { geometry: deltoidR },
     { geometry: collar, color: C_DARK },
     { geometry: lapelL, color: C_SHADE }, { geometry: lapelR, color: C_SHADE },
     { geometry: zip, color: C_DARKER }
@@ -1344,21 +1347,21 @@ function buildPartGeometries() {
 
   /* --- cop vest + gangster hood (both ride the chest bone) --------------- */
   const vestShell = ringStack([
-    { y: 0.176, rx: 0.150, rz: 0.118 },
-    { y: 0.090, rx: 0.170, rz: 0.130 },
-    { y: 0.000, rx: 0.162, rz: 0.124 },
-    { y: -0.070, rx: 0.148, rz: 0.114 }
+    { y: 0.182, rx: 0.152, rz: 0.116 },
+    { y: 0.112, rx: 0.172, rz: 0.130 },
+    { y: 0.020, rx: 0.164, rz: 0.126 },
+    { y: -0.062, rx: 0.150, rz: 0.116 }
   ], SEG + 2, { capTop: 'flat', capBottom: 'flat', capSeg: 1 });
-  const radio = place(box(0.048, 0.075, 0.032), -0.128, 0.130, -0.070, 0, 0, 8);
-  const shoulderPatch = place(box(0.036, 0.030, 0.052), 0.150, 0.140, 0.010);
+  const radio = place(box(0.048, 0.075, 0.032), -0.132, 0.140, -0.074, 0, 0, 8);
+  const shoulderPatch = place(box(0.036, 0.030, 0.052), 0.156, 0.150, 0.010);
   g.vest = mergeGeometries([
     { geometry: vestShell },
     { geometry: radio, color: C_DARKER },
     { geometry: shoulderPatch, color: [1.8, 1.7, 0.9] }
   ]);
   g.hood = mergeGeometries([
-    { geometry: place(sphere(0.115, 12, 8), 0, 0.190, 0.098, 0, 0, 0, [1.05, 0.78, 0.9]) },
-    { geometry: place(cylinder(0.085, 0.115, 0.09, 12), 0, 0.235, 0.070, 22), color: C_SHADE }
+    { geometry: place(sphere(0.118, 12, 8), 0, 0.215, 0.104, 0, 0, 0, [1.05, 0.72, 0.92]) },
+    { geometry: place(cylinder(0.086, 0.118, 0.09, 12), 0, 0.252, 0.074, 22), color: C_SHADE }
   ]);
 
   /* --- abdomen ---------------------------------------------------------- */
@@ -1419,9 +1422,9 @@ function buildPartGeometries() {
    * @returns {object} Geometry.
    */
   const hand = (side) => mergeGeometries([
-    { geometry: place(roundedBox(0.074, 0.092, 0.040, 0.017, 1), 0, -0.050, -0.002) },
-    { geometry: place(roundedBox(0.070, 0.058, 0.034, 0.016, 1), 0.004 * side, -0.104, -0.010, -6) },
-    { geometry: place(capsule(0.015, 0.030, 5, 1), 0.040 * side, -0.040, -0.014, 20, 0, -34 * side) }
+    { geometry: place(roundedBox(0.064, 0.086, 0.034, 0.015, 1), 0, -0.048, -0.002) },
+    { geometry: place(roundedBox(0.060, 0.056, 0.030, 0.014, 1), 0.004 * side, -0.100, -0.010, -6) },
+    { geometry: place(capsule(0.013, 0.030, 5, 1), 0.034 * side, -0.038, -0.014, 20, 0, -34 * side) }
   ]);
   g.handL = hand(-1);
   g.handR = hand(1);

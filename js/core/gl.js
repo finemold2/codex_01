@@ -13,8 +13,10 @@
  *  - Vertex attribute layout is fixed: 0 = position (vec3), 1 = normal (vec3),
  *    2 = uv (vec2), 3 = color (vec3), 4..7 = instance model matrix columns (vec4),
  *    8 = instance tint (vec4).
- *  - Textures created from a canvas/image source are uploaded with UNPACK_FLIP_Y so that
- *    canvas2d top-left maps to uv (0,1). Raw typed-array uploads are NOT flipped.
+ *  - Vertical flip is a per-texture choice driven by `opts.flipY`, which defaults to true for
+ *    canvas/image sources (so canvas2d top-left maps to uv (0,1)) and false for raw typed-array
+ *    data (so element 0 is the uv (0,0) texel). UNPACK_FLIP_Y_WEBGL applies to both upload
+ *    paths, so passing `flipY: true` alongside `data` flips raw rows exactly like a canvas.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -1034,7 +1036,8 @@ export class Texture2D {
    * @param {Object} [opts] Options.
    * @param {number} [opts.width] Width in texels (required when there is no `source`).
    * @param {number} [opts.height] Height in texels.
-   * @param {ArrayBufferView|null} [opts.data] Raw pixel data (not flipped vertically).
+   * @param {ArrayBufferView|null} [opts.data] Raw pixel data (row 0 maps to uv v = 0 unless
+   *   `opts.flipY` is set, which flips raw rows just like a canvas source).
    * @param {HTMLCanvasElement|HTMLImageElement|ImageBitmap|HTMLVideoElement} [opts.source]
    *   Image source (flipped vertically by default so canvas2d top-left maps to uv (0,1)).
    * @param {number|string} [opts.internalFormat] GL enum or preset name from the format table.
@@ -1487,11 +1490,14 @@ export class RenderTarget {
    * Binds the framebuffer, sets the viewport and the draw-buffer list.
    * Depth writes are re-enabled before clearing so a previous transparent pass
    * cannot silently swallow the depth clear.
+   * A disposed target is a no-op: `this.framebuffer` is null once disposed, and binding null
+   * would silently retarget (and with `clear` wipe) the canvas' default framebuffer.
    * @param {boolean} [clear] Clear color (and depth/stencil) after binding.
    * @returns {void}
    */
   bind(clear = true) {
     const gl = this.gl;
+    if (this.disposed || !this.framebuffer) return;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
     gl.viewport(0, 0, this.width, this.height);
     if (this.colorCount > 0) gl.drawBuffers(this.drawBuffers);

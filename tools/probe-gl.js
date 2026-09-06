@@ -95,10 +95,16 @@ export default async function run({ canvas }) {
   const px = new Float32Array(4 * 64 * 64);
   try {
     gl.readPixels(96, 96, 64, 64, gl.RGBA, gl.FLOAT, px);
+    // The dark half of the probe texture shades to ~0.079, i.e. barely above the 0.05 clear
+    // colour, so "lit" has to mean "differs from the clear colour", not "brighter than a
+    // fixed threshold" - otherwise a fully covered target reads as almost empty.
     let mx = 0; let nz = 0;
-    for (let i = 0; i < px.length; i += 4) { mx = Math.max(mx, px[i]); if (px[i] > 0.08) nz++; }
-    out.notes.push(`hdr readback max=${mx.toFixed(3)} litPixels=${nz}`);
-    if (nz < 10) out.errors.push('HDR target looks empty after an instanced draw');
+    for (let i = 0; i < px.length; i += 4) {
+      mx = Math.max(mx, px[i]);
+      if (Math.abs(px[i] - 0.05) > 0.002 || Math.abs(px[i + 1] - 0.06) > 0.002) nz++;
+    }
+    out.notes.push(`hdr readback max=${mx.toFixed(3)} shadedPixels=${nz} of 4096`);
+    if (nz < 1024) out.errors.push('HDR target looks empty after an instanced draw');
   } catch (e) { out.notes.push('float readback unsupported: ' + e.message); }
   err('readback');
 
@@ -116,12 +122,16 @@ export default async function run({ canvas }) {
   drawFullscreen(gl);
   err('fullscreen');
 
-  const bytes = new Uint8Array(4 * 32 * 32);
-  gl.readPixels((canvas.width >> 1) - 16, (canvas.height >> 1) - 16, 32, 32, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+  // Sample the whole canvas, not a 32x32 centre patch: the centre can legitimately land in a
+  // flat dark region of the scene, which made this check report a false failure.
+  const cw = Math.min(256, canvas.width);
+  const ch = Math.min(256, canvas.height);
+  const bytes = new Uint8Array(4 * cw * ch);
+  gl.readPixels((canvas.width - cw) >> 1, (canvas.height - ch) >> 1, cw, ch, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
   const uniq = new Set();
   for (let i = 0; i < bytes.length; i += 4) uniq.add(bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2]);
-  out.notes.push(`canvas unique colors=${uniq.size}`);
-  if (uniq.size < 2) out.errors.push('fullscreen blit produced a flat image');
+  out.notes.push(`canvas unique colors=${uniq.size} over ${cw}x${ch}`);
+  if (uniq.size < 8) out.errors.push('fullscreen blit produced a flat image');
 
   rt.resize(128, 128); err('resize');
   return out;

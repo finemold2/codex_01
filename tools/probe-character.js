@@ -332,8 +332,27 @@ export default async function run({ canvas }) {
   out.notes.push(`unique colours in the centre ${W}x${H}: ${uniq.size}`);
   if (uniq.size < 12) bad('rendered character frame looks blank');
 
+  // Close-up beauty pass so the model itself can be eyeballed, not just the crowd.
   window.__shot = () => {
     for (const c of extra) c.visible = false;
+    for (let i = 0; i < chars.length; i++) chars[i].visible = i < 4;
+    const poses = ['idle', 'walk', 'aim', 'run'];
+    for (let i = 0; i < 4; i++) {
+      const c = chars[i];
+      c.position[0] = (i - 1.5) * 0.95;
+      c.position[2] = 0;
+      c.yaw = i === 3 ? 0 : (i === 2 ? Math.PI * 0.55 : Math.PI);
+      c.setState(poses[i], { restart: true });
+      for (let k = 0; k < 40; k++) {
+        c.update(1 / 60, { moveSpeed: speedFor(poses[i]), lookYaw: 0.2, aimPitch: 0.05, lod: 0 });
+      }
+    }
+    cam.position[0] = 0; cam.position[1] = 1.15; cam.position[2] = 2.55;
+    cam.yaw = 0; cam.pitch = -0.05;
+    for (let i = 0; i < chars.length; i++) {
+      if (!chars[i].visible) continue;
+      chars[i].update(1 / 60, { moveSpeed: 0, lod: 0 });
+    }
     drawFrame();
   };
   return out;

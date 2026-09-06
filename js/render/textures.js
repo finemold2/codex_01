@@ -28,7 +28,6 @@ const SQRT2 = Math.SQRT2;
 /** Font stacks used by signs, billboards and graffiti (Korean + display faces). */
 const FONT_KO = '"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR","Nanum Gothic","WenQuanYi Zen Hei","Unifont",sans-serif';
 const FONT_DISPLAY = '"Arial Black","Helvetica Neue",Impact,sans-serif';
-const FONT_MONO = '"Courier New",monospace';
 
 /** Base texture resolution per quality preset. */
 const QUALITY_SIZE = { low: 256, medium: 512, high: 1024, ultra: 1024 };
@@ -122,19 +121,6 @@ function ctx2d(canvas) {
  */
 function newImage(ctx, w, h) {
   return ctx.createImageData(w, h);
-}
-
-/**
- * Builds an `rgba()` CSS colour string.
- * @param {number} r Red 0..255.
- * @param {number} g Green 0..255.
- * @param {number} b Blue 0..255.
- * @param {number} [a] Alpha 0..1.
- * @returns {string} CSS colour.
- */
-function rgba(r, g, b, a) {
-  const al = a === undefined ? 1 : a;
-  return 'rgba(' + (r | 0) + ',' + (g | 0) + ',' + (b | 0) + ',' + al.toFixed(3) + ')';
 }
 
 /**
@@ -539,7 +525,12 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
   const fpx = new Float32Array(total);
   const fpy = new Float32Array(total);
   const fid = new Float32Array(total);
-  const rng = new Rand((noise.perm[7] << 16) ^ (cellsX * 131 + cellsY * 17) ^ 0x9e37);
+  /* Mix several permutation entries: a single byte would let two Worley layers
+     with the same cell counts collide onto an identical feature-point layout. */
+  const perm = noise.perm;
+  let fseed = (cellsX * 131 + cellsY * 17) ^ 0x9e3779b1;
+  for (let i = 0; i < 16; i++) fseed = (Math.imul(fseed ^ perm[i * 17], 2654435761) ^ (fseed >>> 15)) | 0;
+  const rng = new Rand(fseed >>> 0 || 1);
   for (let i = 0; i < total; i++) {
     fpx[i] = 0.5 + (rng.next() - 0.5) * jitter;
     fpy[i] = 0.5 + (rng.next() - 0.5) * jitter;
@@ -1110,15 +1101,19 @@ function genAsphalt(S, seed) {
 }
 
 /**
- * UV rectangles of the `roadLines` atlas, in **GL texture space** — the same
- * space every texture in this library is uploaded in (`flipY`, so `v = 0` is
- * the bottom of the source canvas and `v = 1` the top). Each entry is the
- * sub-rectangle `{u0, v0, u1, v1}` to map onto a road quad.
+ * UV rectangles of the `roadLines` atlas, in **canvas space** — the space the
+ * atlas is drawn in, where `v = 0` is the *top* row of the source canvas and
+ * `v` grows downwards. Consumers that map the atlas onto GL geometry must flip
+ * it once (`v_gl = 1 - v_canvas`), because the library uploads every texture
+ * with `flipY` so the canvas top row lands at `v = 1`.
+ * (`world/worldbuild.js` does exactly that in its `glRect()` helper; this table
+ * is byte-for-byte the layout its `FALLBACK_MARKING_UV` copy describes.)
  *
- * Layout (bottom to top): arrows + parking marks, then the crosswalk band,
- * then the line primitives. Arrows point towards **increasing v**, so a lane
- * quad whose v axis runs along the direction of travel gets them right.
- * `dash` is a single dash-and-gap cell: tile it along v to make a dashed line.
+ * Layout (top to bottom in the canvas): the line primitives, then the crosswalk
+ * band, then the arrows and parking marks. Arrows point towards **decreasing
+ * canvas v** — i.e. towards increasing GL v — so a lane quad whose GL v axis
+ * runs along the direction of travel gets them right. `dash` is a single
+ * dash-and-gap cell: tile it along the road to make a dashed line.
  *
  * @type {{dash:{u0:number,v0:number,u1:number,v1:number},
  *         solid:{u0:number,v0:number,u1:number,v1:number},
@@ -1131,15 +1126,15 @@ function genAsphalt(S, seed) {
  *         parking:{u0:number,v0:number,u1:number,v1:number}}}
  */
 export const ROAD_MARKING_UV = {
-  dash: { u0: 0.00, v0: 0.75, u1: 0.25, v1: 1.00 },
-  solid: { u0: 0.25, v0: 0.75, u1: 0.50, v1: 1.00 },
-  doubleYellow: { u0: 0.50, v0: 0.75, u1: 0.75, v1: 1.00 },
-  stopBar: { u0: 0.75, v0: 0.75, u1: 1.00, v1: 1.00 },
+  dash: { u0: 0.00, v0: 0.00, u1: 0.25, v1: 0.25 },
+  solid: { u0: 0.25, v0: 0.00, u1: 0.50, v1: 0.25 },
+  doubleYellow: { u0: 0.50, v0: 0.00, u1: 0.75, v1: 0.25 },
+  stopBar: { u0: 0.75, v0: 0.00, u1: 1.00, v1: 0.25 },
   crosswalk: { u0: 0.00, v0: 0.25, u1: 1.00, v1: 0.75 },
-  arrowStraight: { u0: 0.00, v0: 0.00, u1: 0.25, v1: 0.25 },
-  arrowLeft: { u0: 0.25, v0: 0.00, u1: 0.50, v1: 0.25 },
-  arrowRight: { u0: 0.50, v0: 0.00, u1: 0.75, v1: 0.25 },
-  parking: { u0: 0.75, v0: 0.00, u1: 1.00, v1: 0.25 }
+  arrowStraight: { u0: 0.00, v0: 0.75, u1: 0.25, v1: 1.00 },
+  arrowLeft: { u0: 0.25, v0: 0.75, u1: 0.50, v1: 1.00 },
+  arrowRight: { u0: 0.50, v0: 0.75, u1: 0.75, v1: 1.00 },
+  parking: { u0: 0.75, v0: 0.75, u1: 1.00, v1: 1.00 }
 };
 
 /**
@@ -1456,7 +1451,6 @@ function genMetal(S, seed) {
   const dents = fbmField(S, S, new NoiseSource(seed + 43), { freq: 9, octaves: 3 });
 
   const PANELS = 2;
-  const rivetR = S * 0.008;
   const height = new Float32Array(S * S);
   const pScale = PANELS / S, rScale = PANELS * 16 / S;
   for (let y = 0; y < S; y++) {
@@ -1477,7 +1471,6 @@ function genMetal(S, seed) {
         const dx = (nrx - 0.5), dy = (nry - 0.5);
         const d = Math.sqrt(dx * dx + dy * dy);
         rivet = 1 - ss(0.16, 0.26, d);
-        if (nearSeamX && nearSeamY) rivet *= 1;
       }
 
       let base = 128 + (brush[i] - 0.5) * 46 + (dents[i] - 0.5) * 16;
@@ -2085,13 +2078,11 @@ function genGlassFacade(S, seed) {
 
   const mullionW = 0.030, centreW = 0.014, spandrelTop = 0.74, glassTop = 0.07;
   const fScale = FLOORS / S, cScale = COLS / S;
-  const invGlass = 1 / (spandrelTop - glassTop);
   for (let y = 0; y < S; y++) {
     const row = y * S;
     const fy = y * fScale, fl = Math.floor(fy), ly = fy - fl;
     const inSpandrel = ly >= spandrelTop;
     const inTransom = ly < glassTop;
-    const tRow = sat((ly - glassTop) * invGlass);
     for (let x = 0; x < S; x++) {
       const i = row + x;
       const fx = x * cScale, cl = Math.floor(fx), lx = fx - cl;
@@ -2180,11 +2171,10 @@ function genOfficeFacade(S, seed) {
 
   const WX0 = 0.17, WX1 = 0.83, WY0 = 0.20, WY1 = 0.74;
   const FRAME = 0.030;
-  const fScale = FLOORS / S, cScale = COLS / S, invWin = 1 / (WY1 - WY0);
+  const fScale = FLOORS / S, cScale = COLS / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
     const fy = y * fScale, fl = Math.floor(fy), ly = fy - fl;
-    const tRow = sat((ly - WY0) * invWin);
     const yInWin = ly > WY0 && ly < WY1;
     for (let x = 0; x < S; x++) {
       const i = row + x;
@@ -2277,11 +2267,10 @@ function genApartmentFacade(S, seed) {
 
   const WX0 = 0.13, WX1 = 0.87, WY0 = 0.13, WY1 = 0.70;
   const RAIL_TOP = 0.44, RAIL_BOT = 0.74, SLAB_BOT = 0.82;
-  const fScale = FLOORS / S, cScale = COLS / S, invWin = 1 / (WY1 - WY0);
+  const fScale = FLOORS / S, cScale = COLS / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
     const fy = y * fScale, fl = Math.floor(fy), ly = fy - fl;
-    const tRow = sat((ly - WY0) * invWin);
     const yInWin = ly > WY0 && ly < WY1;
     const inRail = ly > RAIL_TOP && ly < RAIL_BOT;
     const inSlab = ly >= RAIL_BOT && ly < SLAB_BOT;
@@ -2389,11 +2378,10 @@ function genGroundFloorShops(S, seed) {
   const mask = new Float32Array(S * S);
 
   const CORNICE = 0.06, SIGN0 = 0.06, SIGN1 = 0.26, GLASS0 = 0.32, GLASS1 = 0.88;
-  const invS = 1 / S, shopScale = SHOPS / S, invGlass = 1 / (GLASS1 - GLASS0);
+  const invS = 1 / S, shopScale = SHOPS / S;
   for (let y = 0; y < S; y++) {
     const row = y * S;
     const v = y * invS;
-    const tRow = sat((v - GLASS0) * invGlass);
     for (let x = 0; x < S; x++) {
       const i = row + x;
       const fx = x * shopScale, sh = Math.floor(fx), lx = fx - sh;
@@ -2664,6 +2652,7 @@ function genNeonSign(index, S, seed) {
     const g = 0.88 + grime[i] * 0.24;
     px[p] *= g; px[p + 1] *= g; px[p + 2] *= g;
   }
+  bleedAlpha(px, W, H, 3);
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
@@ -3357,7 +3346,7 @@ function genSkyStars(W, H, seed) {
     const x = rng.next() * W, y = rng.next() * H;
     const b = rng.range(1.1, 2.2);
     splatStar(bright, W, H, x, y, rng.range(1.6, 2.8), b);
-    const arm = Math.round(W * 0.012);
+    const arm = Math.max(1, Math.round(W * 0.012));
     for (let k = -arm; k <= arm; k++) {
       const f = (1 - Math.abs(k) / arm) * b * 0.35;
       let xx = (Math.round(x) + k) % W; if (xx < 0) xx += W;
@@ -3416,25 +3405,26 @@ function genNoiseBlue(S, seed) {
   return { canvas: canvas, pixels: px };
 }
 
+/** Ramp order inside the `gradientRamp` LUT, bottom row of the canvas last. */
+const RAMP_NAMES = ['fog', 'fire', 'smoke', 'water', 'health', 'heat', 'neon', 'sunset'];
+
 /**
  * Row centres of each ramp inside the `gradientRamp` LUT texture, in GL texture
  * space (`v = 0` is the bottom of the source canvas, matching how the library
  * uploads it). Sample with `texture(gradientRamp, vec2(t, GRADIENT_RAMP_ROWS.fire))`.
+ *
+ * Derived from {@link RAMP_NAMES} so the table can never drift out of step with
+ * the rows {@link genGradientRamp} actually rasterises.
  * @type {{fog:number, fire:number, smoke:number, water:number,
  *         health:number, heat:number, neon:number, sunset:number}}
  */
-export const GRADIENT_RAMP_ROWS = {
-  fog: 0.9375,
-  fire: 0.8125,
-  smoke: 0.6875,
-  water: 0.5625,
-  health: 0.4375,
-  heat: 0.3125,
-  neon: 0.1875,
-  sunset: 0.0625
-};
+export const GRADIENT_RAMP_ROWS = (() => {
+  const rows = {};
+  for (let i = 0; i < RAMP_NAMES.length; i++) rows[RAMP_NAMES[i]] = 1 - (i + 0.5) / RAMP_NAMES.length;
+  return rows;
+})();
 
-/** Stop tables for {@link genGradientRamp}: `[t, r, g, b, a]`. */
+/** Stop tables for {@link genGradientRamp}, in {@link RAMP_NAMES} order: `[t, r, g, b, a]`. */
 const RAMP_STOPS = [
   [[0, 150, 170, 195, 0], [0.5, 176, 196, 216, 140], [1, 210, 224, 238, 255]],
   [[0, 0, 0, 0, 0], [0.14, 92, 12, 4, 190], [0.4, 234, 66, 12, 255], [0.7, 255, 168, 40, 255], [0.9, 255, 240, 182, 255], [1, 255, 255, 255, 255]],
@@ -3447,21 +3437,26 @@ const RAMP_STOPS = [
 ];
 
 /**
- * Horizontal LUT ramps stacked vertically (fog, fire, smoke, water, health,
- * heat, neon, sunset). See {@link GRADIENT_RAMP_ROWS}.
+ * Horizontal LUT ramps stacked vertically in {@link RAMP_NAMES} order.
+ * See {@link GRADIENT_RAMP_ROWS}.
  * @param {number} W Ramp resolution (256 recommended).
- * @param {number} H Total height; must be a multiple of the row count.
+ * @param {number} H Total height (a multiple of the row count keeps the bands
+ *   exactly even; other heights still produce complete, gap-free bands).
  * @returns {{canvas:(HTMLCanvasElement|OffscreenCanvas), pixels:Uint8ClampedArray}} Result.
  */
 function genGradientRamp(W, H) {
   const rows = RAMP_STOPS.length;
-  const rowH = H / rows;
+  /* Integer band bounds: a fractional rowH would produce non-integer pixel
+     indices, and writes through those are silently dropped (leaving black,
+     fully transparent rows in the LUT). */
   const canvas = createCanvas(W, H);
   const ctx = ctx2d(canvas);
   const img = newImage(ctx, W, H);
   const px = img.data;
   for (let r = 0; r < rows; r++) {
     const stops = RAMP_STOPS[r];
+    const y0 = Math.round(r * H / rows);
+    const y1 = r === rows - 1 ? H : Math.round((r + 1) * H / rows);
     for (let x = 0; x < W; x++) {
       const t = x / (W - 1);
       let s = 0;
@@ -3473,8 +3468,8 @@ function genGradientRamp(W, H) {
       const cg = lerp(a[2], b[2], f);
       const cb = lerp(a[3], b[3], f);
       const ca = lerp(a[4], b[4], f);
-      for (let y = 0; y < rowH; y++) {
-        const p = ((r * rowH + y) * W + x) * 4;
+      for (let y = y0; y < y1; y++) {
+        const p = (y * W + x) * 4;
         px[p] = cr; px[p + 1] = cg; px[p + 2] = cb; px[p + 3] = ca;
       }
     }
@@ -3529,7 +3524,7 @@ function makeTexture(gl, canvas, pixels, opts) {
         /* Match Texture2D.fromCanvas: the canvas top row maps to v = 1. */
         flipY: true
       });
-    } catch (err) {
+    } catch {
       /* Fall back to the canvas path if the data path is unavailable. */
     }
   }

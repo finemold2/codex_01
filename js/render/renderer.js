@@ -1907,6 +1907,9 @@ export class Renderer {
         this._depthCopyOk = false;
         this._depthCopy.dispose();
         this._depthCopy = null;
+        // Drop the reference before the target goes away, or the particle pass would sample
+        // a deleted texture.
+        particles.setDepthTexture(null);
         console.warn('[renderer] scene depth blit rejected (GL error 0x' + err.toString(16) +
           '); soft particles fall back to the driver default.');
         return;

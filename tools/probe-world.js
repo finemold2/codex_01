@@ -171,7 +171,19 @@ export default async function run({ canvas }) {
     night: { pos: [city.spawns.player.x - 200, 120, city.spawns.player.z + 280], yaw: 0.62, pitch: -0.26, hour: 22.0 },
   };
   window.__shot = async (name = 'aerial') => {
-    const v = VIEWS[name] || VIEWS.aerial;
+    const spec = String(name || 'aerial').split(':');
+    const v = VIEWS[spec[0]] || VIEWS.aerial;
+    // Optional post-FX overrides, e.g. --view "street:grain=0,chromatic=0,exposure=1.4"
+    if (spec[1] && renderer.postParams) {
+      for (const kv of spec[1].split(',')) {
+        const [k, val] = kv.split('=');
+        if (k && val !== undefined && k in renderer.postParams) renderer.postParams[k] = Number(val);
+      }
+      if (spec[1].includes('exposure=') && renderer.setExposure) {
+        const e = Number(spec[1].split('exposure=')[1].split(',')[0]);
+        if (Number.isFinite(e)) renderer.setExposure(e);
+      }
+    }
     cam.position[0] = v.pos[0]; cam.position[1] = v.pos[1]; cam.position[2] = v.pos[2];
     cam.yaw = v.yaw; cam.pitch = v.pitch;
     cam.update(canvas.width / canvas.height);

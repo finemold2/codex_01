@@ -24,13 +24,14 @@
  *    `(ONE, ONE_MINUS_SRC_ALPHA)`, additive particles with `(ONE, ONE)`.
  *  - Colours are linear HDR radiance in the renderer's scale (a sunlit white surface is
  *    around 2.5), so emissive particles bloom naturally after the tonemap.
- *  - Soft particles need `setDepthTexture(tex, near, far)`. If the renderer never calls it,
- *    the system falls back to `renderer.hdr.depthTex`. Sampling a texture that is still
- *    attached to the bound framebuffer is a feedback loop (Chrome raises INVALID_OPERATION
- *    even with depth writes off), so the first soft draw is validated with `gl.getError()`:
- *    on failure the system transparently switches to blitting the depth buffer into a private
- *    copy, and only if that fails too does it give up on soft particles. Either way a bad
- *    depth texture can never break a frame.
+ *  - Soft particles need `setDepthTexture(tex, near, far)`, and the renderer owns that call:
+ *    from the first one onward `null` means "no scene depth this frame", never "guess". Only
+ *    a system nobody drives falls back to `renderer.hdr.depthTex` on its own.
+ *    Sampling a texture that is still attached to the bound framebuffer is a feedback loop
+ *    (Chrome raises INVALID_OPERATION even with depth writes off), so the first soft draw with
+ *    any given texture is validated with `gl.getError()`: on failure the system transparently
+ *    switches to blitting the depth buffer into a private copy, and only if that fails too
+ *    does it give up. Either way a bad depth texture can never break a frame.
  *  - Point lights are requested through `onLight(x, y, z, r, g, b, radius, intensity)`, which
  *    defaults to `renderer.submitLight`. The renderer may replace it at any time.
  */
@@ -550,10 +551,19 @@ function spriteSample(cell, u, v) {
 }
 
 /**
- * Rasterises the whole 4x4 sprite atlas into an RGBA byte buffer.
+ * Cached procedural atlas pixels. Rasterising the 16 sprites costs a few milliseconds, and the
+ * atlas is rebuilt once more when the texture library shows up, so the result is kept.
+ * Treated as immutable by every consumer.
+ * @type {Uint8ClampedArray|null}
+ */
+let ATLAS_BASE = null;
+
+/**
+ * Rasterises the whole 4x4 sprite atlas into an RGBA byte buffer, memoised.
  * @returns {Uint8ClampedArray} `ATLAS_W * ATLAS_H * 4` bytes, row 0 at the top.
  */
 function buildAtlasPixels() {
+  if (ATLAS_BASE) return ATLAS_BASE;
   const px = new Uint8ClampedArray(ATLAS_W * ATLAS_H * 4);
   const inv = 1 / (ATLAS_CELL - 1);
   for (let cell = 0; cell < ATLAS_COLS * ATLAS_ROWS; cell++) {
@@ -572,6 +582,7 @@ function buildAtlasPixels() {
       }
     }
   }
+  ATLAS_BASE = px;
   return px;
 }
 
@@ -885,6 +896,8 @@ export class ParticleSystem {
     this.atlas = null;
     /** @type {Object|null} Explicit depth texture set by the renderer. */
     this._depthTex = null;
+    /** @type {boolean} True once `setDepthTexture` has been called at least once. */
+    this._depthDriven = false;
     /** @type {number} */
     this._depthNear = 0.12;
     /** @type {number} */
@@ -1116,15 +1129,34 @@ export class ParticleSystem {
     this._shaderSoft = new Shader(gl, PARTICLE_VS, PARTICLE_FS,
       { ATLAS_COLS: ATLAS_COLS, ATLAS_ROWS: ATLAS_ROWS, SOFT_PARTICLES: 1 }, 'particles-soft');
 
-    this.atlas = buildAtlasTexture(gl, this.renderer ? this.renderer.textures : null);
+    /** @type {boolean} True once the atlas has been built from the texture library. */
+    this._atlasFromLibrary = false;
+    /** @type {Object|null} Library the current atlas was built from (identity, not contents). */
+    this._atlasLibrary = this.renderer ? (this.renderer.textures || null) : null;
+    this.rebuildAtlas(this._atlasLibrary);
+  }
+
+  /**
+   * (Re)builds the sprite atlas, compositing the texture library's particle sprites over the
+   * procedural cells. The `Renderer` constructs this system before `renderer.textures` exists,
+   * so `update()` calls this once by itself as soon as the library shows up; call it directly
+   * only to force a different library in.
+   * @param {Object|null} [library] Texture library (defaults to `renderer.textures`).
+   * @returns {boolean} True when the library supplied at least one sprite.
+   */
+  rebuildAtlas(library) {
+    const gl = this.gl;
+    const lib = library === undefined ? (this.renderer ? this.renderer.textures : null) : library;
+    const next = buildAtlasTexture(gl, lib);
     // Cap the mip chain so the 4x4 atlas cells never bleed into each other at distance.
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.atlas.texture);
+    gl.bindTexture(gl.TEXTURE_2D, next.texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 3);
     gl.bindTexture(gl.TEXTURE_2D, null);
-
-    /** @type {boolean} True once the atlas has been rebuilt from the texture library. */
-    this._atlasFromLibrary = this.atlas.spriteSources > 0;
+    if (this.atlas && this.atlas.dispose) this.atlas.dispose();
+    this.atlas = next;
+    this._atlasFromLibrary = next.spriteSources > 0;
+    return this._atlasFromLibrary;
   }
 
   /**
@@ -1155,12 +1187,17 @@ export class ParticleSystem {
    * @returns {void}
    */
   setDepthTexture(texture, near, far) {
-    if (texture !== this._depthTex) {
+    const tex = texture || null;
+    if (tex !== this._depthTex) {
       // A new source deserves a fresh feedback-loop verdict.
       this._depthMode = 0;
       this._softProbe = true;
     }
-    this._depthTex = texture || null;
+    // From the first call on, the renderer owns the scene depth: `null` then means "no depth
+    // this frame", not "go and find one yourself". Guessing here would re-form the very
+    // feedback loop a renderer that publishes a depth copy is working to avoid.
+    this._depthDriven = true;
+    this._depthTex = tex;
     if (near !== undefined && near > 0) this._depthNear = near;
     if (far !== undefined && far > 0) this._depthFar = far;
   }
@@ -1375,9 +1412,18 @@ export class ParticleSystem {
    * @param {number} y World Y.
    * @param {number} z World Z.
    * @param {number} count Number of particles to try to emit.
-   * @param {Object} [opts] Tuning: `{power, dir:[x,y,z], spread, speed, size, life,
-   *   color:[r,g,b], colorEnd:[r,g,b], alpha, velocity:[x,y,z], groundY, light}` plus any
-   *   {@link ParticleSystem#spawn} field, which overrides the preset for every particle.
+   * @param {Object} [opts] Tuning, all optional:
+   *   - `power` energy multiplier, 1 = a normal instance. Sizes scale with its square root and
+   *     speeds/light radii linearly, so passing a blast radius (6, 12, ...) yields a bigger,
+   *     harder burst instead of screen-filling sprites.
+   *   - `dir:[x,y,z]` main direction (surface normal for impacts, barrel axis for muzzles).
+   *   - `spread` 0..1 cone half-width around `dir`; `speed`, `size`, `life` replace the
+   *     preset's base value, which the preset still randomizes around.
+   *   - `color:[r,g,b]`, `colorEnd:[r,g,b]`, `alpha` override the whole burst.
+   *   - `velocity:[x,y,z]` inherited velocity added to every particle (a moving car's exhaust).
+   *   - `groundY` plane the bouncing kinds land on; defaults to `y`.
+   *   - plus any {@link ParticleSystem#spawn} field except the motion ones the preset owns
+   *     (`x/y/z`, `vx/vy/vz`, `life`, `size`), which are consumed as bases instead.
    * @returns {number} Number of particles emitted.
    */
   burst(kind, x, y, z, count, opts = null) {
@@ -1429,6 +1475,10 @@ export class ParticleSystem {
    */
   _preset(name, i, n, power, spread, groundY, o) {
     const rng = this.rng;
+    // Gameplay passes a blast radius as `power` (see `Game.explosionAt`), so sizes scale with
+    // its square root while speeds stay linear: a 6 m blast makes puffs ~2.4x bigger and hurls
+    // them 6x harder, instead of inflating every sprite until it fills the screen.
+    const sizePow = Math.sqrt(power);
     const baseSpeed = o && o.speed !== undefined ? o.speed : -1;
     const baseSize = o && o.size !== undefined ? o.size : -1;
     const baseLife = o && o.life !== undefined ? o.life : -1;
@@ -1443,7 +1493,7 @@ export class ParticleSystem {
         buildBasis();
         if (i === 0) {
           P.sprite = SPR_MUZZLE;
-          P.size = (baseSize > 0 ? baseSize : 0.42) * power;
+          P.size = (baseSize > 0 ? baseSize : 0.42) * sizePow;
           P.sizeEnd = P.size * 1.5;
           P.life = baseLife > 0 ? baseLife : 0.055;
           P.rot = rng.range(0, Math.PI * 2);
@@ -1485,7 +1535,7 @@ export class ParticleSystem {
           P.vx = dx * rng.range(0.6, 2.4) + rng.range(-0.4, 0.4);
           P.vy = dy * rng.range(0.6, 2.0) + rng.range(0.1, 0.7);
           P.vz = dz * rng.range(0.6, 2.4) + rng.range(-0.4, 0.4);
-          P.size = rng.range(0.05, 0.12) * power;
+          P.size = rng.range(0.05, 0.12) * sizePow;
           P.sizeEnd = P.size * rng.range(4, 7);
           P.life = rng.range(0.35, 0.75);
           P.gravity = 0.5;
@@ -1516,7 +1566,7 @@ export class ParticleSystem {
         const oz = (TAN[2] * Math.cos(ang) + TAN[5] * Math.sin(ang)) * rad;
         if (i === 0) {
           P.sprite = SPR_FLASH;
-          P.size = 0.22 * power;
+          P.size = 0.22 * sizePow;
           P.sizeEnd = 0.05;
           P.life = 0.06;
           P.r = 2.6; P.g = 2.0; P.b = 1.2;
@@ -1550,7 +1600,7 @@ export class ParticleSystem {
           P.vx = (dx + ox) * s;
           P.vy = (dy + oy) * s;
           P.vz = (dz + oz) * s;
-          P.size = (baseSize > 0 ? baseSize : rng.range(0.07, 0.16)) * power;
+          P.size = (baseSize > 0 ? baseSize : rng.range(0.07, 0.16)) * sizePow;
           P.sizeEnd = P.size * rng.range(3.0, 5.5);
           P.life = rng.range(0.35, 0.85);
           P.gravity = -0.4;
@@ -1579,7 +1629,7 @@ export class ParticleSystem {
           P.vx = rng.range(-0.5, 0.5);
           P.vy = rng.range(0.1, 0.9);
           P.vz = rng.range(-0.5, 0.5);
-          P.size = rng.range(0.1, 0.2) * power;
+          P.size = rng.range(0.1, 0.2) * sizePow;
           P.sizeEnd = P.size * rng.range(2.5, 4.5);
           P.life = rng.range(0.3, 0.6);
           P.gravity = -0.6;
@@ -1595,7 +1645,7 @@ export class ParticleSystem {
           P.vx = (DIR[0] + ox) * s;
           P.vy = (DIR[1] + oy) * s + rng.range(0.2, 1.6);
           P.vz = (DIR[2] + oz) * s;
-          P.size = (baseSize > 0 ? baseSize : rng.range(0.035, 0.12)) * power;
+          P.size = (baseSize > 0 ? baseSize : rng.range(0.035, 0.12)) * sizePow;
           P.sizeEnd = P.size * rng.range(0.8, 1.3);
           P.life = (baseLife > 0 ? baseLife : rng.range(0.5, 1.2));
           P.gravity = -15;
@@ -1624,7 +1674,7 @@ export class ParticleSystem {
         P.vx = (DIR[0] + ox) * s;
         P.vy = (DIR[1] + oy) * s;
         P.vz = (DIR[2] + oz) * s;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.02, 0.055)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.02, 0.055)) * sizePow;
         P.sizeEnd = P.size * 0.35;
         P.life = (baseLife > 0 ? baseLife : rng.range(0.3, 0.95));
         P.gravity = name === 'ember' ? -1.6 : -11.5;
@@ -1654,7 +1704,7 @@ export class ParticleSystem {
         P.vx = (DIR[0] + ox) * s;
         P.vy = (DIR[1] + oy) * s + rng.range(1, 4);
         P.vz = (DIR[2] + oz) * s;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.05, 0.19)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.05, 0.19)) * sizePow;
         P.sizeEnd = P.size * 0.85;
         P.life = (baseLife > 0 ? baseLife : rng.range(1.0, 2.4));
         P.gravity = -17;
@@ -1684,7 +1734,7 @@ export class ParticleSystem {
         P.vx = (DIR[0] + ox) * s;
         P.vy = (DIR[1] + oy) * s + rng.range(0.5, 2.5);
         P.vz = (DIR[2] + oz) * s;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.035, 0.115)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.035, 0.115)) * sizePow;
         P.sizeEnd = P.size;
         P.life = (baseLife > 0 ? baseLife : rng.range(0.8, 1.8));
         P.gravity = -16;
@@ -1708,7 +1758,7 @@ export class ParticleSystem {
         P.vx = DIR[0] * s + rng.range(-0.5, 0.5);
         P.vy = DIR[1] * s + rng.range(1.6, 3.0);
         P.vz = DIR[2] * s + rng.range(-0.5, 0.5);
-        P.size = (baseSize > 0 ? baseSize : 0.055) * power;
+        P.size = (baseSize > 0 ? baseSize : 0.055) * sizePow;
         P.sizeEnd = P.size;
         P.life = (baseLife > 0 ? baseLife : rng.range(2.2, 3.4));
         P.gravity = -19;
@@ -1731,7 +1781,7 @@ export class ParticleSystem {
         P.vx = Math.cos(ang) * rad;
         P.vy = rng.range(0.5, 2.0) * Math.sqrt(power);
         P.vz = Math.sin(ang) * rad;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.35, 0.75)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.35, 0.75)) * sizePow;
         P.sizeEnd = P.size * rng.range(2.6, 4.4);
         P.life = (baseLife > 0 ? baseLife : rng.range(1.6, 3.6));
         P.gravity = 0.5;
@@ -1753,7 +1803,7 @@ export class ParticleSystem {
         P.vx = Math.cos(ang) * rad;
         P.vy = rng.range(0.4, 1.5);
         P.vz = Math.sin(ang) * rad;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.28, 0.5)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.28, 0.5)) * sizePow;
         P.sizeEnd = P.size * rng.range(3.0, 4.6);
         P.life = (baseLife > 0 ? baseLife : rng.range(0.7, 1.6));
         P.gravity = 0.65;
@@ -1773,7 +1823,7 @@ export class ParticleSystem {
         P.vx = Math.cos(ang) * rng.range(0.1, 0.6);
         P.vy = rng.range(0.05, 0.35);
         P.vz = Math.sin(ang) * rng.range(0.1, 0.6);
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.35, 0.7)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.35, 0.7)) * sizePow;
         P.sizeEnd = P.size * rng.range(1.4, 2.2);
         P.life = (baseLife > 0 ? baseLife : rng.range(1.2, 2.6));
         P.gravity = 0.05;
@@ -1794,7 +1844,7 @@ export class ParticleSystem {
         P.vx = DIR[0] * s + rng.range(-0.25, 0.25);
         P.vy = DIR[1] * s + rng.range(0.15, 0.7);
         P.vz = DIR[2] * s + rng.range(-0.25, 0.25);
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.08, 0.16)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.08, 0.16)) * sizePow;
         P.sizeEnd = P.size * rng.range(3.0, 5.0);
         P.life = (baseLife > 0 ? baseLife : rng.range(0.45, 1.0));
         P.gravity = 0.4;
@@ -1815,7 +1865,7 @@ export class ParticleSystem {
         P.vx = Math.cos(ang) * rad;
         P.vy = rng.range(1.2, 4.0) * Math.sqrt(power);
         P.vz = Math.sin(ang) * rad;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.22, 0.5)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.22, 0.5)) * sizePow;
         P.sizeEnd = P.size * (t > 0.82 ? 0.2 : rng.range(0.25, 0.6));
         P.life = (baseLife > 0 ? baseLife : rng.range(0.35, 0.85));
         P.gravity = 2.6;
@@ -1846,8 +1896,8 @@ export class ParticleSystem {
         const oz = TAN[2] * Math.cos(ang) + TAN[5] * Math.sin(ang);
         if (i === 0) {
           P.sprite = SPR_FLASH;
-          P.size = 2.4 * power;
-          P.sizeEnd = 5.5 * power;
+          P.size = 2.4 * sizePow;
+          P.sizeEnd = 5.5 * sizePow;
           P.life = 0.14;
           P.rot = rng.range(0, Math.PI * 2);
           P.r = 5.0; P.g = 3.4; P.b = 1.7;
@@ -1862,8 +1912,8 @@ export class ParticleSystem {
           // Shock ring: it has to read as an expanding rim in the first few frames, not as a
           // donut hanging in the air, so it is short lived and fades as it grows.
           P.sprite = SPR_RING;
-          P.size = 0.9 * power;
-          P.sizeEnd = 6.5 * power;
+          P.size = 0.9 * sizePow;
+          P.sizeEnd = 6.5 * sizePow;
           P.life = 0.26;
           P.r = 2.2; P.g = 1.5; P.b = 0.9;
           P.r2 = 0.7; P.g2 = 0.35; P.b2 = 0.12;
@@ -1876,7 +1926,7 @@ export class ParticleSystem {
           P.vx = ox * rad * s;
           P.vy = oy * rad * s + rng.range(1, 5);
           P.vz = oz * rad * s;
-          P.size = rng.range(0.7, 1.5) * power;
+          P.size = rng.range(0.7, 1.5) * sizePow;
           P.sizeEnd = P.size * rng.range(2.0, 3.4);
           P.life = rng.range(0.35, 0.9);
           P.gravity = 2.0;
@@ -1895,7 +1945,7 @@ export class ParticleSystem {
           P.vx = ox * rad * s;
           P.vy = oy * rad * s + rng.range(0.5, 3);
           P.vz = oz * rad * s;
-          P.size = rng.range(1.0, 2.2) * power;
+          P.size = rng.range(1.0, 2.2) * sizePow;
           P.sizeEnd = P.size * rng.range(2.4, 4.0);
           P.life = rng.range(1.8, 4.2);
           P.gravity = 0.7;
@@ -1932,7 +1982,7 @@ export class ParticleSystem {
           P.vx = ox * rad * s;
           P.vy = oy * rad * s + rng.range(3, 10);
           P.vz = oz * rad * s;
-          P.size = rng.range(0.08, 0.24) * power;
+          P.size = rng.range(0.08, 0.24) * sizePow;
           P.sizeEnd = P.size * 0.9;
           P.life = rng.range(1.4, 3.0);
           P.gravity = -17;
@@ -1956,7 +2006,7 @@ export class ParticleSystem {
         P.vx = Math.cos(ang) * rad;
         P.vy = rng.range(0.15, 1.0);
         P.vz = Math.sin(ang) * rad;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.25, 0.55)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.25, 0.55)) * sizePow;
         P.sizeEnd = P.size * rng.range(2.0, 3.4);
         P.life = (baseLife > 0 ? baseLife : rng.range(0.9, 2.2));
         P.gravity = -0.2;
@@ -1980,8 +2030,8 @@ export class ParticleSystem {
         const oz = (TAN[2] * Math.cos(ang) + TAN[5] * Math.sin(ang)) * rad;
         if (i === 0) {
           P.sprite = SPR_SPLASH;
-          P.size = 0.3 * power;
-          P.sizeEnd = 1.3 * power;
+          P.size = 0.3 * sizePow;
+          P.sizeEnd = 1.3 * sizePow;
           P.life = 0.4;
           P.gravity = 0;
           P.drag = 3;
@@ -1995,7 +2045,7 @@ export class ParticleSystem {
           P.vx = (DIR[0] + ox) * s;
           P.vy = (DIR[1] + oy) * s + rng.range(0.5, 2.5);
           P.vz = (DIR[2] + oz) * s;
-          P.size = (baseSize > 0 ? baseSize : rng.range(0.02, 0.06)) * power;
+          P.size = (baseSize > 0 ? baseSize : rng.range(0.02, 0.06)) * sizePow;
           P.sizeEnd = P.size * 0.7;
           P.life = (baseLife > 0 ? baseLife : rng.range(0.3, 0.75));
           P.gravity = -13;
@@ -2016,7 +2066,7 @@ export class ParticleSystem {
         P.vx = Math.cos(ang) * rad;
         P.vy = rng.range(0.2, 1.8);
         P.vz = Math.sin(ang) * rad;
-        P.size = (baseSize > 0 ? baseSize : rng.range(0.07, 0.16)) * power;
+        P.size = (baseSize > 0 ? baseSize : rng.range(0.07, 0.16)) * sizePow;
         P.sizeEnd = P.size;
         P.life = (baseLife > 0 ? baseLife : rng.range(2.5, 6.0));
         P.gravity = -1.4;
@@ -2060,7 +2110,7 @@ export class ParticleSystem {
       case 'ring':
       default: {
         P.sprite = name === 'ring' ? SPR_RING : SPR_FLASH;
-        P.size = (baseSize > 0 ? baseSize : 0.8) * power;
+        P.size = (baseSize > 0 ? baseSize : 0.8) * sizePow;
         P.sizeEnd = P.size * (name === 'ring' ? 6 : 2.2);
         P.life = (baseLife > 0 ? baseLife : 0.16);
         P.rot = rng.range(0, Math.PI * 2);
@@ -2151,6 +2201,17 @@ export class ParticleSystem {
     const stats = this.stats;
     stats.killed = 0;
     stats.lights = 0;
+
+    // The renderer builds this system before `renderer.textures` is assigned, so pick the real
+    // sprites up the first frame they exist. Keyed on the library object, so a library without
+    // particle sprites is tried exactly once, not once per frame.
+    if (this.renderer) {
+      const lib = this.renderer.textures || null;
+      if (lib !== this._atlasLibrary) {
+        this._atlasLibrary = lib;
+        if (lib && lib.canvases) this.rebuildAtlas(lib);
+      }
+    }
 
     if (this.enabled && this.rainIntensity > 0 && camera && camera.position) this._updateRain(camera);
 
@@ -2595,7 +2656,10 @@ export class ParticleSystem {
   _resolveDepth() {
     if (!this.softParticles || this._depthMode === 2) return null;
     let source = this._depthTex;
-    if (!source && this.renderer && this.renderer.hdr) source = this.renderer.hdr.depthTex;
+    // Only guess when nobody has ever published a depth texture (standalone use).
+    if (!source && !this._depthDriven && this.renderer && this.renderer.hdr) {
+      source = this.renderer.hdr.depthTex;
+    }
     if (!source || !source.texture) return null;
     if (this._depthMode === 0) return source;
     return this._blitDepth(source);

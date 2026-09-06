@@ -488,26 +488,27 @@ export class Input {
     const canvas = this.canvas;
     if (!canvas || this.pointerLocked) return;
     if (typeof canvas.requestPointerLock !== 'function') return;
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const now = Input._now();
     if (now < this._lockCooldown) return;
+    // Retry without options: older browsers reject the `unadjustedMovement` dictionary outright.
+    // Every promise gets a rejection handler, otherwise a denied lock floods the console with
+    // "Uncaught (in promise) SecurityError" on every click.
+    const retry = () => {
+      try {
+        const again = canvas.requestPointerLock();
+        if (again && typeof again.then === 'function') {
+          again.then(null, () => { this._lockCooldown = Input._now() + 1200; });
+        }
+      } catch (err) {
+        this._lockCooldown = Input._now() + 1200;
+      }
+    };
     try {
       // `unadjustedMovement` disables OS mouse acceleration where supported (Chromium).
       const res = canvas.requestPointerLock({ unadjustedMovement: true });
-      if (res && typeof res.then === 'function') {
-        res.then(null, () => {
-          try {
-            canvas.requestPointerLock();
-          } catch (err) {
-            this._lockCooldown = now + 1200;
-          }
-        });
-      }
+      if (res && typeof res.then === 'function') res.then(null, retry);
     } catch (err) {
-      try {
-        canvas.requestPointerLock();
-      } catch (err2) {
-        this._lockCooldown = now + 1200;
-      }
+      retry();
     }
   }
 
@@ -761,13 +762,16 @@ export class Input {
     };
     for (let i = 0; i < this._touchButtons.length; i++) {
       if (this._touchButtons[i].id === entry.id) {
+        // Lift the old button first, otherwise an action held under a finger while the layout is
+        // swapped stays in `_touchActions` forever and the player keeps firing / driving.
+        this._touchRelease(this._touchButtons[i].action);
         this._touchButtons[i] = entry;
-        this.touch.buttons[action] = false;
+        if (this.touch.buttons[action] !== true) this.touch.buttons[action] = false;
         return;
       }
     }
     this._touchButtons.push(entry);
-    this.touch.buttons[action] = false;
+    if (this.touch.buttons[action] !== true) this.touch.buttons[action] = false;
   }
 
   /**
@@ -780,8 +784,8 @@ export class Input {
     for (let i = 0; i < this._touchButtons.length; i++) {
       if (this._touchButtons[i].id !== key) continue;
       const entry = this._touchButtons[i];
+      this._touchRelease(entry.action);
       this.touch.buttons[entry.action] = false;
-      this._touchActions.delete(entry.action);
       this._touchButtons.splice(i, 1);
       return;
     }
@@ -794,8 +798,8 @@ export class Input {
   clearTouchButtons() {
     for (let i = 0; i < this._touchButtons.length; i++) {
       const entry = this._touchButtons[i];
+      this._touchRelease(entry.action);
       this.touch.buttons[entry.action] = false;
-      this._touchActions.delete(entry.action);
     }
     this._touchButtons.length = 0;
   }
@@ -803,14 +807,27 @@ export class Input {
   // ==================================================================== test / debug hooks
 
   /**
-   * Injects a synthetic key event. Used by the headless smoke test and by replay tooling.
-   * @param {string} code `KeyboardEvent.code` (any casing)
+   * Injects a synthetic button event. Used by the headless smoke test and by replay tooling.
+   * The code is routed to the device it belongs to, so `isDown()` and `justPressed()` always
+   * agree: 'Mouse0'..'Mouse4' drive the mouse state, 'padA'/'pad0' style codes drive the pad
+   * state and everything else is treated as a keyboard code.
+   * @param {string} code `KeyboardEvent.code`, 'Mouse0'..'Mouse4' or a 'pad*' code (any casing)
    * @param {boolean} down true for keydown, false for keyup
    * @returns {void}
    */
   injectKey(code, down) {
     const norm = Input.normalizeCode(code);
     if (!norm) return;
+    const mouse = MOUSE_CODE_INDEX[norm];
+    if (mouse !== undefined) {
+      this._setMouseButton(mouse, !!down);
+      return;
+    }
+    const pad = PAD_CODE_INDEX[norm];
+    if (pad !== undefined) {
+      this._setPadButton(pad, !!down);
+      return;
+    }
     if (down) this._pressCode(norm);
     else this._releaseCode(norm);
   }
@@ -868,6 +885,15 @@ export class Input {
   static normalizeCode(code) {
     if (typeof code !== 'string' || code.length === 0) return '';
     return code.toLowerCase();
+  }
+
+  /**
+   * Monotonic-ish clock in milliseconds, with a `Date` fallback for non-browser hosts.
+   * @returns {number}
+   * @private
+   */
+  static _now() {
+    return typeof performance !== 'undefined' ? performance.now() : Date.now();
   }
 
   // ==================================================================== internals
@@ -980,6 +1006,28 @@ export class Input {
     this.buttons.left = this._mouseDown[0] !== 0;
     this.buttons.middle = this._mouseDown[1] !== 0;
     this.buttons.right = this._mouseDown[2] !== 0;
+  }
+
+  /**
+   * Updates one gamepad button, recording the press/release edge exactly once.
+   * @param {number} index index into `PAD_BUTTON_CODES`
+   * @param {boolean} down
+   * @returns {void}
+   * @private
+   */
+  _setPadButton(index, down) {
+    if (index < 0 || index >= this._padDown.length) return;
+    this._padState.buttons[PAD_BUTTON_NAMES[index]] = down;
+    const was = this._padDown[index] !== 0;
+    if (was === down) return;
+    this._padDown[index] = down ? 1 : 0;
+    const code = PAD_BUTTON_CODES[index];
+    if (down) {
+      this._pressed.add(code);
+      this._fireCode(code);
+    } else {
+      this._released.add(code);
+    }
   }
 
   /**
@@ -1197,17 +1245,7 @@ export class Input {
       }
       if (i === 6) state.lt = applyTrigger(value, tdz);
       else if (i === 7) state.rt = applyTrigger(value, tdz);
-      state.buttons[PAD_BUTTON_NAMES[i]] = down;
-      const was = this._padDown[i] !== 0;
-      if (was === down) continue;
-      this._padDown[i] = down ? 1 : 0;
-      const code = PAD_BUTTON_CODES[i];
-      if (down) {
-        this._pressed.add(code);
-        this._fireCode(code);
-      } else {
-        this._released.add(code);
-      }
+      this._setPadButton(i, down);
     }
     // Some pads report triggers only through the analog axes; keep the digital flag in sync.
     if (state.lt > 0.5 && this._padDown[6] === 0) state.buttons.lt = true;
@@ -1405,8 +1443,7 @@ export class Input {
    */
   _handlePointerLockError() {
     this.pointerLocked = false;
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    this._lockCooldown = now + 1200;
+    this._lockCooldown = Input._now() + 1200;
   }
 
   /**
