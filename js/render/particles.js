@@ -108,7 +108,7 @@ const MAX_STEP = 0.1;
  * pool over consecutive spawns instead, at a fixed cost each.
  * @type {number}
  */
-const RECYCLE_WINDOW = 1000000;
+const RECYCLE_WINDOW = 64;
 
 /* -------------------------------------------------------------------------- */
 /* Shaders                                                                     */

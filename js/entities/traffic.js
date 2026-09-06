@@ -1400,7 +1400,7 @@ export class TrafficManager {
     if (ai.hornTimer > HORN_COOLDOWN - 0.25) input.horn = true;
     else input.horn = false;
 
-    // traffic lights (never ignored unless panicking)
+    // traffic lights (never ignored unless panicking); unsignalled junctions get a yield rule
     if (!panicking && lane && lane.kind !== 'turn') {
       const stopDist = laneLen - ai.laneDist;
       if (stopDist < 40) {
@@ -1415,6 +1415,8 @@ export class TrafficManager {
             target = Math.min(target, room * 0.55);
             if (room < 1.2) target = 0;
           }
+        } else if (stopDist < 24) {
+          target = Math.min(target, this._yieldLimit(v, lane.toNode, x, z, yaw, stopDist));
         }
       }
     }
@@ -1480,6 +1482,58 @@ export class TrafficManager {
       for (let i = 0; i < list.length; i++) if (list[i].nodeId === nodeId) return list[i];
     }
     return null;
+  }
+
+  /**
+   * Give-way rule for an unsignalled junction.
+   *
+   * A driver yields to any crossing vehicle that is already closer to the node, and — when the
+   * two arrive together — to the one on its right, which is what stops two cars from deadlocking
+   * (or T-boning each other) at a four-way stop.
+   *
+   * @param {object} self The querying vehicle.
+   * @param {number} nodeId Node the lane leads into.
+   * @param {number} x Vehicle x.
+   * @param {number} z Vehicle z.
+   * @param {number} yaw Vehicle heading.
+   * @param {number} stopDist Distance to the stop line, metres.
+   * @returns {number} Speed limit in m/s (`Infinity` when the junction is clear).
+   * @private
+   */
+  _yieldLimit(self, nodeId, x, z, yaw, stopDist) {
+    const nodes = this.city.nodes;
+    const node = nodes && nodes[nodeId];
+    if (!node || (node.approaches !== undefined && node.approaches < 3)) return Infinity;
+    const list = this.game.vehicles;
+    if (!Array.isArray(list)) return Infinity;
+    const myD = Math.hypot(x - node.x, z - node.z);
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
+    const rx = Math.cos(yaw);
+    const rz = -Math.sin(yaw);
+    for (let i = 0; i < list.length; i++) {
+      const o = list[i];
+      if (o === self || !o || !o.position || o.isDestroyed) continue;
+      const ndx = o.position[0] - node.x;
+      const ndz = o.position[2] - node.z;
+      const od = Math.hypot(ndx, ndz);
+      if (od > 17) continue;
+      const oyaw = fin(o.yaw, 0);
+      const align = fx * -Math.sin(oyaw) + fz * -Math.cos(oyaw);
+      // Same street (heading with or against us): the car-following law already handles it.
+      if (align > 0.55 || align < -0.55) continue;
+      const ovx = fin(o.velocity ? o.velocity[0] : 0, 0);
+      const ovz = fin(o.velocity ? o.velocity[2] : 0, 0);
+      const ospeed = Math.hypot(ovx, ovz);
+      if (ospeed < 0.4 && od > 7) continue;
+      let give = od < myD - 1;
+      if (!give && Math.abs(od - myD) <= 1) {
+        // Simultaneous arrival: give way to the right.
+        give = (o.position[0] - x) * rx + (o.position[2] - z) * rz > 0;
+      }
+      if (give) return Math.max(0, (stopDist - 4.5) * 0.5);
+    }
+    return Infinity;
   }
 
   /**

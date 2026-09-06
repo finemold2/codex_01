@@ -1671,7 +1671,13 @@ export class PedManager {
     } else {
       // walk / cross
       if (ped.walkId >= 0) {
-        this._routePoint(ped, ped.carrot, 0, _pt);
+        if (state === 'cross' && !ped.crossing) {
+          // Waiting for the signal: aim at the kerb itself, never at the far side, so the
+          // arrive behaviour parks the ped on the pavement instead of easing into the road.
+          this.walks.sample(ped.walkId, this.walks.length(ped.walkId), _pt);
+        } else {
+          this._routePoint(ped, ped.carrot, 0, _pt);
+        }
         const dx = _pt[0] - ped.position[0];
         const dz = _pt[1] - ped.position[2];
         const l = Math.hypot(dx, dz);
@@ -1972,8 +1978,9 @@ export class PedManager {
 
     _ctx.moveSpeed = speed;
     _ctx.grounded = ped.grounded;
-    _ctx.aiming = false;
-    _ctx.aimPitch = 0;
+    _ctx.aiming = ped.state === 'hostile';
+    // idleKind 1 is "on the phone": head tipped down at the screen.
+    _ctx.aimPitch = ped.state === 'idle' && ped.idleKind === 1 ? -0.45 : 0;
     _ctx.crouching = ped.state === 'cower';
     _ctx.distance = ped.distToPlayer;
     // Idle peds glance around; chatting peds look at each other; fleeing peds look back.

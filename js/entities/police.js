@@ -1115,7 +1115,10 @@ export class PoliceSystem {
 
     let steer;
     let target;
-    if (dist < 55 && this.playerVisible) {
+    // One star is an investigation: the unit drives to the scene on the road network rather
+    // than locking on to the suspect. From two stars up it is an active pursuit.
+    const intercepting = this.wanted >= 2 && this.playerVisible && dist < 55;
+    if (intercepting) {
       // --- direct intercept ---------------------------------------------------------
       let ix = tx;
       let iz = tz;
@@ -1479,7 +1482,8 @@ export class PoliceSystem {
       const pSpeed = Math.hypot(fin(player.velocity ? player.velocity[0] : 0, 0),
         fin(player.velocity ? player.velocity[2] : 0, 0));
       const hurt = fin(player.health, 100) < fin(player.maxHealth, 100) * 0.35;
-      const arrest = pSpeed < 1.3 && dist < 18 && (this.wanted <= 3 || hurt);
+      const arrest = pSpeed < 1.3 && dist < 18 && !player.vehicle && !player.aiming
+        && (this.wanted <= 3 || hurt);
 
       if (arrest) {
         cop.state = 'arrest';

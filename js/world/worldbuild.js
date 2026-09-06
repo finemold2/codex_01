@@ -1969,8 +1969,10 @@ function paletteToAlbedo(c, lo, hi, fallback) {
 function buildBuilding(bc, b) {
   const rng = new Rand((((bc.seed ^ 0x9e3779b9) >>> 0) + b.id * 2654435761) >>> 0);
   const pal = b.palette || {};
-  const wallCol = paletteToAlbedo(pal.wall, 0.30, 0.86, [0.5, 0.5, 0.52]);
-  const trimCol = paletteToAlbedo(pal.trim, 0.28, 0.80, [0.38, 0.38, 0.4]);
+  // Upper bound stays under ~0.7: painted stucco and concrete top out around 0.6-0.65 albedo, and
+  // anything higher clips to flat white on a sunlit facade at the game's exposure.
+  const wallCol = paletteToAlbedo(pal.wall, 0.26, 0.66, [0.5, 0.5, 0.52]);
+  const trimCol = paletteToAlbedo(pal.trim, 0.24, 0.60, [0.38, 0.38, 0.4]);
   // The glass facade texture is already dark (0.035 linear), so the palette acts as a TINT here
   // rather than an absolute albedo - otherwise curtain-wall towers multiply out to near black.
   const glassCol = paletteToAlbedo(pal.glass, 0.62, 1.0, [0.62, 0.72, 0.82]);

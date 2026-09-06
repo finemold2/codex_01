@@ -70,8 +70,8 @@ const fail = [];
       '--autoplay-policy=no-user-gesture-required', '--mute-audio'],
   });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  page.on('pageerror', (e) => fail.push(`pageerror: ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error') fail.push(`console: ${m.text()}`); });
+  page.on('pageerror', (e) => { fail.push(`pageerror: ${e.message}`); console.log('  page!', e.message); });
+  page.on('console', (m) => { if (m.type() === 'error') { fail.push(`console: ${m.text()}`); console.log('  page>', m.text()); } });
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__NEON && window.__NEON.ready === true, null,
@@ -98,6 +98,28 @@ const fail = [];
   // --- start a session ------------------------------------------------------------------
   await page.evaluate(() => window.__NEON.startGame());
   await page.waitForTimeout(2000);
+
+  // Is the frame loop actually reaching hud.update()?
+  const diag = await page.evaluate(() => {
+    const g = window.__NEON.game;
+    return {
+      started: g.started, paused: g.paused, over: g.over,
+      mapOpen: g.mapScreen.isOpen,
+      gameFrames: g.time.frame,
+      loopFrames: window.__NEON.frameCount(),
+      fps: Math.round(window.__NEON.fps()),
+      hudTime: g.hud._time,
+      hudVisible: g.hud.visible,
+      hudUpdateOwn: Object.prototype.hasOwnProperty.call(g.hud, 'update'),
+      fatal: window.__NEON.fatal,
+      errors: (window.__NEON.errors || []).slice(0, 4),
+      fatalPanel: document.getElementById('fatal').classList.contains('hidden') ? null
+        : document.getElementById('fatal-msg').textContent,
+    };
+  });
+  console.log('diag:', JSON.stringify(diag));
+  if (diag.loopFrames < 10) fail.push(`loop: only ${diag.loopFrames} frames rendered — the rAF loop is not running`);
+  if (!(diag.hudTime > 0)) fail.push(`loop: hud.update() never ran (hud._time=${diag.hudTime}, started=${diag.started}, paused=${diag.paused})`);
 
   const hudState = await page.evaluate(() => {
     const g = window.__NEON.game;
