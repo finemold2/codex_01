@@ -1,0 +1,4 @@
+# Test artefacts
+tools/.shots/
+tools/_tmp/
+node_modules/
