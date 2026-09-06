@@ -3462,24 +3462,24 @@ export function buildTextureLibrary(gl, opts) {
 
   /* --- roads and ground ------------------------------------------------- */
   const asphalt = genAsphalt(S, seed);
-  add('asphalt', asphalt, TILE);
+  add('asphalt', asphalt, TILE, _mark());
   add('asphalt_n', { canvas: normalCanvasFromField(asphalt.height, S, S, 2.4) }, NORMAL, _mark());
   add('roadLines', genRoadLines(S, seed + 1), TILE_MASK, _mark());
 
   const sidewalk = genSidewalk(S, seed + 2);
-  add('sidewalk', sidewalk, TILE);
+  add('sidewalk', sidewalk, TILE, _mark());
   add('sidewalk_n', { canvas: normalCanvasFromField(sidewalk.height, S, S, 3.0) }, NORMAL, _mark());
 
   const concrete = genConcrete(S, seed + 3);
-  add('concrete', concrete, TILE);
+  add('concrete', concrete, TILE, _mark());
   add('concrete_n', { canvas: normalCanvasFromField(concrete.height, S, S, 2.0) }, NORMAL, _mark());
 
   const brick = genBrick(S, seed + 4);
-  add('brick', brick, TILE);
+  add('brick', brick, TILE, _mark());
   add('brick_n', { canvas: normalCanvasFromField(brick.height, S, S, 3.4) }, NORMAL, _mark());
 
   const metal = genMetal(S, seed + 5);
-  add('metal', metal, TILE);
+  add('metal', metal, TILE, _mark());
   add('metal_n', { canvas: normalCanvasFromField(metal.height, S, S, 2.6) }, NORMAL, _mark());
 
   add('roofGravel', genRoofGravel(S, seed + 6), TILE, _mark());
@@ -3489,7 +3489,7 @@ export function buildTextureLibrary(gl, opts) {
   add('sand', genSand(S, seed + 10), TILE, _mark());
 
   const water = genWater(S, seed + 11);
-  add('water', water, TILE);
+  add('water', water, TILE, _mark());
   add('waterNormal', { canvas: normalCanvasFromField(water.height, S, S, 3.2) }, NORMAL, _mark());
 
   /* --- vegetation and vehicles ------------------------------------------ */
