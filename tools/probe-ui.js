@@ -559,16 +559,47 @@ export default async function run() {
     if (game.waypoint) bad('map: a cancelled/leaving pointer placed a waypoint');
   }
 
-  // The pulse must be time based, not frame based.
+  // The blip pulse must be driven by the clock, not by the frame counter: 30 back-to-back
+  // frames take ~0 ms of wall time, so the phase must barely move.
   {
-    map._clock = 0;
-    map._lastFrame = 0;
+    const t0 = performance.now();
     map.update();
     const a = map._pulse;
     for (let i = 0; i < 30; i++) map.update();
     const b = map._pulse;
-    out.stats.mapPulse = [a, b];
+    const elapsed = (performance.now() - t0) / 1000;
+    const advance = Math.abs(b - a);
+    out.stats.mapPulse = { a, b, elapsed, advance };
     if (!Number.isFinite(b)) bad('map: pulse became NaN');
+    if (advance > Math.max(0.4, elapsed * 8)) {
+      bad(`map: blip pulse advanced ${advance.toFixed(2)} rad over ${elapsed.toFixed(3)}s `
+        + '— it is frame-rate dependent, not time based');
+    }
+  }
+
+  map.hide();
+
+  // Reopening into a differently sized box must refit: the fit is measured, never assumed.
+  {
+    dom.mapRoot.style.left = '0px';
+    dom.mapRoot.style.top = '0px';
+    dom.mapRoot.style.right = 'auto';
+    dom.mapRoot.style.bottom = 'auto';
+    dom.mapRoot.style.width = '760px';
+    dom.mapRoot.style.height = '420px';
+    map.show();
+    const c = dom.mapRoot.querySelector('.map-canvas');
+    const data = game.world.minimapData;
+    const fit = Math.min(c.clientWidth / (data.bounds.max[0] - data.bounds.min[0]),
+      c.clientHeight / (data.bounds.max[1] - data.bounds.min[1]));
+    out.stats.mapRefit = { w: c.clientWidth, h: c.clientHeight, scale: map.scale, want: fit * 2.1 };
+    if (!near(map.scale, fit * 2.1, fit * 0.3)) {
+      bad(`map: opening into a ${c.clientWidth}x${c.clientHeight} box fitted the city for the `
+        + `stale size (scale ${map.scale.toFixed(3)}, expected ${(fit * 2.1).toFixed(3)})`);
+    }
+    map.update();
+    if (canvasStats(c).painted === 0) bad('map: nothing drawn after reopening at a new size');
+    dom.mapRoot.removeAttribute('style');
   }
 
   map.hide();

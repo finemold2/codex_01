@@ -1756,6 +1756,26 @@ const MISSION_BY_ID = (() => {
 
 const _mm = new Float32Array(16);
 
+/**
+ * Seconds the current cooldown tick should subtract. Module scope so {@link tickCooldown} can be
+ * a shared function instead of a closure allocated every frame.
+ * @type {number}
+ */
+let _cdStep = 0;
+
+/**
+ * `Map#forEach` callback that ages one replay cooldown.
+ * @param {number} value Seconds left.
+ * @param {string} key Mission id.
+ * @param {Map<string, number>} map Owning map.
+ * @returns {void}
+ */
+function tickCooldown(value, key, map) {
+  const left = value - _cdStep;
+  if (left <= 0) map.delete(key);
+  else map.set(key, left);
+}
+
 export class MissionManager {
   /**
    * @param {Object} game The `Game` instance (contract section 16).
@@ -1778,12 +1798,15 @@ export class MissionManager {
     this.countdown = 0;
 
     this._lastObjective = '';
+    this._objectiveTimer = 0;
     this._promptTimer = 0;
     this._promptId = '';
     this._unsub = [];
     this._meshes = null;
     this._meshFailed = false;
     this._time = 0;
+    /** Set while {@link MissionManager#dispose} tears down: no banners, no toasts. */
+    this._silent = false;
 
     this._buildMarkers();
     this._subscribe();
@@ -1804,7 +1827,11 @@ export class MissionManager {
       const z = fin(p.z, 0);
       this.markers.push({
         missionId: def.id,
+        // `nameKo` is what ui/map.js and the HUD radar label a blip with; `name` keeps the
+        // city's own name for the place the mission is given from.
+        nameKo: def.nameKo,
         name: p.name || def.nameKo,
+        reward: def.reward,
         x,
         y: Number.isFinite(p.y) ? p.y : groundY(game, x, z),
         z,
@@ -1996,10 +2023,12 @@ export class MissionManager {
     const game = this.game;
     const entry = this.active;
     if (!entry) return;
+    const quiet = this._silent;
     this.active = null;
     this.countdown = 0;
     this.origin = null;
     this._lastObjective = '';
+    this._objectiveTimer = 0;
 
     try {
       entry.def.cleanup(game, entry.state);
@@ -2009,33 +2038,55 @@ export class MissionManager {
     // Belt and braces: even a broken cleanup must not leak entities.
     releaseState(game, entry.state);
 
-    if (game.hud && typeof game.hud.setMissionText === 'function') game.hud.setMissionText('', '');
+    const hud = game.hud;
+    if (hud && typeof hud.setMissionText === 'function') hud.setMissionText(null, null);
 
-    if (result === 'success') {
+    const success = result === 'success';
+    const label = success ? entry.def.nameKo : (note || (result === 'abort' ? '미션 중단' : '미션 실패'));
+    if (success) {
       this.completed.add(entry.id);
       this.cooldowns.set(entry.id, COOLDOWN_SUCCESS);
       const reward = fin(entry.def.reward, 0);
       if (game.player && typeof game.player.addMoney === 'function') game.player.addMoney(reward);
-      if (game.hud && typeof game.hud.notify === 'function') {
-        game.hud.notify(`미션 성공! $${reward}`, 'mission', 5);
+      if (!quiet) {
+        if (hud && typeof hud.notify === 'function') hud.notify(`미션 성공! $${reward}`, 'mission', 5);
+        if (typeof game.subtitle === 'function') {
+          game.subtitle(note ? `${entry.def.nameKo} — ${note}` : `${entry.def.nameKo} 완료`, 4);
+        }
+        if (game.sfx && game.sfx.missionSuccess) game.sfx.missionSuccess();
       }
-      if (typeof game.subtitle === 'function') {
-        game.subtitle(note ? `${entry.def.nameKo} — ${note}` : `${entry.def.nameKo} 완료`, 4);
-      }
-      if (game.sfx && game.sfx.missionSuccess) game.sfx.missionSuccess();
       if (typeof game.save === 'function') {
         try { game.save(); } catch (err) { /* storage may be unavailable */ }
       }
     } else {
       this.cooldowns.set(entry.id, COOLDOWN_FAIL);
-      const label = result === 'abort' ? '미션 중단' : '미션 실패';
-      if (game.hud && typeof game.hud.notify === 'function') {
-        game.hud.notify(note ? `${label}: ${note}` : label, 'warn', 5);
+      if (!quiet) {
+        const prefix = result === 'abort' ? '미션 중단' : '미션 실패';
+        if (hud && typeof hud.notify === 'function') {
+          hud.notify(note ? `${prefix}: ${note}` : prefix, 'warn', 5);
+        }
+        if (game.sfx && game.sfx.missionFail) game.sfx.missionFail();
       }
-      if (game.sfx && game.sfx.missionFail) game.sfx.missionFail();
+    }
+    // The big centre banner is the shipped-game payoff. ui/hud.js raises it from the
+    // `missionEnded` payload below (hence `success` / `name` / `reason`); this direct call is the
+    // fallback for a host without an event bus, and never runs alongside it.
+    if (!quiet && typeof game.emit !== 'function'
+      && hud && typeof hud.showMissionResult === 'function') {
+      hud.showMissionResult(success, label);
     }
     if (typeof game.emit === 'function') {
-      game.emit('missionEnded', { id: entry.id, result, note: note || '' });
+      game.emit('missionEnded', {
+        id: entry.id,
+        result,
+        success,
+        name: entry.def.nameKo,
+        nameKo: entry.def.nameKo,
+        reward: success ? fin(entry.def.reward, 0) : 0,
+        reason: success ? '' : (note || ''),
+        note: note || '',
+        silent: quiet,
+      });
     }
   }
 
@@ -2052,10 +2103,9 @@ export class MissionManager {
     const step = Number.isFinite(dt) ? clamp(dt, 0, 0.25) : 0;
     this._time += step;
 
-    for (const [id, t] of this.cooldowns) {
-      const left = t - step;
-      if (left <= 0) this.cooldowns.delete(id);
-      else this.cooldowns.set(id, left);
+    if (this.cooldowns.size > 0) {
+      _cdStep = step;
+      this.cooldowns.forEach(tickCooldown);
     }
 
     if (this.active) {
@@ -2102,7 +2152,11 @@ export class MissionManager {
       return;
     }
 
-    // Objective line, only pushed to the HUD when it changed.
+    // Objective line. Rebuilt a few times a second, not every frame: `hud._applyMission()`
+    // recreates the objective DOM whenever the string changes, and the string itself allocates.
+    this._objectiveTimer -= dt;
+    if (this._objectiveTimer > 0) return;
+    this._objectiveTimer = OBJECTIVE_INTERVAL;
     let text = '';
     try {
       text = String(entry.def.objectiveText(entry.state) || '');
@@ -2182,9 +2236,18 @@ export class MissionManager {
     const t = this._time;
 
     if (!this.active) {
+      // Only the markers the player can actually see: eight lit pillars scattered across the
+      // whole city would eat the renderer's point-light budget for nothing.
+      const eye = this._viewPoint();
+      const range = MARKER_DRAW_RANGE * MARKER_DRAW_RANGE;
       for (let i = 0; i < this.markers.length; i++) {
         const mk = this.markers[i];
         if ((this.cooldowns.get(mk.missionId) || 0) > 0) continue;
+        if (eye) {
+          const dx = mk.x - eye[0];
+          const dz = mk.z - eye[2];
+          if (dx * dx + dz * dz > range) continue;
+        }
         this._drawMarker(renderer, m, mk.x, mk.y + 1.2, mk.z, mk.color, 1, t);
       }
       return;

@@ -2422,6 +2422,7 @@ export class Vehicle {
     _bodies.length = 0;
     collision.queryAABB(this.position[0] - reach, carBottom + 0.30, this.position[2] - reach,
       this.position[0] + reach, carTop, this.position[2] + reach, _bodies);
+    if (globalThis.__VDBG) console.log('  RESOLVE bodies=', _bodies.map((b)=>b&&b.tag).join(','));
     if (_bodies.length === 0) return;
 
     const s = Math.sin(this.yaw);
@@ -2438,7 +2439,7 @@ export class Vehicle {
       const bodyTop = b.cy + b.hy;
       const bodyBottom = b.cy - b.hy;
       // Anything we drive over (kerbs, ramps) or duck under is the suspension's problem.
-      if (bodyTop <= carBottom + 0.34) continue;
+      if (bodyTop <= carBottom + 0.34) { if (globalThis.__VDBG) console.log('   skipOver', b.tag, bodyTop, carBottom); continue; }
       if (bodyBottom >= carTop - 0.06) continue;
 
       let nx = 0;
@@ -2486,8 +2487,9 @@ export class Vehicle {
             nz = uz * sign;
           }
         }
-        if (separated) continue;
+        if (separated) { if (globalThis.__VDBG) console.log('   separated from', b.tag); continue; }
       }
+      if (globalThis.__VDBG) console.log('   push', b.tag, depth.toFixed(3), nx.toFixed(2), nz.toFixed(2));
       if (!(depth > 1e-4) || !Number.isFinite(depth)) continue;
       if (depth > 4) depth = 4;
       this.position[0] += nx * depth;

@@ -37,6 +37,17 @@ const _v2 = vec3.create();
 const _camPos = vec3.create();
 const _camTarget = vec3.create();
 const _rayDir = vec3.create();
+
+/** Moonlight floor used at night so the city stays readable (see Game.render). */
+const MOON_INTENSITY = 0.34;
+const MOON_AMB_SKY = [0.040, 0.050, 0.078];
+const MOON_AMB_GROUND = [0.014, 0.016, 0.024];
+const _ambSky = [0, 0, 0];
+const _ambGround = [0, 0, 0];
+const _moonColor = [0.62, 0.72, 1.0];
+const _sunDesc = {
+  direction: null, color: null, intensity: 1, ambientSky: null, ambientGround: null,
+};
 const _m = mat4.create();
 const _mouseDelta = { x: 0, y: 0 };
 
@@ -803,14 +814,36 @@ export class Game {
     if (sky) {
       sky.setTimeOfDay(this.time.hours);
       sky.update(dt, 0);
-      r.setSun({
-        direction: sky.sunDirection,
-        color: sky.sunColor,
-        intensity: sky.sunIntensity,
-        ambientSky: sky.ambientSky,
-        ambientGround: sky.ambientGround,
-      });
-      r.setFog({ color: sky.fogColor, density: 0.0016 + sky.nightFactor * 0.0007, heightFalloff: 0.018 });
+
+      // The sky's night values are physically faithful (ambient 0.010/0.002, key light 0.055) but
+      // at those levels the city is simply invisible - only the pool under a streetlight reads.
+      // Lift a cool moonlight floor in proportion to nightFactor so silhouettes, roads and traffic
+      // stay legible, the way a night scene is lit in a game rather than in a light meter.
+      const nf = sky.nightFactor || 0;
+      const key = _sunDesc;
+      key.direction = sky.sunDirection;
+      key.color = sky.sunColor;
+      key.intensity = sky.sunIntensity;
+      key.ambientSky = sky.ambientSky;
+      key.ambientGround = sky.ambientGround;
+      if (nf > 0.01) {
+        key.intensity = Math.max(sky.sunIntensity, lerp(sky.sunIntensity, MOON_INTENSITY, nf));
+        key.color = _moonColor;
+        _ambSky[0] = lerp(sky.ambientSky[0], MOON_AMB_SKY[0], nf);
+        _ambSky[1] = lerp(sky.ambientSky[1], MOON_AMB_SKY[1], nf);
+        _ambSky[2] = lerp(sky.ambientSky[2], MOON_AMB_SKY[2], nf);
+        _ambGround[0] = lerp(sky.ambientGround[0], MOON_AMB_GROUND[0], nf);
+        _ambGround[1] = lerp(sky.ambientGround[1], MOON_AMB_GROUND[1], nf);
+        _ambGround[2] = lerp(sky.ambientGround[2], MOON_AMB_GROUND[2], nf);
+        key.ambientSky = _ambSky;
+        key.ambientGround = _ambGround;
+        // Blend the daylight sun colour towards moonlight rather than snapping at dusk.
+        _moonColor[0] = lerp(sky.sunColor[0], 0.62, nf);
+        _moonColor[1] = lerp(sky.sunColor[1], 0.72, nf);
+        _moonColor[2] = lerp(sky.sunColor[2], 1.0, nf);
+      }
+      r.setSun(key);
+      r.setFog({ color: sky.fogColor, density: 0.0016 + nf * 0.0007, heightFalloff: 0.018 });
     }
 
     // Dynamic entities

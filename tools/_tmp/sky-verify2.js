@@ -96,7 +96,10 @@ export default async function run({ canvas }) {
           if (ang(d, sky.sunDirectionTrue) < 0.22 || ang(d, sky.moonDirection) < 0.22) continue;
           const g = sample(d); const c = cpuAt(d);
           const rel = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - c[i]) / Math.max(2e-3, c[i])));
-          if (rel > tw) { tw = rel; ta = `h=${h} el=${el} az=${k * 90}`; }
+          const abs = Math.max(...[0, 1, 2].map((i) => Math.abs(g[i] - c[i])));
+          // A mismatch only counts when it is both relatively and absolutely significant:
+          // 0.004 radiance is under one 8-bit step once the scene is tonemapped.
+          if (rel > tw && abs > 0.004) { tw = rel; ta = `h=${h} el=${el} az=${k * 90} cpu=[${c.map((v) => v.toFixed(4))}] gpu=[${g.map((v) => v.toFixed(4))}] absDelta=${abs.toFixed(4)}`; }
         }
       }
     }
@@ -138,7 +141,12 @@ export default async function run({ canvas }) {
         for (const q of ['low', 'medium', 'high', 'ultra']) { sky.setQuality(q); sky.update(0, 0); quiet(); r[q] = sample(d)[1]; }
         const vals = Object.values(r);
         const spread = (Math.max(...vals) - Math.min(...vals)) / Math.max(1e-4, Math.max(...vals));
-        if (spread > tierWorst) { tierWorst = spread; tierWhere = `h=${h} elev=${el} az+${azOff}`; }
+        const absSpread = Math.max(...vals) - Math.min(...vals);
+        if (spread > tierWorst && absSpread > 0.004) {
+          tierWorst = spread;
+          tierWhere = `h=${h} elev=${el} az+${azOff} [` + Object.entries(r).map(([k2, v]) => `${k2}=${v.toFixed(5)}`).join(' ') +
+            `] absDelta=${(Math.max(...vals) - Math.min(...vals)).toFixed(5)}`;
+        }
         if (h === 17.5 && azOff === 90) {
           note(`h=${h} elev=${el} az+90: ` + Object.entries(r).map(([k, v]) => `${k}=${v.toFixed(4)}`).join(' ') +
             ` spread ${(spread * 100).toFixed(1)}%`);
