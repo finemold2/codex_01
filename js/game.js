@@ -343,7 +343,14 @@ export class Game {
     // --- music --------------------------------------------------------------------------------
     need(this.music, 'setIntensity', () => {});
     need(this.music, 'trackCount', function trackCount() {
-      return this.tracks ? this.tracks.length : (this.stations ? this.stations.length : 0);
+      // Count distinct pieces across every station, not the number of stations.
+      if (this.scores) return Object.keys(this.scores).length;
+      if (!this.stations) return 0;
+      const ids = new Set();
+      for (const st of this.stations) {
+        for (const id of (st.trackIds || st.tracks || [])) ids.add(id);
+      }
+      return ids.size;
     });
 
     if (missing.length) console.warn('[compat] patched fallbacks for:', missing.join(', '));

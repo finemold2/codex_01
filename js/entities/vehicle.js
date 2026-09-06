@@ -1127,3 +1127,1156 @@ function buildBikeBody(t) {
   S.rearSeatZ = 0.58;
   return { lists: L, metrics: S };
 }
+
+/**
+ * Adds the police light bar, push bar and spotlight to an already built cruiser body.
+ * @param {Object} L Part lists.
+ * @param {Object} S Shape metrics.
+ * @returns {void}
+ */
+function addPoliceKit(L, S) {
+  const { w, hw, roofY, zFront, ground } = S;
+  const barZ = S.cabinFrontZ + S.wsRun + 0.28;
+  const barW = w * 0.74;
+  const barH = 0.13;
+  // Housing.
+  put(L.trim, roundedBox(barW, barH * 0.55, 0.22, 0.04, 2), 0, roofY + 0.045, barZ,
+    { color: C_DARK });
+  putPair(L.trim, box(0.05, 0.05, 0.16), barW * 0.4, roofY + 0.015, barZ, { color: C_DARK });
+  // Red half on the left, blue half on the right (Korean/US cruiser layout).
+  put(L.sirenRed, roundedBox(barW * 0.46, barH, 0.17, 0.045, 2), -barW * 0.25, roofY + 0.10, barZ,
+    { color: C_WHITE });
+  put(L.sirenBlue, roundedBox(barW * 0.46, barH, 0.17, 0.045, 2), barW * 0.25, roofY + 0.10, barZ,
+    { color: C_WHITE });
+  // Grille strobes.
+  put(L.sirenRed, box(0.16, 0.05, 0.04), -w * 0.20, S.beltY - 0.16, S.cabinFrontZ + 0.02,
+    { color: C_WHITE });
+  put(L.sirenBlue, box(0.16, 0.05, 0.04), w * 0.20, S.beltY - 0.16, S.cabinFrontZ + 0.02,
+    { color: C_WHITE });
+  // Push bar.
+  put(L.trim, box(w * 0.92, 0.10, 0.08), 0, ground + S.height * 0.31, zFront - 0.06,
+    { color: C_STEEL });
+  putPair(L.trim, box(0.08, S.height * 0.26, 0.07), w * 0.32, ground + S.height * 0.30,
+    zFront - 0.03, { color: C_STEEL });
+  // A pillar spotlight.
+  put(L.chrome, cylinder(0.055, 0.055, 0.13, 8, true), -(w * 0.5 - 0.03), S.beltY + 0.10,
+    S.cabinFrontZ + 0.10, { rx: Math.PI * 0.5, color: C_CHROME });
+}
+
+/**
+ * Adds the illuminated roof sign and door badge to a taxi body.
+ * @param {Object} L Part lists.
+ * @param {Object} S Shape metrics.
+ * @returns {void}
+ */
+function addTaxiKit(L, S) {
+  const signZ = S.cabinFrontZ + S.wsRun + 0.22;
+  put(L.trim, box(0.34, 0.035, 0.16), 0, S.roofY + 0.02, signZ, { color: C_DARK });
+  put(L.sign, roundedBox(0.52, 0.16, 0.20, 0.045, 2), 0, S.roofY + 0.11, signZ,
+    { color: C_WHITE });
+  // Chequer band along the doors.
+  for (let i = 0; i < 6; i++) {
+    putPair(L.trim, box(0.012, 0.07, 0.16), S.w * 0.5, S.beltY - 0.20,
+      -0.7 + i * 0.28, { color: i % 2 ? C_DARK : C_PLATE });
+  }
+}
+
+/**
+ * Chooses the body builder for a type and returns its merged part lists.
+ * @param {Object} t Vehicle type record.
+ * @returns {Object} `{lists, metrics}`.
+ */
+function buildBodyFor(t) {
+  switch (t.shape) {
+    case 'wagon':
+      return buildWagonBody(t, {
+        belt: 0.52, hood: 0.20, boot: 0.05, wsRun: 0.11, bsRun: 0.03, inset: 0.03, doors: 4
+      });
+    case 'van':
+      return buildVanBody(t);
+    case 'truck':
+      return buildTruckBody(t);
+    case 'bus':
+      return buildBusBody(t);
+    case 'bike':
+      return buildBikeBody(t);
+    default: {
+      const low = t.key === 'sports' || t.key === 'muscle';
+      return buildCarBody(t, {
+        belt: low ? 0.50 : 0.56,
+        hood: low ? 0.30 : 0.24,
+        boot: low ? 0.20 : 0.19,
+        wsRun: low ? 0.16 : 0.13,
+        bsRun: low ? 0.14 : 0.11,
+        inset: low ? 0.06 : 0.045,
+        noseDrop: low ? 0.10 : 0.05,
+        doors: t.seats > 2 ? 4 : 2,
+        spoiler: low,
+        twinExhaust: low || t.key === 'police'
+      });
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Asset construction
+ * ------------------------------------------------------------------ */
+
+/**
+ * Builds every shared vehicle mesh and material exactly once.
+ *
+ * The returned object is passed to every {@link Vehicle} constructor. When `renderer` is null
+ * (head-less validation) the geometries are still produced but nothing is uploaded to the GPU.
+ *
+ * @param {WebGL2RenderingContext|null} gl GL context, or null for a head-less build.
+ * @param {Object|null} renderer Renderer used to upload meshes (`createMesh`).
+ * @param {Object|null} textures Texture library from `render/textures.js`.
+ * @returns {Object} VehicleAssets: `{types, models, materials, wheel, wheelLod, dispose()}`.
+ */
+export function buildVehicleAssets(gl, renderer, textures) {
+  const tex = textures || null;
+  const paintMap = tex && tex.carPaintNoise ? tex.carPaintNoise : null;
+  const tyreMap = tex && tex.tire ? tex.tire : null;
+
+  const materials = {
+    paint: createMaterial({
+      name: 'vehPaint',
+      albedo: paintMap ? [1.95, 1.95, 1.95] : [1, 1, 1],
+      roughness: 0.30, metallic: 0.55, reflectance: 0.65, vertexColors: true,
+      map: paintMap, uvScale: [0.9, 0.9]
+    }),
+    trim: createMaterial({
+      name: 'vehTrim', albedo: [1, 1, 1], roughness: 0.62, metallic: 0.12,
+      reflectance: 0.4, vertexColors: true
+    }),
+    chrome: createMaterial({
+      name: 'vehChrome', albedo: [1, 1, 1], roughness: 0.16, metallic: 0.95,
+      reflectance: 0.9, vertexColors: true
+    }),
+    tyre: createMaterial({
+      name: 'vehTyre', albedo: [1, 1, 1], roughness: 0.93, metallic: 0.02,
+      reflectance: 0.25, vertexColors: true, map: tyreMap, uvScale: [2, 1]
+    }),
+    glass: createMaterial({
+      name: 'vehGlass', albedo: [0.10, 0.12, 0.14], roughness: 0.055, metallic: 0.0,
+      reflectance: 0.95, alpha: 0.42, blend: 'alpha', castShadow: false, depthWrite: false,
+      vertexColors: true, sortBias: -0.4
+    }),
+    interior: createMaterial({
+      name: 'vehInterior', albedo: [1, 1, 1], roughness: 0.86, metallic: 0.0,
+      reflectance: 0.3, vertexColors: true, castShadow: false
+    }),
+    lampHead: createMaterial({
+      name: 'vehLampHead', albedo: [0.55, 0.56, 0.58], roughness: 0.12, metallic: 0.0,
+      reflectance: 0.85, emissive: [1.0, 0.94, 0.80], emissiveStrength: 7, vertexColors: true
+    }),
+    lampTail: createMaterial({
+      name: 'vehLampTail', albedo: [0.20, 0.012, 0.010], roughness: 0.18, metallic: 0.0,
+      reflectance: 0.8, emissive: [1.0, 0.055, 0.030], emissiveStrength: 6, vertexColors: true
+    }),
+    lampReverse: createMaterial({
+      name: 'vehLampReverse', albedo: [0.5, 0.5, 0.48], roughness: 0.16, metallic: 0.0,
+      reflectance: 0.8, emissive: [0.92, 0.94, 1.0], emissiveStrength: 5, vertexColors: true
+    }),
+    lampSide: createMaterial({
+      name: 'vehLampSide', albedo: [0.35, 0.20, 0.02], roughness: 0.2, metallic: 0.0,
+      reflectance: 0.8, emissive: [1.0, 0.44, 0.03], emissiveStrength: 5, vertexColors: true
+    }),
+    sirenRed: createMaterial({
+      name: 'vehSirenRed', albedo: [0.22, 0.01, 0.01], roughness: 0.16, metallic: 0.0,
+      reflectance: 0.85, emissive: [1.0, 0.035, 0.02], emissiveStrength: 10, vertexColors: true
+    }),
+    sirenBlue: createMaterial({
+      name: 'vehSirenBlue', albedo: [0.01, 0.03, 0.24], roughness: 0.16, metallic: 0.0,
+      reflectance: 0.85, emissive: [0.05, 0.16, 1.0], emissiveStrength: 10, vertexColors: true
+    }),
+    sign: createMaterial({
+      name: 'vehSign', albedo: [0.45, 0.35, 0.12], roughness: 0.35, metallic: 0.0,
+      reflectance: 0.6, emissive: [1.0, 0.62, 0.10], emissiveStrength: 4, vertexColors: true
+    }),
+    cone: createMaterial({
+      name: 'vehLightCone', albedo: [1.0, 0.95, 0.82], roughness: 1, metallic: 0,
+      blend: 'add', unlit: true, depthWrite: false, castShadow: false, doubleSided: true,
+      vertexColors: true, sortBias: 1.5
+    }),
+    wreck: createMaterial({
+      name: 'vehWreck', albedo: [1, 1, 1], roughness: 0.88, metallic: 0.30,
+      reflectance: 0.3, vertexColors: true
+    })
+  };
+
+  const wheelGeo = buildWheelGeometry(true);
+  const wheelLodGeo = buildWheelGeometry(false);
+
+  /** Groups that carry the paint tint (the rest bake their own vertex colours). */
+  const GROUPS = [
+    ['paint', 'paint', true],
+    ['trim', 'trim', false],
+    ['chrome', 'chrome', false],
+    ['interior', 'interior', false],
+    ['glass', 'glass', false],
+    ['lampHead', 'lampHead', false],
+    ['lampTail', 'lampTail', false],
+    ['lampReverse', 'lampReverse', false],
+    ['lampSide', 'lampSide', false],
+    ['sirenRed', 'sirenRed', false],
+    ['sirenBlue', 'sirenBlue', false],
+    ['sign', 'sign', false]
+  ];
+
+  const models = {};
+  let triangles = geometryTriangleCount(wheelGeo) + geometryTriangleCount(wheelLodGeo);
+
+  for (const key of VEHICLE_TYPE_KEYS) {
+    const t = VEHICLE_TYPES[key];
+    const built = buildBodyFor(t);
+    const L = built.lists;
+    const S = built.metrics;
+    if (t.police) addPoliceKit(L, S);
+    if (t.taxi) addTaxiKit(L, S);
+
+    const model = {
+      type: t,
+      parts: [],
+      lod: null,
+      lodMesh: null,
+      wheelCount: t.bike ? 2 : 4,
+      seatLocal: buildSeatLayout(t, S),
+      doorLocal: buildDoorLayout(t, S),
+      lampLocal: buildLampLayout(t, S),
+      cone: null,
+      coneMesh: null,
+      coneLocal: null
+    };
+
+    const lodParts = [];
+    for (const [listKey, matKey, tinted] of GROUPS) {
+      const list = L[listKey];
+      if (!list || list.length === 0) continue;
+      const geometry = mergeGeometries(list);
+      if (!geometry.indices || geometry.indices.length === 0) continue;
+      triangles += geometryTriangleCount(geometry);
+      const part = {
+        id: listKey,
+        geometry,
+        material: materials[matKey],
+        mesh: renderer && renderer.createMesh ? renderer.createMesh(geometry) : null,
+        tinted,
+        emissive: listKey.startsWith('lamp') || listKey.startsWith('siren') || listKey === 'sign'
+      };
+      model.parts.push(part);
+      // The far LOD keeps only the solid body: paint, trim and the lamp lenses.
+      if (listKey === 'paint' || listKey === 'trim' || listKey === 'chrome') {
+        for (const entry of list) lodParts.push(entry);
+      }
+    }
+
+    const lodGeo = mergeGeometries(lodParts);
+    triangles += geometryTriangleCount(lodGeo);
+    model.lod = lodGeo;
+    model.lodMesh = renderer && renderer.createMesh ? renderer.createMesh(lodGeo) : null;
+
+    // Head light cone: apex at the lamp, opening forward.
+    const cone = buildLightCone(t.width * 0.42, Math.min(20, 9 + t.length), 12);
+    model.cone = cone;
+    model.coneMesh = renderer && renderer.createMesh ? renderer.createMesh(cone) : null;
+    triangles += geometryTriangleCount(cone);
+
+    models[key] = model;
+  }
+
+  const wheel = {
+    geometry: wheelGeo,
+    mesh: renderer && renderer.createMesh ? renderer.createMesh(wheelGeo) : null,
+    material: materials.tyre
+  };
+  const wheelLod = {
+    geometry: wheelLodGeo,
+    mesh: renderer && renderer.createMesh ? renderer.createMesh(wheelLodGeo) : null,
+    material: materials.tyre
+  };
+
+  return {
+    gl: gl || null,
+    renderer: renderer || null,
+    textures: tex,
+    types: VEHICLE_TYPES,
+    models,
+    materials,
+    wheel,
+    wheelLod,
+    stats: { triangles, types: VEHICLE_TYPE_KEYS.length },
+    /**
+     * Releases every GPU mesh this asset set owns.
+     * @returns {void}
+     */
+    dispose() {
+      for (const key of Object.keys(models)) {
+        const m = models[key];
+        for (const p of m.parts) if (p.mesh && p.mesh.dispose) p.mesh.dispose();
+        if (m.lodMesh && m.lodMesh.dispose) m.lodMesh.dispose();
+        if (m.coneMesh && m.coneMesh.dispose) m.coneMesh.dispose();
+        m.parts.length = 0;
+      }
+      if (wheel.mesh && wheel.mesh.dispose) wheel.mesh.dispose();
+      if (wheelLod.mesh && wheelLod.mesh.dispose) wheelLod.mesh.dispose();
+    }
+  };
+}
+
+/**
+ * Computes the local-space seat anchor points (hip height) for a type.
+ * @param {Object} t Vehicle type record.
+ * @param {Object} S Shape metrics.
+ * @returns {Float32Array} Flat `[x,y,z]` triples, one per seat.
+ */
+function buildSeatLayout(t, S) {
+  const n = Math.max(1, t.seats);
+  const out = new Float32Array(n * 3);
+  if (t.bike) {
+    for (let i = 0; i < n; i++) {
+      out[i * 3] = 0;
+      out[i * 3 + 1] = S.ground + t.wheelRadius + 0.50;
+      out[i * 3 + 2] = i === 0 ? S.frontSeatZ : S.rearSeatZ;
+    }
+    return out;
+  }
+  const sx = t.width * 0.24;
+  const hip = S.ground + t.height * 0.42;
+  for (let i = 0; i < n; i++) {
+    const row = Math.floor(i / 2);
+    const side = i % 2 === 0 ? -1 : 1;
+    out[i * 3] = sx * side;
+    out[i * 3 + 1] = hip;
+    out[i * 3 + 2] = row === 0 ? S.frontSeatZ : S.rearSeatZ + (row - 1) * 1.15;
+  }
+  return out;
+}
+
+/**
+ * Computes the local-space door anchor points (where a character stands to enter).
+ * @param {Object} t Vehicle type record.
+ * @param {Object} S Shape metrics.
+ * @returns {Float32Array} Flat `[x,y,z]` triples, one per seat.
+ */
+function buildDoorLayout(t, S) {
+  const seats = buildSeatLayout(t, S);
+  const n = seats.length / 3;
+  const out = new Float32Array(n * 3);
+  const reach = t.width * 0.5 + 0.62;
+  for (let i = 0; i < n; i++) {
+    const side = seats[i * 3] < 0 ? -1 : 1;
+    out[i * 3] = reach * (t.bike ? -1 : side);
+    out[i * 3 + 1] = S.ground;
+    out[i * 3 + 2] = seats[i * 3 + 2];
+  }
+  return out;
+}
+
+/**
+ * Computes local anchors for the head lights, tail lights, siren bar and exhaust,
+ * used for lights, particles and the visible light cones.
+ * @param {Object} t Vehicle type record.
+ * @param {Object} S Shape metrics.
+ * @returns {Object} Named `[x,y,z]` anchor arrays.
+ */
+function buildLampLayout(t, S) {
+  const hw = t.width * 0.5;
+  const headY = t.shape === 'truck' || t.shape === 'bus'
+    ? S.ground + t.height * 0.24
+    : S.ground + t.height * 0.44;
+  const tailY = S.ground + t.height * (t.shape === 'bus' ? 0.28 : 0.52);
+  const hx = t.bike ? 0 : hw * 0.68;
+  const sirenZ = S.cabinFrontZ !== undefined ? S.cabinFrontZ + S.wsRun + 0.28 : 0;
+  return {
+    headL: [-hx, headY, S.zFront + 0.02],
+    headR: [hx, headY, S.zFront + 0.02],
+    tailL: [-hw * 0.7, tailY, S.zRear - 0.02],
+    tailR: [hw * 0.7, tailY, S.zRear - 0.02],
+    sirenL: [-t.width * 0.185, S.roofY + 0.10, sirenZ],
+    sirenR: [t.width * 0.185, S.roofY + 0.10, sirenZ],
+    exhaust: [t.bike ? 0.13 : hw * 0.55, S.ground + 0.14, S.zRear - 0.05],
+    bonnet: [0, S.ground + t.height * 0.62, S.zFront + t.length * 0.20],
+    roof: [0, S.roofY + 0.06, 0]
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Physics helpers
+ * ------------------------------------------------------------------ */
+
+/**
+ * Normalised engine torque as a function of `rpm / redline`.
+ * Rises quickly off idle, plateaus near 0.6 and falls away past the power peak.
+ * @param {number} x Normalised engine speed.
+ * @returns {number} Torque multiplier in 0.2..1.
+ */
+function torqueCurve(x) {
+  const t = x < 0 ? 0 : x > 1.15 ? 1.15 : x;
+  const v = 0.58 + 1.30 * t - 1.15 * t * t + 0.12 * t * t * t;
+  return v < 0.2 ? 0.2 : v > 1 ? 1 : v;
+}
+
+/**
+ * Slip-angle tyre curve: linear-ish rise to a peak at `peak`, then a progressive falloff
+ * to a 0.72 asymptote so the car breaks away smoothly instead of snapping.
+ * @param {number} slip Slip angle in radians (signed).
+ * @param {number} peak Slip angle of peak grip.
+ * @returns {number} Normalised force in -1..1 (signed like `slip`).
+ */
+function tyreCurve(slip, peak) {
+  const a = Math.abs(slip) / peak;
+  let f;
+  if (a <= 1) f = a * (2 - a);
+  else {
+    const d = a - 1;
+    f = 0.72 + 0.28 / (1 + d * d * 2.2);
+  }
+  return slip < 0 ? -f : f;
+}
+
+/**
+ * Reads a finite number or falls back.
+ * @param {*} v Candidate.
+ * @param {number} d Fallback.
+ * @returns {number} Finite value.
+ */
+function fin(v, d) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : d;
+}
+
+/**
+ * Closest point on an oriented box (or cylinder) body to a world point.
+ * @param {Object} b Collision body record.
+ * @param {number} x World X.
+ * @param {number} y World Y.
+ * @param {number} z World Z.
+ * @param {Float32Array} out Receives the closest point.
+ * @returns {number} Distance from the point to the body surface (0 when inside).
+ */
+function closestOnBody(b, x, y, z, out) {
+  const dx = x - b.cx;
+  const dy = y - b.cy;
+  const dz = z - b.cz;
+  if (b.kind === 'cylinder') {
+    const r = Math.hypot(dx, dz);
+    const cr = b.hx;
+    const px = r > 1e-6 ? (dx / r) * Math.min(r, cr) : 0;
+    const pz = r > 1e-6 ? (dz / r) * Math.min(r, cr) : 0;
+    const py = clamp(dy, -b.hy, b.hy);
+    out[0] = b.cx + px;
+    out[1] = b.cy + py;
+    out[2] = b.cz + pz;
+    return Math.hypot(x - out[0], y - out[1], z - out[2]);
+  }
+  const c = b.cos;
+  const s = b.sin;
+  // World -> local (yaw only).
+  const lx = dx * c - dz * s;
+  const lz = dx * s + dz * c;
+  const qx = clamp(lx, -b.hx, b.hx);
+  const qy = clamp(dy, -b.hy, b.hy);
+  const qz = clamp(lz, -b.hz, b.hz);
+  out[0] = b.cx + qx * c + qz * s;
+  out[1] = b.cy + qy;
+  out[2] = b.cz - qx * s + qz * c;
+  return Math.hypot(x - out[0], y - out[1], z - out[2]);
+}
+
+/* ------------------------------------------------------------------ *
+ * Module scratch (no per-frame allocation)
+ * ------------------------------------------------------------------ */
+
+const _m = mat4.create();
+const _m2 = mat4.create();
+const _v = vec3.create();
+const _v2 = vec3.create();
+const _v3 = vec3.create();
+const _from = vec3.create();
+const _to = vec3.create();
+const _pt = vec3.create();
+const _tint = new Float32Array(4);
+const _tint2 = new Float32Array(4);
+const _coneTint = new Float32Array(4);
+const _bodies = [];
+const _corner = new Float32Array(12);
+/** Shared per-vehicle spawn counter, used only to seed deterministic colour picks. */
+let _spawnSeq = 0;
+
+/** Wheel index constants. */
+const WHEEL_FL = 0;
+const WHEEL_FR = 1;
+const WHEEL_RL = 2;
+const WHEEL_RR = 3;
+
+/* ------------------------------------------------------------------ *
+ * Vehicle
+ * ------------------------------------------------------------------ */
+
+/**
+ * A drivable vehicle: rigid body, four raycast suspension wheels, engine and gearbox,
+ * slip-angle tyres, collision response, damage and all of its presentation.
+ */
+export class Vehicle {
+  /**
+   * @param {Object} assets Result of {@link buildVehicleAssets}.
+   * @param {string} typeKey Key into {@link VEHICLE_TYPES}.
+   * @param {Object} [opts] Spawn options.
+   * @param {ArrayLike<number>} [opts.position] World spawn position.
+   * @param {number} [opts.yaw] Spawn heading in radians.
+   * @param {number[]|string} [opts.color] Linear rgb paint colour, or a name from the palette.
+   * @param {boolean} [opts.isPolice] Force the police light bar and siren behaviour.
+   * @param {Object} [opts.game] The `Game` instance (audio, particles, camera shake).
+   * @param {number} [opts.seed] Deterministic seed for the colour pick.
+   */
+  constructor(assets, typeKey, opts) {
+    const o = opts || {};
+    const key = VEHICLE_TYPES[typeKey] ? typeKey : 'sedan';
+    /** @type {Object} Shared asset set. */
+    this.assets = assets || null;
+    /** @type {Object} Type record from {@link VEHICLE_TYPES}. */
+    this.type = VEHICLE_TYPES[key];
+    /** @type {string} Type key. */
+    this.typeKey = key;
+    /** @type {Object|null} Shared model (meshes, anchors). */
+    this.model = assets && assets.models ? assets.models[key] : null;
+    /** @type {Object|null} Owning game instance. */
+    this.game = o.game || null;
+
+    const t = this.type;
+    const seed = fin(o.seed, ((_spawnSeq++) * 2654435761) >>> 0);
+    /** @type {Rand} Deterministic per-vehicle randomness. */
+    this.rng = new Rand(seed || 1);
+
+    /** @type {Float32Array} World position of the centre of mass. */
+    this.position = vec3.fromValues(0, t.comHeight, 0);
+    if (o.position) {
+      this.position[0] = fin(o.position[0], 0);
+      this.position[1] = fin(o.position[1], t.comHeight);
+      this.position[2] = fin(o.position[2], 0);
+    }
+    /** @type {Float32Array} World linear velocity in m/s. */
+    this.velocity = vec3.create();
+    /** @type {number} Heading in radians (0 faces -Z). */
+    this.yaw = fin(o.yaw, 0);
+    /** @type {number} Yaw rate in rad/s (positive turns left). */
+    this.yawRate = 0;
+    /** @type {number} Visual body pitch from suspension compression. */
+    this.pitch = 0;
+    /** @type {number} Visual body roll from suspension compression. */
+    this.roll = 0;
+
+    /** @type {number} Signed speed along the car's forward axis, m/s. */
+    this.forwardSpeed = 0;
+    /** @type {number} Lateral speed along the car's right axis, m/s. */
+    this.lateralSpeed = 0;
+    /** @type {number} Speed in km/h (always positive). See `forwardSpeed` for m/s. */
+    this.speed = 0;
+    /** @type {number} Unsigned speed in m/s. */
+    this.speedMs = 0;
+    /** @type {number} Engine speed in rpm. */
+    this.rpm = t.idleRpm;
+    /** @type {number} Current gear: -1 reverse, 0 neutral, 1..5 forward. */
+    this.gear = 1;
+    /** @type {number} Normalised steering, -1 (full left) .. 1 (full right). */
+    this.steer = 0;
+    /** @type {number} Road-wheel steering angle in radians (positive steers right). */
+    this.steerAngle = 0;
+    /** @type {number} Engine load 0..1, drives audio and exhaust. */
+    this.engineLoad = 0;
+    /** @type {boolean} Whether the rear axle has broken traction. */
+    this.drifting = false;
+    /** @type {number} Drift intensity 0..1. */
+    this.driftAmount = 0;
+    /** @type {boolean} True while every wheel is off the ground. */
+    this.airborne = false;
+
+    /** @type {number} Structural health, 0..1000. */
+    this.health = MAX_HEALTH;
+    /** @type {number} Full health for HUD normalisation. */
+    this.maxHealth = MAX_HEALTH;
+    /** @type {boolean} True once the wreck has exploded. */
+    this.isDestroyed = false;
+    /** @type {boolean} Whether the renderer should draw this vehicle. */
+    this.visible = true;
+    /** @type {boolean} Engine running. */
+    this.engineOn = true;
+    /** @type {boolean} Set by traffic/parking code. */
+    this.parked = false;
+    /** @type {boolean} True while the human player is driving. */
+    this.isPlayer = false;
+    /** @type {Object|null} Driving entity (player or AI). */
+    this.driver = null;
+    /** @type {Array<Object|null>} One slot per seat. */
+    this.occupants = new Array(t.seats).fill(null);
+    /** @type {number} Update-rate divider set by `game.js`. */
+    this.lodSkip = 0;
+
+    /** @type {Object} Driver input. */
+    this.input = { throttle: 0, brake: 0, steer: 0, handbrake: false, horn: false };
+    /** @type {Object} Lamp state; see {@link Vehicle#setLights}. */
+    this.lights = { head: false, brake: false, reverse: false, siren: false, indicator: 0 };
+    /** @type {boolean} Whether the siren wails (police only). */
+    this.sirenOn = false;
+
+    // --- paint -------------------------------------------------------------------------------
+    let color = o.color;
+    if (typeof color === 'string') color = PAINT[color] || null;
+    if (!color || color.length < 3) {
+      color = t.colorOptions[this.rng.int(0, t.colorOptions.length - 1)];
+    }
+    /** @type {Float32Array} Linear rgb body colour. */
+    this.color = new Float32Array([color[0], color[1], color[2]]);
+    /** @type {boolean} Whether the police kit is active. */
+    this.isPolice = !!o.isPolice || t.police;
+
+    // --- wheels -------------------------------------------------------------------------------
+    const hx = t.track * 0.5;
+    const hz = t.wheelBase * 0.5;
+    /** @type {Array<Object>} Four suspension wheels, front pair first. */
+    this.wheels = [
+      makeWheel(-hx, -hz, true, t),
+      makeWheel(hx, -hz, true, t),
+      makeWheel(-hx, hz, false, t),
+      makeWheel(hx, hz, false, t)
+    ];
+
+    // --- derived / internal -------------------------------------------------------------------
+    this._a = t.wheelBase * (1 - t.weightFront);   // CG -> front axle
+    this._b = t.wheelBase * t.weightFront;         // CG -> rear axle
+    this._accelLong = 0;
+    this._accelLat = 0;
+    this._shiftTimer = 0;
+    this._settled = false;
+    this._fuse = -1;
+    this._burning = false;
+    this._smoking = false;
+    this._viewDist = 0;
+    this._sfxAccum = 0;
+    this._smokeAccum = 0;
+    this._exhaustAccum = 0;
+    this._skidAccum = 0;
+    this._sirenPhase = this.rng.next() * 4;
+    this._engineVoice = null;
+    this._screech = null;
+    this._screechLevel = 0;
+    this._sirenHandle = null;
+    this._impactCooldown = 0;
+    this._lastCrashSpeed = 0;
+    this._safeX = this.position[0];
+    this._safeY = this.position[1];
+    this._safeZ = this.position[2];
+    this._safeYaw = this.yaw;
+    this._groundY = new Float32Array(4);
+    this._groundValid = false;
+    this._prevX = this.position[0];
+    this._prevY = this.position[1];
+    this._prevZ = this.position[2];
+    this._contacts = 0;
+    this._age = 0;
+    this._distanceDriven = 0;
+
+    for (let i = 0; i < 4; i++) this._groundY[i] = this.position[1] - t.comHeight;
+  }
+
+  /** @returns {number} Body damage as a 0..1 fraction. */
+  get damage() {
+    return 1 - clamp(this.health / this.maxHealth, 0, 1);
+  }
+
+  /** @returns {boolean} True when the wreck is burning. */
+  get burning() {
+    return this._burning;
+  }
+
+  /**
+   * World-space forward vector (unit, ground plane).
+   * @param {ArrayLike<number>} out Receives the vector.
+   * @returns {ArrayLike<number>} out
+   */
+  getForward(out) {
+    out[0] = -Math.sin(this.yaw);
+    out[1] = 0;
+    out[2] = -Math.cos(this.yaw);
+    return out;
+  }
+
+  /**
+   * World-space right vector (unit, ground plane).
+   * @param {ArrayLike<number>} out Receives the vector.
+   * @returns {ArrayLike<number>} out
+   */
+  getRight(out) {
+    out[0] = Math.cos(this.yaw);
+    out[1] = 0;
+    out[2] = -Math.sin(this.yaw);
+    return out;
+  }
+
+  /**
+   * Places the vehicle at a new position and clears its motion.
+   * @param {number} x World X.
+   * @param {number} y World Y of the centre of mass.
+   * @param {number} z World Z.
+   * @param {number} [yaw=0] Heading.
+   * @returns {void}
+   */
+  reset(x, y, z, yaw = 0) {
+    vec3.set(this.position, x, y, z);
+    vec3.set(this.velocity, 0, 0, 0);
+    this.yaw = yaw;
+    this.yawRate = 0;
+    this.pitch = 0;
+    this.roll = 0;
+    this.forwardSpeed = 0;
+    this.speed = 0;
+    this.speedMs = 0;
+    this.gear = 1;
+    this.rpm = this.type.idleRpm;
+    this._settled = false;
+    this._groundValid = false;
+  }
+
+  /**
+   * Advances the simulation. Called once per frame by `game.js` with the frame delta
+   * already scaled for this vehicle's LOD step.
+   * @param {number} dt Seconds since the previous update for this vehicle.
+   * @param {Object} collision CollisionWorld instance.
+   * @param {Object} [ctx] The `Game` instance.
+   * @returns {void}
+   */
+  update(dt, collision, ctx) {
+    if (ctx) this.game = ctx;
+    let d = fin(dt, 0);
+    if (!(d > 0)) return;
+    if (d > MAX_FRAME_DT) d = MAX_FRAME_DT;
+    this._age += d;
+    this._impactCooldown = Math.max(0, this._impactCooldown - d);
+
+    const game = this.game;
+    if (game && game.camera && game.camera.position) {
+      const cp = game.camera.position;
+      this._viewDist = Math.hypot(this.position[0] - cp[0], this.position[1] - cp[1],
+        this.position[2] - cp[2]);
+    }
+
+    this._prevX = this.position[0];
+    this._prevY = this.position[1];
+    this._prevZ = this.position[2];
+
+    this._sampleGround(collision, true);
+    if (!this._settled) {
+      // First frame: drop the body straight onto the suspension rest height.
+      let best = -Infinity;
+      for (let i = 0; i < 4; i++) if (this._groundY[i] > best) best = this._groundY[i];
+      if (Number.isFinite(best)) this.position[1] = best + this.type.comHeight;
+      this._settled = true;
+    }
+
+    this._readInput();
+
+    const steps = Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(d / FIXED_STEP)));
+    const h = d / steps;
+    const resampleEvery = Math.max(1, Math.ceil(steps / 4));
+    for (let s = 0; s < steps; s++) {
+      if (s > 0 && (s % resampleEvery) === 0) this._sampleGround(collision, false);
+      this._step(h);
+    }
+
+    this._collideWorld(collision);
+    this._postStep(d);
+  }
+
+  /**
+   * Samples the ground height under each wheel. Cheap: one hashed column query per wheel.
+   * @param {Object} collision CollisionWorld.
+   * @param {boolean} force Sample even when the vehicle is asleep.
+   * @returns {void}
+   */
+  _sampleGround(collision, force) {
+    const t = this.type;
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    const py = this.position[1];
+    const ceiling = py + t.wheelRadius + 0.35;
+    if (!collision || typeof collision.groundHeight !== 'function') {
+      for (let i = 0; i < 4; i++) this._groundY[i] = 0;
+      this._groundValid = true;
+      return;
+    }
+    if (!force && !this._groundValid) return;
+    for (let i = 0; i < 4; i++) {
+      const w = this.wheels[i];
+      // Local (x, z) rotated into world: right = (c, -s), forward = (-s, -c).
+      const wx = this.position[0] + w.localX * c - w.localZ * s;
+      const wz = this.position[2] - w.localX * s - w.localZ * c;
+      let g = collision.groundHeight(wx, wz, ceiling);
+      if (!Number.isFinite(g)) g = py - t.comHeight;
+      // Never let a stale sample teleport the car; limit the per-sample step.
+      this._groundY[i] = g;
+      w.worldX = wx;
+      w.worldZ = wz;
+    }
+    this._groundValid = true;
+  }
+
+  /**
+   * Converts raw driver input into steering angle, throttle, brake and gear selection.
+   * @returns {void}
+   */
+  _readInput() {
+    const t = this.type;
+    const inp = this.input;
+    this._inThrottle = clamp(fin(inp.throttle, 0), -1, 1);
+    this._inBrake = clamp(fin(inp.brake, 0), 0, 1);
+    this._inSteer = clamp(fin(inp.steer, 0), -1, 1);
+    this._inHandbrake = !!inp.handbrake;
+    if (this.isDestroyed || !this.engineOn) {
+      this._inThrottle = 0;
+      this._inBrake = Math.max(this._inBrake, this.isDestroyed ? 0.15 : 0);
+    }
+    // Gear selection mirrors what game.js feeds us: S brakes while rolling forward and
+    // engages reverse once the car is nearly stopped.
+    const fs = this.forwardSpeed;
+    if (this.gear === -1) {
+      if (this._inThrottle > 0.1) {
+        if (fs < -0.7) this._inBrake = Math.max(this._inBrake, 1);
+        else this.gear = 1;
+      }
+    } else if (this._inThrottle < -0.1) {
+      if (fs > 0.8) this._inBrake = Math.max(this._inBrake, 1);
+      else this.gear = -1;
+    }
+    this._drive = this.gear === -1
+      ? (this._inThrottle < 0 ? -this._inThrottle : 0)
+      : (this._inThrottle > 0 ? this._inThrottle : 0);
+  }
+
+  /**
+   * One fixed physics sub-step: suspension, load transfer, engine, gearbox, tyres, integration.
+   * @param {number} h Sub-step length in seconds (always 1/120 or smaller).
+   * @returns {void}
+   */
+  _step(h) {
+    const t = this.type;
+    const mass = t.mass;
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    const fx = -s;
+    const fz = -c;
+    const rx = c;
+    const rz = -s;
+
+    // --- body frame velocity ------------------------------------------------------------------
+    let u = this.velocity[0] * fx + this.velocity[2] * fz;
+    let vlat = this.velocity[0] * rx + this.velocity[2] * rz;
+    const speedAbs = Math.hypot(this.velocity[0], this.velocity[2]);
+
+    // --- steering: speed sensitive, rate limited, self centering --------------------------------
+    const speedFrac = clamp(speedAbs / t.maxSpeed, 0, 1);
+    const authority = 1 - speedFrac * 0.68;
+    let target = this._inSteer * authority;
+    const rate = t.steerSpeed * (Math.abs(this._inSteer) < 0.06 ? 1.9 : 1.0);
+    this.steer = moveTowards(this.steer, target, rate * h);
+    this.steerAngle = this.steer * t.steerMax;
+    const sigma = this.steerAngle;
+    const cosS = Math.cos(sigma);
+    const sinS = Math.sin(sigma);
+
+    // --- suspension ------------------------------------------------------------------------------
+    let sumN = 0;
+    let contacts = 0;
+    const rayMax = t.restLength + t.travel * 0.9;
+    for (let i = 0; i < 4; i++) {
+      const w = this.wheels[i];
+      const gy = this._groundY[i];
+      w.groundY = gy;
+      const d = this.position[1] - gy;              // attach point height above ground
+      const len = d - w.radius;                      // suspension extension
+      w.prevSusLen = w.susLen;
+      if (len > rayMax) {
+        w.susLen = rayMax;
+        w.compression = 0;
+        w.contact = false;
+        w.load = 0;
+        continue;
+      }
+      const minLen = t.restLength - t.travel;
+      w.susLen = len < minLen ? minLen : len;
+      w.contact = true;
+      contacts++;
+      const compress = t.restLength - w.susLen;
+      const susVel = (w.prevSusLen - w.susLen) / h;
+      const spring = t.springRate * compress;
+      const damper = t.damperRate * clamp(susVel, -12, 12);
+      let n = spring + damper;
+      if (n < 0) n = 0;
+      // Hard bump stop when the suspension bottoms out.
+      if (len < minLen) n += (minLen - len) * t.springRate * 12;
+      w.compression = clamp(compress / t.travel, 0, 1.4);
+      sumN += n;
+      w.springN = n;
+    }
+    this.airborne = contacts === 0;
+    this._contacts = contacts;
+
+    // --- vertical integration ---------------------------------------------------------------------
+    let vy = this.velocity[1] + (sumN / mass - GRAVITY) * h;
+    if (vy < -70) vy = -70;
+    if (vy > 70) vy = 70;
+    this.velocity[1] = vy;
+
+    // --- load distribution with weight transfer -----------------------------------------------------
+    const downforce = 0.5 * AIR_DENSITY * t.clA * speedAbs * speedAbs;
+    const weight = mass * GRAVITY + downforce;
+    const dLong = mass * this._accelLong * t.comHeight / t.wheelBase;
+    const dLat = mass * this._accelLat * t.comHeight / t.track;
+    let frontTotal = weight * t.weightFront - dLong;
+    let rearTotal = weight * (1 - t.weightFront) + dLong;
+    if (frontTotal < 0) frontTotal = 0;
+    if (rearTotal < 0) rearTotal = 0;
+    const wFL = this.wheels[WHEEL_FL];
+    const wFR = this.wheels[WHEEL_FR];
+    const wRL = this.wheels[WHEEL_RL];
+    const wRR = this.wheels[WHEEL_RR];
+    wFL.load = Math.max(0, frontTotal * 0.5 + dLat * 0.25) * (wFL.contact ? 1 : 0);
+    wFR.load = Math.max(0, frontTotal * 0.5 - dLat * 0.25) * (wFR.contact ? 1 : 0);
+    wRL.load = Math.max(0, rearTotal * 0.5 + dLat * 0.25) * (wRL.contact ? 1 : 0);
+    wRR.load = Math.max(0, rearTotal * 0.5 - dLat * 0.25) * (wRR.contact ? 1 : 0);
+    const loadF = wFL.load + wFR.load;
+    const loadR = wRL.load + wRR.load;
+
+    // --- gearbox and engine ---------------------------------------------------------------------------
+    this._shiftTimer = Math.max(0, this._shiftTimer - h);
+    const ratio = this.gear === -1 ? -t.reverseRatio
+      : this.gear > 0 ? t.gearRatios[this.gear - 1] : 0;
+    const absRatio = Math.abs(ratio);
+    const wheelOmega = Math.abs(u) / t.wheelRadius;
+    let rpmTarget = t.idleRpm;
+    if (absRatio > 0) rpmTarget = wheelOmega * absRatio * t.finalDrive * 9.5492965855;
+    if (rpmTarget < t.idleRpm) rpmTarget = t.idleRpm + this._drive * 900;
+    const redline = t.redline;
+    this.rpm += (Math.min(rpmTarget, redline * 1.03) - this.rpm) * Math.min(1, 16 * h);
+    if (!(this.rpm > 0)) this.rpm = t.idleRpm;
+
+    if (this._shiftTimer <= 0 && this.gear > 0) {
+      if (this.rpm > redline * 0.93 && this.gear < t.gearRatios.length && this._drive > 0.05) {
+        this.gear++;
+        this._shiftTimer = SHIFT_TIME;
+      } else if (this.rpm < redline * 0.42 && this.gear > 1) {
+        this.gear--;
+        this._shiftTimer = SHIFT_TIME;
+      }
+    }
+
+    let driveForce = 0;
+    if (absRatio > 0 && this.engineOn && !this.isDestroyed) {
+      const torque = t.peakTorque * torqueCurve(this.rpm / redline) * this._drive;
+      driveForce = torque * absRatio * t.finalDrive * DRIVETRAIN_EFF / t.wheelRadius;
+      if (this.gear === -1) driveForce = -driveForce;
+      if (this._shiftTimer > 0) driveForce *= 0.07;
+    }
+    // Governor: never push past the type maximum (and only a third of it in reverse).
+    const revLimit = t.maxSpeed * 0.34;
+    if (u > t.maxSpeed && driveForce > 0) driveForce = 0;
+    if (u < -revLimit && driveForce < 0) driveForce = 0;
+    // Engine braking when coasting in gear.
+    let engineBrake = 0;
+    if (absRatio > 0 && this._drive < 0.03 && this.engineOn) {
+      engineBrake = -Math.sign(u) * t.peakTorque * 0.13 * absRatio * t.finalDrive / t.wheelRadius;
+      if (Math.abs(u) < 0.4) engineBrake = 0;
+    }
+    this.engineLoad = clamp(this._drive * 0.75 + Math.abs(driveForce) / (mass * 22), 0, 1);
+
+    // --- brakes --------------------------------------------------------------------------------------
+    const uSign = u > 0.02 ? 1 : u < -0.02 ? -1 : 0;
+    const handbrake = this._inHandbrake && !this.isDestroyed;
+    let brakeF = -uSign * t.brakeForce * 0.60 * this._inBrake;
+    let brakeR = -uSign * t.brakeForce * 0.40 * this._inBrake;
+    if (handbrake) brakeR += -uSign * t.brakeForce * 0.55;
+
+    // --- drive split ------------------------------------------------------------------------------------
+    let driveF = 0;
+    let driveR = 0;
+    if (t.drive === 'fwd') driveF = driveForce;
+    else if (t.drive === 'rwd') driveR = driveForce;
+    else { driveF = driveForce * 0.42; driveR = driveForce * 0.58; }
+    driveF += engineBrake * 0.5;
+    driveR += engineBrake * 0.5;
+
+    // --- tyre forces ---------------------------------------------------------------------------------------
+    const muBase = t.grip;
+    const muF = muBase;
+    let muR = muBase;
+    if (handbrake) muR *= 0.44;
+    const gripF = muF * loadF;
+    const gripR = muR * loadR;
+
+    // Longitudinal first: the drive axle can overwhelm its grip and light up the tyres.
+    let flongF = clamp(driveF + brakeF, -gripF, gripF);
+    let flongR = clamp(driveR + brakeR, -gripR, gripR);
+    const slipDriveF = gripF > 1 ? clamp((Math.abs(driveF + brakeF) - gripF) / gripF, 0, 1) : 0;
+    const slipDriveR = gripR > 1 ? clamp((Math.abs(driveR + brakeR) - gripR) / gripR, 0, 1) : 0;
+
+    // Remaining lateral budget (friction circle).
+    const latMaxF = Math.sqrt(Math.max(0, gripF * gripF - flongF * flongF));
+    const latMaxR = Math.sqrt(Math.max(0, gripR * gripR - flongR * flongR));
+
+    const den = Math.abs(u) < 1.6 ? 1.6 : Math.abs(u);
+    const vLatF = vlat - this.yawRate * this._a;
+    const vLatR = vlat + this.yawRate * this._b;
+    // Front wheel frame (rotate the body-frame velocity by -sigma).
+    const wLongF = u * cosS + vLatF * sinS;
+    const wLatF = -u * sinS + vLatF * cosS;
+    const denF = Math.abs(wLongF) < 1.6 ? 1.6 : Math.abs(wLongF);
+    const alphaF = -Math.atan2(wLatF, denF);
+    const alphaR = -Math.atan2(vLatR, den);
+    this._alphaF = alphaF;
+    this._alphaR = alphaR;
+
+    let fyF = muF * loadF * tyreCurve(alphaF, PEAK_SLIP);
+    let fyR = muR * loadR * tyreCurve(alphaR, PEAK_SLIP * (1 + t.driftFactor * 0.12));
+    if (fyF > latMaxF) fyF = latMaxF; else if (fyF < -latMaxF) fyF = -latMaxF;
+    if (fyR > latMaxR) fyR = latMaxR; else if (fyR < -latMaxR) fyR = -latMaxR;
+
+    // Back to body axes.
+    const bodyLongF = flongF * cosS - fyF * sinS;
+    const bodyLatF = flongF * sinS + fyF * cosS;
+    const bodyLongR = flongR;
+    const bodyLatR = fyR;
+
+    // --- resistance ------------------------------------------------------------------------------------------
+    const drag = 0.5 * AIR_DENSITY * t.cdA * u * Math.abs(u);
+    const roll = CRR * (loadF + loadR) * uSign;
+    const totalLong = bodyLongF + bodyLongR - drag - roll;
+    const totalLat = bodyLatF + bodyLatR;
+
+    // --- yaw ---------------------------------------------------------------------------------------------------
+    let mz = -this._a * bodyLatF + this._b * bodyLatR;
+    mz -= this.yawRate * t.yawInertia * YAW_DAMP;
+    let yawAcc = mz / t.yawInertia;
+    // Clamp so no single sub-step can spin the car.
+    const maxYawAcc = 26;
+    if (yawAcc > maxYawAcc) yawAcc = maxYawAcc;
+    else if (yawAcc < -maxYawAcc) yawAcc = -maxYawAcc;
+    let yawRate = this.yawRate + yawAcc * h;
+
+    // Low-speed kinematic blend keeps parking manoeuvres crisp and kills the
+    // ill-conditioned region of the bicycle model near standstill.
+    const kin = -u * Math.tan(sigma) / Math.max(0.4, t.wheelBase);
+    const kBlend = clamp(1 - Math.abs(u) / 4.0, 0, 1) * 0.9;
+    if (kBlend > 0 && contacts > 0) yawRate = lerp(yawRate, kin, kBlend);
+    if (contacts === 0) yawRate *= Math.max(0, 1 - 1.2 * h);
+    if (yawRate > MAX_YAW_RATE) yawRate = MAX_YAW_RATE;
+    else if (yawRate < -MAX_YAW_RATE) yawRate = -MAX_YAW_RATE;
+    this.yawRate = yawRate;
+    this.yaw = wrapAngle(this.yaw + yawRate * h);
+
+    // --- linear integration ---------------------------------------------------------------------------------------
+    const aLong = contacts > 0 ? totalLong / mass : (-drag / mass);
+    const aLat = contacts > 0 ? totalLat / mass : 0;
+    this._accelLong = damp(this._accelLong, aLong, 22, h);
+    this._accelLat = damp(this._accelLat, aLat, 22, h);
+    u += aLong * h;
+    vlat += aLat * h;
+
+    // Complete stop under braking / at idle: kill the residual creep so the car really parks.
+    if (Math.abs(u) < 0.55 && this._drive < 0.03 && (this._inBrake > 0.15 || handbrake)) {
+      u = 0;
+      vlat *= 0.3;
+      this.yawRate *= 0.4;
+    } else if (Math.abs(u) < 0.06 && this._drive < 0.02) {
+      u = 0;
+    }
+
+    // Rebuild the world velocity from the body frame.
+    this.velocity[0] = u * fx + vlat * rx;
+    this.velocity[2] = u * fz + vlat * rz;
+
+    // Hard speed clamp: nothing may exceed the type maximum by more than 3%.
+    const cap = t.maxSpeed * OVERSPEED_ALLOW;
+    const planar = Math.hypot(this.velocity[0], this.velocity[2]);
+    if (planar > cap) {
+      const k = cap / planar;
+      this.velocity[0] *= k;
+      this.velocity[2] *= k;
+      u *= k;
+      vlat *= k;
+    }
+
+    this.position[0] += this.velocity[0] * h;
+    this.position[1] += this.velocity[1] * h;
+    this.position[2] += this.velocity[2] * h;
+
+    // --- ground floor: the body can never sink through the road ---------------------------------------------------
+    let floor = -Infinity;
+    for (let i = 0; i < 4; i++) if (this._groundY[i] > floor) floor = this._groundY[i];
+    if (Number.isFinite(floor)) {
+      const minY = floor + t.wheelRadius + (t.restLength - t.travel) * 0.55;
+      if (this.position[1] < minY) {
+        this.position[1] = minY;
+        if (this.velocity[1] < 0) this.velocity[1] = 0;
+      }
+    }
+
+    this.forwardSpeed = u;
+    this.lateralSpeed = vlat;
+
+    // --- drift bookkeeping -----------------------------------------------------------------------------------------
+    const rearSlip = Math.abs(alphaR) / PEAK_SLIP;
+    const slipping = Math.max(rearSlip - 1, 0) + slipDriveR * 1.4 + slipDriveF * 0.5;
+    this.driftAmount = clamp(slipping * 0.55, 0, 1);
+    this.drifting = Math.abs(u) > 4.5 && (rearSlip > 1.35 || slipDriveR > 0.25 || handbrake);
+    wRL.slip = alphaR;
+    wRR.slip = alphaR;
+    wFL.slip = alphaF;
+    wFR.slip = alphaF;
+    const skidR = clamp(Math.max(rearSlip - 0.95, slipDriveR * 1.6), 0, 1.6);
+    const skidF = clamp(Math.max(Math.abs(alphaF) / PEAK_SLIP - 0.95, slipDriveF * 1.6), 0, 1.6);
+    wRL.skid = skidR;
+    wRR.skid = skidR;
+    wFL.skid = skidF;
+    wFR.skid = skidF;
+    wRL.locked = handbrake || (this._inBrake > 0.85 && skidR > 0.4);
+    wRR.locked = wRL.locked;
+
+    // --- wheel spin ---------------------------------------------------------------------------------------------------
+    for (let i = 0; i < 4; i++) {
+      const w = this.wheels[i];
+      let omega = u / t.wheelRadius;
+      const driven = (t.drive === 'awd') || (t.drive === 'fwd' ? w.front : !w.front);
+      if (driven && this._drive > 0.05) {
+        const spinBoost = w.front ? slipDriveF : slipDriveR;
+        omega *= 1 + spinBoost * 2.5;
+        if (Math.abs(u) < 0.5 && spinBoost > 0.05) omega += Math.sign(driveForce) * spinBoost * 45;
+      }
+      if (w.locked && !w.front) omega = 0;
+      w.spinRate = omega;
+      w.spin += omega * h;
+      if (w.spin > 1e6 || w.spin < -1e6) w.spin = 0;
+      w.steerAngle = w.front ? sigma : 0;
+    }
+
+    // --- NaN guard -------------------------------------------------------------------------------------------------------
+    if (!Number.isFinite(this.position[0]) || !Number.isFinite(this.position[1]) ||
+      !Number.isFinite(this.position[2]) || !Number.isFinite(this.yaw) ||
+      !Number.isFinite(this.velocity[0]) || !Number.isFinite(this.velocity[1]) ||
+      !Number.isFinite(this.velocity[2]) || !Number.isFinite(this.yawRate)) {
+      this.position[0] = this._safeX;
+      this.position[1] = this._safeY;
+      this.position[2] = this._safeZ;
+      this.yaw = this._safeYaw;
+      vec3.set(this.velocity, 0, 0, 0);
+      this.yawRate = 0;
+      this.forwardSpeed = 0;
+      this.lateralSpeed = 0;
+      this._accelLong = 0;
+      this._accelLat = 0;
+      this.rpm = t.idleRpm;
+    } else {
+      this._safeX = this.position[0];
+      this._safeY = this.position[1];
+      this._safeZ = this.position[2];
+      this._safeYaw = this.yaw;
+    }
+  }

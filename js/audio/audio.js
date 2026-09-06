@@ -582,6 +582,12 @@ export class AudioEngine {
   /**
    * Generates a stereo impulse response: exponentially decaying, progressively darkened
    * noise with a short pre-delay and a set of early reflections.
+   *
+   * The result is normalised by **energy**, not by peak. The convolver runs with
+   * `normalize = false`, where the wet output level is the input times `sqrt(sum(h^2))`;
+   * for a tail this long that is ~25 dB above unity if the buffer is only peak-normalised,
+   * which would drown the dry mix and pin the master limiter. Scaling by the RMS instead
+   * gives the reverb unity wet gain, so a send of `x` means `x` times the dry level.
    * @param {number} [seconds] Tail length (-60 dB point).
    * @returns {AudioBuffer} The impulse response.
    */
@@ -594,6 +600,7 @@ export class AudioEngine {
     const preDelay = Math.floor(sr * 0.011);
     const decay = 6.9 / dur;
     let peak = 0;
+    let energy = 0;
     for (let ch = 0; ch < 2; ch++) {
       const data = buf.getChannelData(ch);
       const skew = ch === 0 ? 1 : 1.07;
@@ -622,9 +629,14 @@ export class AudioEngine {
       for (let i = 0; i < len; i++) {
         const v = data[i] < 0 ? -data[i] : data[i];
         if (v > peak) peak = v;
+        energy += data[i] * data[i];
       }
     }
-    const norm = peak > 0 ? 0.5 / peak : 1;
+    // Unity convolution gain: divide by the per-channel RMS sum, then make sure no single
+    // sample can still clip the convolver.
+    const rms = Math.sqrt(energy / 2);
+    let norm = rms > 1e-9 ? 1 / rms : 1;
+    if (peak * norm > 1) norm = peak > 0 ? 1 / peak : 1;
     for (let ch = 0; ch < 2; ch++) {
       const data = buf.getChannelData(ch);
       for (let i = 0; i < len; i++) data[i] *= norm;

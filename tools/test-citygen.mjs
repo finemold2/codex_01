@@ -592,6 +592,133 @@ const obb = (ax, az, ahx, ahz, arot, bx, bz, bhx, bhz, brot, margin) => {
   check(nan === 0, 'option variants contain no non-finite numbers');
 }
 
+/* --------------------------------- long polylines are fully indexed */
+{
+  // The nearest-point index used to pack (polyline, segment) into one integer
+  // with a 128-wide stride, silently dropping every segment past the 127th.
+  // Feed it a long lane and check the far end is still found.
+  const pts = [];
+  for (let i = 0; i <= 400; i++) pts.push([i * 3, 0]);
+  const fake = {
+    bounds: { min: [-10, -10], max: [1300, 10] },
+    lanes: [{ id: 0, pts, width: 3, next: [], nodeId: null, speedLimit: 10, oneWay: true }],
+    walks: [{ id: 0, pts, next: [], crossing: false }],
+    roads: [], districts: []
+  };
+  const r1 = laneAt(fake, 1195, 4);
+  check(r1 !== null && Math.abs(r1.dist - 4) < 0.01,
+    `laneAt indexes segments past the old 128 limit (dist ${r1 ? r1.dist.toFixed(2) : 'null'})`);
+  const r2 = walkAt(fake, 900, -3);
+  check(r2 !== null && Math.abs(r2.dist - 3) < 0.01,
+    `walkAt indexes segments past the old 128 limit (dist ${r2 ? r2.dist.toFixed(2) : 'null'})`);
+}
+
+/* ------------------------------------------------- multi-seed regression */
+{
+  // The defects fixed in this module (footprints shoved across a road by the
+  // clip pass, street furniture standing in traffic lanes, props growing
+  // through each other, signage stranded after a height change) were all
+  // seed-dependent, so re-check the invariants over a spread of seeds.
+  const PROP_R = {
+    streetlight: 0.45, tree: 1.5, palm: 1.3, bench: 1.0, hydrant: 0.35,
+    trafficlight: 0.45, sign: 0.25, bin: 0.45, busstop: 2.2, billboard: 1.8,
+    barrier: 1.1, cone: 0.3, dumpster: 1.3, planter: 0.9, bollard: 0.25,
+    atm: 0.6, phonebox: 0.7, streetvendor: 1.2, lamp: 0.4
+  };
+  const totals = { keepout: 0, overlap: 0, outOfLot: 0, signs: 0, onRoad: 0, clash: 0, dangling: 0 };
+  const seeds = [20260906, 4242, 7, 1337, 99, 555, 31337, 2, 1000003];
+  for (const seed of seeds) {
+    const c = generateCity(seed, {});
+    const rects = c.roads.map((r) => {
+      const len = Math.hypot(r.bx - r.ax, r.bz - r.az);
+      return {
+        x: (r.ax + r.bx) * 0.5, z: (r.az + r.bz) * 0.5,
+        hx: len * 0.5, hz: r.width * 0.5, rot: Math.atan2(r.bz - r.az, r.bx - r.ax)
+      };
+    });
+    for (const b of c.buildings) {
+      for (const rc of rects) {
+        if (Math.hypot(rc.x - b.x, rc.z - b.z) > rc.hx + rc.hz + 60) continue;
+        if (obb(b.x, b.z, b.w * 0.5, b.d * 0.5, b.rot,
+          rc.x, rc.z, rc.hx, rc.hz + c.sidewalkWidth, rc.rot, 0)) { totals.keepout++; break; }
+      }
+      const lot = c.lots[b.lotId];
+      if (b.x - b.w * 0.5 < lot.x0 - 0.5 || b.x + b.w * 0.5 > lot.x1 + 0.5 ||
+        b.z - b.d * 0.5 < lot.z0 - 0.5 || b.z + b.d * 0.5 > lot.z1 + 0.5) totals.outOfLot++;
+      for (const sg of b.signs) {
+        const halfAlong = (sg.face === 0 || sg.face === 2) ? b.d * 0.5 : b.w * 0.5;
+        if (sg.w * 0.5 > halfAlong + 0.05 || sg.y + sg.h * 0.5 > b.h + 0.05 ||
+          sg.y - sg.h * 0.5 < 0) totals.signs++;
+      }
+    }
+    const cell = 40;
+    const grid = new Map();
+    for (const b of c.buildings) {
+      const ex = Math.abs(b.w * 0.5 * Math.cos(b.rot)) + Math.abs(b.d * 0.5 * Math.sin(b.rot));
+      const ez = Math.abs(b.w * 0.5 * Math.sin(b.rot)) + Math.abs(b.d * 0.5 * Math.cos(b.rot));
+      const keys = new Set();
+      for (let i = Math.floor((b.x - ex) / cell); i <= Math.floor((b.x + ex) / cell); i++) {
+        for (let j = Math.floor((b.z - ez) / cell); j <= Math.floor((b.z + ez) / cell); j++) keys.add(i + ',' + j);
+      }
+      for (const k of keys) {
+        for (const o of (grid.get(k) || [])) {
+          if (obb(b.x, b.z, b.w * 0.5, b.d * 0.5, b.rot, o.x, o.z, o.w * 0.5, o.d * 0.5, o.rot, 0)) {
+            totals.overlap++; break;
+          }
+        }
+      }
+      for (const k of keys) {
+        let arr = grid.get(k);
+        if (!arr) { arr = []; grid.set(k, arr); }
+        arr.push(b);
+      }
+    }
+    const onWall = (p) => p.type === 'billboard' && p.extra && p.extra.onWall;
+    for (const p of c.props) {
+      if (p.type === 'cone' || p.type === 'barrier' || onWall(p)) continue;
+      for (const rc of rects) {
+        if (Math.hypot(rc.x - p.x, rc.z - p.z) > rc.hx + rc.hz + 5) continue;
+        if (obb(p.x, p.z, 0.25, 0.25, 0, rc.x, rc.z, rc.hx, rc.hz, rc.rot, 0)) { totals.onRoad++; break; }
+      }
+    }
+    const pc = 6;
+    const pg = new Map();
+    for (let i = 0; i < c.props.length; i++) {
+      const p = c.props[i];
+      const k = Math.floor(p.x / pc) + ',' + Math.floor(p.z / pc);
+      let arr = pg.get(k);
+      if (!arr) { arr = []; pg.set(k, arr); }
+      arr.push(i);
+    }
+    for (let i = 0; i < c.props.length; i++) {
+      const p = c.props[i];
+      if (p.type === 'cone' || onWall(p)) continue;
+      const bi = Math.floor(p.x / pc);
+      const bj = Math.floor(p.z / pc);
+      for (let a = bi - 1; a <= bi + 1; a++) {
+        for (let b2 = bj - 1; b2 <= bj + 1; b2++) {
+          for (const j of (pg.get(a + ',' + b2) || [])) {
+            if (j <= i) continue;
+            const q = c.props[j];
+            if (q.type === 'cone' || onWall(q)) continue;
+            const need = ((PROP_R[p.type] || 0.3) * p.scale + (PROP_R[q.type] || 0.3) * q.scale) * 0.75;
+            if (Math.hypot(p.x - q.x, p.z - q.z) < need) totals.clash++;
+          }
+        }
+      }
+    }
+    for (const l of c.lanes) for (const n of l.next) if (!(n >= 0 && n < c.lanes.length)) totals.dangling++;
+    if (c.buildings.length < 600 || c.props.length < 1500) fail(`seed ${seed} is too sparse`);
+  }
+  check(totals.keepout === 0, `${seeds.length} seeds: no building on a road or sidewalk (${totals.keepout})`);
+  check(totals.overlap === 0, `${seeds.length} seeds: no building intersects another (${totals.overlap})`);
+  check(totals.outOfLot === 0, `${seeds.length} seeds: every building stays inside its lot (${totals.outOfLot})`);
+  check(totals.signs === 0, `${seeds.length} seeds: every sign fits its facade (${totals.signs})`);
+  check(totals.onRoad === 0, `${seeds.length} seeds: no street furniture in a traffic lane (${totals.onRoad})`);
+  check(totals.clash === 0, `${seeds.length} seeds: no two props interpenetrate (${totals.clash})`);
+  check(totals.dangling === 0, `${seeds.length} seeds: no dangling lane ids (${totals.dangling})`);
+}
+
 /* -------------------------------------------------------------- summary */
 console.log(`\n${checks - failures}/${checks} checks passed, ${failures} failed.`);
 process.exit(failures ? 1 : 0);

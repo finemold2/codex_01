@@ -20,6 +20,8 @@ const VIEW = viewIdx >= 0 && process.argv[viewIdx + 1] ? process.argv[viewIdx + 
 // --stub redirects the not-yet-written entity modules to tools/stubs/* via an import map, so the
 // full game boot path can be exercised before those modules land.
 const STUB = process.argv.includes('--stub');
+// --pageshot captures the whole page (canvas + DOM overlays such as the HUD) instead of the canvas.
+const PAGESHOT = process.argv.includes('--pageshot');
 const IMPORT_MAP = STUB ? `<script type="importmap">${JSON.stringify({
   imports: {
     '/js/entities/vehicle.js': '/tools/stubs/vehicle.js',
@@ -93,11 +95,12 @@ if (SHOT) {
   // The canvas is not preserveDrawingBuffer, so ask the probe to re-render then grab it in the
   // same task via toDataURL, falling back to a page screenshot.
   try {
-    const dataUrl = await page.evaluate(async () => {
+    const dataUrl = await page.evaluate(async (pageshot) => {
       if (typeof window.__shot === 'function') await window.__shot(window.__shotArg);
+      if (pageshot) return null;
       const c = document.getElementById('c');
       try { return c.toDataURL('image/png'); } catch { return null; }
-    });
+    }, PAGESHOT);
     if (dataUrl && dataUrl.startsWith('data:image/png;base64,')) {
       const { writeFile } = await import('node:fs/promises');
       await writeFile(SHOT, Buffer.from(dataUrl.slice(22), 'base64'));
