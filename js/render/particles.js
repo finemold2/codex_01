@@ -1564,8 +1564,11 @@ export class ParticleSystem {
           P.emissive = 1;
           P.additive = 1;
           P.light = 1;
-          P.lightRadius = 7 * power;
-          P.lightPower = 5 * power;
+          // entities/weapons.js already submits a muzzle light for the shot; this one stacks on
+          // top of it. At 7 m / power 5 the pair blew the shooter out to flat white on every shot,
+          // so keep the particle's own contribution to a tight, modest pop.
+          P.lightRadius = 4.5 * power;
+          P.lightPower = 1.8 * power;
           P.x += dx * 0.06;
           P.y += dy * 0.06;
           P.z += dz * 0.06;
