@@ -2650,3 +2650,352 @@ function buildSpawns(ctx, city) {
   addMission('리버사이드 주택가', c[0], c[1]);
   return spawns;
 }
+
+/* ------------------------------------------------------------------ *
+ * Polyline nearest-point index (built lazily, cached per city)
+ * ------------------------------------------------------------------ */
+
+/** Scratch candidate list shared by every index query. */
+const _qhits = [];
+/** Scratch used by the exported query helpers. */
+const _tmp2 = vec2.create();
+
+/**
+ * Nearest-point acceleration structure over a list of polylines.
+ */
+class PolyIndex {
+  /**
+   * @param {Array<{pts:number[][]}>} items Polyline owners (lanes or walks).
+   * @param {number} cell Cell size in metres.
+   */
+  constructor(items, cell) {
+    this.items = items;
+    this.cell = cell;
+    /** @type {Float64Array[]} */
+    this.cum = new Array(items.length);
+    this.total = new Float64Array(items.length);
+    let minX = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < items.length; i++) {
+      const pts = items[i].pts;
+      for (let p = 0; p < pts.length; p++) {
+        if (pts[p][0] < minX) minX = pts[p][0];
+        if (pts[p][0] > maxX) maxX = pts[p][0];
+        if (pts[p][1] < minZ) minZ = pts[p][1];
+        if (pts[p][1] > maxZ) maxZ = pts[p][1];
+      }
+    }
+    if (!isFinite(minX)) {
+      minX = -1; minZ = -1; maxX = 1; maxZ = 1;
+    }
+    this.grid = new Grid2D(minX, minZ, maxX, maxZ, cell);
+    for (let i = 0; i < items.length; i++) {
+      const pts = items[i].pts;
+      const cum = new Float64Array(pts.length);
+      let acc = 0;
+      for (let s = 0; s + 1 < pts.length; s++) {
+        cum[s] = acc;
+        const ax = pts[s][0];
+        const az = pts[s][1];
+        const bx = pts[s + 1][0];
+        const bz = pts[s + 1][1];
+        acc += Math.hypot(bx - ax, bz - az);
+        if (s < 127) {
+          this.grid.insert(Math.min(ax, bx), Math.min(az, bz),
+            Math.max(ax, bx), Math.max(az, bz), i * 128 + s);
+        }
+      }
+      cum[pts.length - 1] = acc;
+      this.cum[i] = cum;
+      this.total[i] = acc;
+    }
+  }
+
+  /**
+   * Finds the closest point on any indexed polyline.
+   * @param {number} x Query x.
+   * @param {number} z Query z.
+   * @param {object} out Result object to fill.
+   * @returns {object|null} `out` or null when nothing is in range.
+   */
+  nearest(x, z, out) {
+    let r = this.cell;
+    let bestI = -1;
+    let bestS = 0;
+    let bestT = 0;
+    let bestD = Infinity;
+    let bestX = 0;
+    let bestZ = 0;
+    for (let step = 0; step < 7; step++) {
+      this.grid.query(x - r, z - r, x + r, z + r, _qhits);
+      for (let n = 0; n < _qhits.length; n++) {
+        const code = _qhits[n];
+        const i = (code / 128) | 0;
+        const s = code % 128;
+        const pts = this.items[i].pts;
+        const ax = pts[s][0];
+        const az = pts[s][1];
+        const bx = pts[s + 1][0];
+        const bz = pts[s + 1][1];
+        const dx = bx - ax;
+        const dz = bz - az;
+        const l2 = dx * dx + dz * dz;
+        let t = l2 > 0 ? ((x - ax) * dx + (z - az) * dz) / l2 : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const cxp = ax + dx * t;
+        const czp = az + dz * t;
+        const d = (cxp - x) * (cxp - x) + (czp - z) * (czp - z);
+        if (d < bestD) {
+          bestD = d;
+          bestI = i;
+          bestS = s;
+          bestT = t;
+          bestX = cxp;
+          bestZ = czp;
+        }
+      }
+      const found = Math.sqrt(bestD);
+      if (bestI >= 0 && found <= r) break;
+      if (step === 6) break;
+      r *= 2;
+    }
+    if (bestI < 0) return null;
+    const cum = this.cum[bestI];
+    const total = this.total[bestI];
+    const along = cum[bestS] + (cum[bestS + 1] - cum[bestS]) * bestT;
+    out.lane = this.items[bestI];
+    out.walk = this.items[bestI];
+    out.t = total > 0 ? along / total : 0;
+    out.point[0] = bestX;
+    out.point[1] = bestZ;
+    out.x = bestX;
+    out.z = bestZ;
+    out.dist = Math.sqrt(bestD);
+    return out;
+  }
+}
+
+/** Per-city caches so repeated queries never rebuild their index. */
+const _laneIndex = new WeakMap();
+const _walkIndex = new WeakMap();
+const _roadIndex = new WeakMap();
+
+/**
+ * Lazily builds (and caches) the lane index of a city.
+ * @param {object} city City data.
+ * @returns {PolyIndex} Index.
+ */
+function laneIndexOf(city) {
+  let idx = _laneIndex.get(city);
+  if (idx === undefined) {
+    idx = new PolyIndex(city.lanes, 24);
+    _laneIndex.set(city, idx);
+  }
+  return idx;
+}
+
+/**
+ * Lazily builds (and caches) the sidewalk index of a city.
+ * @param {object} city City data.
+ * @returns {PolyIndex} Index.
+ */
+function walkIndexOf(city) {
+  let idx = _walkIndex.get(city);
+  if (idx === undefined) {
+    idx = new PolyIndex(city.walks, 24);
+    _walkIndex.set(city, idx);
+  }
+  return idx;
+}
+
+/**
+ * Lazily builds (and caches) the asphalt index of a city.
+ * @param {object} city City data.
+ * @returns {Grid2D} Index of oriented road rectangles.
+ */
+function roadIndexOf(city) {
+  let idx = _roadIndex.get(city);
+  if (idx === undefined) {
+    const b = city.bounds;
+    idx = new Grid2D(b.min[0], b.min[1], b.max[0], b.max[1], HASH_CELL);
+    for (const r of city.roads) {
+      const dx = r.bx - r.ax;
+      const dz = r.bz - r.az;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      insertBox(idx, {
+        x: (r.ax + r.bx) * 0.5,
+        z: (r.az + r.bz) * 0.5,
+        hx: len * 0.5 + r.width * 0.5,
+        hz: r.width * 0.5,
+        rot: Math.atan2(dz, dx)
+      });
+    }
+    for (const n of city.nodes) {
+      let half = 0;
+      for (const rid of n.roads) half = Math.max(half, city.roads[rid].width * 0.5);
+      if (half > 0) insertBox(idx, { x: n.x, z: n.z, hx: half, hz: half, rot: 0 });
+    }
+    _roadIndex.set(city, idx);
+  }
+  return idx;
+}
+
+/* ------------------------------------------------------------------ *
+ * Public API
+ * ------------------------------------------------------------------ */
+
+/**
+ * Generates the complete city layout for a seed.
+ *
+ * The result is the `CityData` structure defined in docs/ARCHITECTURE.md §7:
+ * `{seed, blockSize, roadWidth, blocksX, blocksZ, bounds, districts, roads,
+ * nodes, lanes, walks, lots, buildings, props, spawns, landmarks, waterLevel}`.
+ * Every `id` equals the object's index in its own array.
+ *
+ * @param {number} [seed] Deterministic seed.
+ * @param {object} [opts] Layout options.
+ * @param {number} [opts.blocksX] Block columns (default 14).
+ * @param {number} [opts.blocksZ] Block rows (default 14).
+ * @param {number} [opts.blockSize] Block edge length in metres (default 64).
+ * @param {number} [opts.roadWidth] Standard carriageway width (default 16).
+ * @param {boolean} [opts.seaSide] Generate the beach / sea margin (default true).
+ * @returns {object} The city data.
+ */
+export function generateCity(seed = 1337, opts = {}) {
+  const ctx = {
+    seed: seed | 0,
+    blocksX: Math.max(4, opts.blocksX === undefined ? 14 : opts.blocksX | 0),
+    blocksZ: Math.max(4, opts.blocksZ === undefined ? 14 : opts.blocksZ | 0),
+    blockSize: opts.blockSize === undefined ? 64 : opts.blockSize,
+    roadWidth: opts.roadWidth === undefined ? 16 : opts.roadWidth,
+    seaSide: opts.seaSide === undefined ? true : !!opts.seaSide
+  };
+
+  buildLayout(ctx);
+  buildSuperblocks(ctx);
+  buildNodesAndEdges(ctx);
+  buildDistricts(ctx);
+  buildRoads(ctx);
+  buildLots(ctx);
+  buildBuildings(ctx);
+  buildLanes(ctx);
+  buildWalks(ctx);
+  buildProps(ctx);
+
+  const landmarks = buildLandmarks(ctx);
+
+  for (const d of ctx.districts) delete d.blocks;
+  for (const n of ctx.nodes) {
+    n.roads.sort((a, b) => a - b);
+  }
+
+  const city = {
+    seed: ctx.seed,
+    blockSize: ctx.blockSize,
+    roadWidth: ctx.roadWidth,
+    blocksX: ctx.blocksX,
+    blocksZ: ctx.blocksZ,
+    bounds: ctx.bounds,
+    districts: ctx.districts,
+    roads: ctx.roads,
+    nodes: ctx.nodes,
+    lanes: ctx.lanes,
+    walks: ctx.walks,
+    lots: ctx.lots,
+    buildings: ctx.buildings,
+    props: ctx.props,
+    spawns: null,
+    landmarks,
+    waterLevel: ctx.waterLevel === undefined ? null : ctx.waterLevel
+  };
+  city.spawns = buildSpawns(ctx, city);
+  return city;
+}
+
+/**
+ * Finds the closest point on the traffic lane network.
+ * @param {object} city City data.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @param {object} [out] Optional result object to reuse (avoids allocation).
+ * @returns {{lane:object, t:number, point:number[], x:number, z:number, dist:number}|null}
+ *   Nearest lane sample, or null when the city has no lanes in range.
+ */
+export function laneAt(city, x, z, out) {
+  const res = out || { lane: null, walk: null, t: 0, point: [0, 0], x: 0, z: 0, dist: 0 };
+  if (!res.point) res.point = [0, 0];
+  vec2.set(_tmp2, x, z);
+  return laneIndexOf(city).nearest(_tmp2[0], _tmp2[1], res);
+}
+
+/**
+ * Finds the closest point on the pedestrian network.
+ * @param {object} city City data.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @param {object} [out] Optional result object to reuse (avoids allocation).
+ * @returns {{walk:object, t:number, point:number[], x:number, z:number, dist:number}|null}
+ *   Nearest sidewalk sample, or null when the city has no walks in range.
+ */
+export function walkAt(city, x, z, out) {
+  const res = out || { lane: null, walk: null, t: 0, point: [0, 0], x: 0, z: 0, dist: 0 };
+  if (!res.point) res.point = [0, 0];
+  vec2.set(_tmp2, x, z);
+  return walkIndexOf(city).nearest(_tmp2[0], _tmp2[1], res);
+}
+
+/**
+ * Tests whether a world position lies on a carriageway (not the sidewalk).
+ * @param {object} city City data.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @returns {boolean} True when the point is on asphalt.
+ */
+export function isOnRoad(city, x, z) {
+  const idx = roadIndexOf(city);
+  idx.query(x - 0.1, z - 0.1, x + 0.1, z + 0.1, _qhits);
+  for (let i = 0; i < _qhits.length; i++) {
+    const o = _qhits[i];
+    if (obbOverlap(x, z, 0.02, 0.02, 0, o.x, o.z, o.hx, o.hz, o.rot, 0)) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns the district covering a world position.
+ * @param {object} city City data.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @returns {object|null} District, or null outside the playable bounds.
+ */
+export function districtAt(city, x, z) {
+  const b = city.bounds;
+  if (x < b.min[0] || x > b.max[0] || z < b.min[1] || z > b.max[1]) return null;
+  const ds = city.districts;
+  for (let i = 0; i < ds.length; i++) {
+    const r = ds[i].rect;
+    if (x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1) return ds[i];
+  }
+  return ds.length > 0 ? ds[districtIndexAt(city, x, z)] : null;
+}
+
+/**
+ * Summary counters for the loading screen and the debug overlay.
+ * @param {object} city City data.
+ * @returns {{buildings:number, props:number, lanes:number, walks:number,
+ *   roads:number, area:number}} Counts plus the playable area in m².
+ */
+export function cityStats(city) {
+  const b = city.bounds;
+  return {
+    buildings: city.buildings.length,
+    props: city.props.length,
+    lanes: city.lanes.length,
+    walks: city.walks.length,
+    roads: city.roads.length,
+    area: (b.max[0] - b.min[0]) * (b.max[1] - b.min[1])
+  };
+}

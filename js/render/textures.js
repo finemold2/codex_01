@@ -3428,6 +3428,7 @@ export function buildTextureLibrary(gl, opts) {
   const D = Math.max(128, Math.round(S / 2));    // decals
   const canvases = {};
   const textures = {};
+  const timings = {};
   let bytes = 0;
 
   /**
@@ -3437,12 +3438,20 @@ export function buildTextureLibrary(gl, opts) {
    * @param {object} texOpts Upload options (see {@link makeTexture}).
    * @returns {void}
    */
-  const add = (name, res, texOpts) => {
+  const add = (name, res, texOpts, startedAt) => {
     canvases[name] = res.canvas;
     textures[name] = makeTexture(gl, res.canvas, res.pixels || null, texOpts);
     const area = res.canvas.width * res.canvas.height * 4;
     bytes += texOpts.mipmaps === false ? area : Math.round(area * 4 / 3);
+    if (startedAt !== undefined) timings[name] = Math.round((nowMs() - startedAt) * 10) / 10;
   };
+
+  let _markT = nowMs();
+  /**
+   * Returns the timestamp of the previous mark and restarts the clock.
+   * @returns {number} Start time of the texture just generated.
+   */
+  const _mark = () => { const v = _markT; _markT = nowMs(); return v; };
 
   /** Common option sets. */
   const TILE = { srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso };
@@ -3454,81 +3463,81 @@ export function buildTextureLibrary(gl, opts) {
   /* --- roads and ground ------------------------------------------------- */
   const asphalt = genAsphalt(S, seed);
   add('asphalt', asphalt, TILE);
-  add('asphalt_n', { canvas: normalCanvasFromField(asphalt.height, S, S, 2.4) }, NORMAL);
-  add('roadLines', genRoadLines(S, seed + 1), TILE_MASK);
+  add('asphalt_n', { canvas: normalCanvasFromField(asphalt.height, S, S, 2.4) }, NORMAL, _mark());
+  add('roadLines', genRoadLines(S, seed + 1), TILE_MASK, _mark());
 
   const sidewalk = genSidewalk(S, seed + 2);
   add('sidewalk', sidewalk, TILE);
-  add('sidewalk_n', { canvas: normalCanvasFromField(sidewalk.height, S, S, 3.0) }, NORMAL);
+  add('sidewalk_n', { canvas: normalCanvasFromField(sidewalk.height, S, S, 3.0) }, NORMAL, _mark());
 
   const concrete = genConcrete(S, seed + 3);
   add('concrete', concrete, TILE);
-  add('concrete_n', { canvas: normalCanvasFromField(concrete.height, S, S, 2.0) }, NORMAL);
+  add('concrete_n', { canvas: normalCanvasFromField(concrete.height, S, S, 2.0) }, NORMAL, _mark());
 
   const brick = genBrick(S, seed + 4);
   add('brick', brick, TILE);
-  add('brick_n', { canvas: normalCanvasFromField(brick.height, S, S, 3.4) }, NORMAL);
+  add('brick_n', { canvas: normalCanvasFromField(brick.height, S, S, 3.4) }, NORMAL, _mark());
 
   const metal = genMetal(S, seed + 5);
   add('metal', metal, TILE);
-  add('metal_n', { canvas: normalCanvasFromField(metal.height, S, S, 2.6) }, NORMAL);
+  add('metal_n', { canvas: normalCanvasFromField(metal.height, S, S, 2.6) }, NORMAL, _mark());
 
-  add('roofGravel', genRoofGravel(S, seed + 6), TILE);
-  add('tileFloor', genTileFloor(S, seed + 7), TILE);
-  add('grass', genGrass(S, seed + 8), TILE);
-  add('dirt', genDirt(S, seed + 9), TILE);
-  add('sand', genSand(S, seed + 10), TILE);
+  add('roofGravel', genRoofGravel(S, seed + 6), TILE, _mark());
+  add('tileFloor', genTileFloor(S, seed + 7), TILE, _mark());
+  add('grass', genGrass(S, seed + 8), TILE, _mark());
+  add('dirt', genDirt(S, seed + 9), TILE, _mark());
+  add('sand', genSand(S, seed + 10), TILE, _mark());
 
   const water = genWater(S, seed + 11);
   add('water', water, TILE);
-  add('waterNormal', { canvas: normalCanvasFromField(water.height, S, S, 3.2) }, NORMAL);
+  add('waterNormal', { canvas: normalCanvasFromField(water.height, S, S, 3.2) }, NORMAL, _mark());
 
   /* --- vegetation and vehicles ------------------------------------------ */
-  add('treeBark', genTreeBark(S, seed + 12), TILE);
-  add('leaves', genLeaves(S, seed + 13), CARD);
-  add('carPaintNoise', genCarPaintNoise(S, seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso });
-  add('tire', genTire(S, seed + 15), TILE);
-  add('chrome', genChrome(Math.max(128, S >> 1), seed + 16), CARD_OPAQUE);
+  add('treeBark', genTreeBark(S, seed + 12), TILE, _mark());
+  add('leaves', genLeaves(S, seed + 13), CARD, _mark());
+  add('carPaintNoise', genCarPaintNoise(S, seed + 14), { srgb: false, wrap: 'repeat', mipmaps: true, anisotropy: aniso }, _mark());
+  add('tire', genTire(S, seed + 15), TILE, _mark());
+  add('chrome', genChrome(Math.max(128, S >> 1), seed + 16), CARD_OPAQUE, _mark());
 
   /* --- facades (alpha = emissive window mask) --------------------------- */
-  add('glassFacade', genGlassFacade(S, seed + 20), TILE_MASK);
-  add('officeFacade', genOfficeFacade(S, seed + 21), TILE_MASK);
-  add('apartmentFacade', genApartmentFacade(S, seed + 22), TILE_MASK);
-  add('groundFloorShops', genGroundFloorShops(S, seed + 23), TILE_MASK);
+  add('glassFacade', genGlassFacade(S, seed + 20), TILE_MASK, _mark());
+  add('officeFacade', genOfficeFacade(S, seed + 21), TILE_MASK, _mark());
+  add('apartmentFacade', genApartmentFacade(S, seed + 22), TILE_MASK, _mark());
+  add('groundFloorShops', genGroundFloorShops(S, seed + 23), TILE_MASK, _mark());
 
   /* --- signage ---------------------------------------------------------- */
-  for (let i = 1; i <= 3; i++) add('neonSign' + i, genNeonSign(i, S, seed + 30 + i), CARD);
-  for (let i = 1; i <= 4; i++) add('billboard' + i, genBillboard(i, S, seed + 40 + i), CARD_OPAQUE);
-  for (let i = 1; i <= 2; i++) add('graffiti' + i, genGraffiti(i, S, seed + 50 + i), CARD);
+  for (let i = 1; i <= 3; i++) add('neonSign' + i, genNeonSign(i, S, seed + 30 + i), CARD, _mark());
+  for (let i = 1; i <= 4; i++) add('billboard' + i, genBillboard(i, S, seed + 40 + i), CARD_OPAQUE, _mark());
+  for (let i = 1; i <= 2; i++) add('graffiti' + i, genGraffiti(i, S, seed + 50 + i), CARD, _mark());
 
   /* --- particles -------------------------------------------------------- */
-  add('smoke', genSmoke(P, seed + 60), CARD);
-  add('spark', genSpark(P), CARD);
-  add('flash', genFlash(P), CARD);
-  add('blood', genBlood(P, seed + 61), CARD);
-  add('glassShard', genGlassShard(P), CARD);
-  add('raindrop', genRaindrop(Math.max(16, P >> 2), P), CARD);
-  add('muzzle', genMuzzle(P, seed + 62), CARD);
+  add('smoke', genSmoke(P, seed + 60), CARD, _mark());
+  add('spark', genSpark(P), CARD, _mark());
+  add('flash', genFlash(P), CARD, _mark());
+  add('blood', genBlood(P, seed + 61), CARD, _mark());
+  add('glassShard', genGlassShard(P), CARD, _mark());
+  add('raindrop', genRaindrop(Math.max(16, P >> 2), P), CARD, _mark());
+  add('muzzle', genMuzzle(P, seed + 62), CARD, _mark());
 
   /* --- decals ----------------------------------------------------------- */
-  add('decalBulletHole', genBulletHole(D, seed + 70), CARD);
-  add('decalCrack', genCrackDecal(D, seed + 71), CARD);
+  add('decalBulletHole', genBulletHole(D, seed + 70), CARD, _mark());
+  add('decalCrack', genCrackDecal(D, seed + 71), CARD, _mark());
 
   /* --- sky and lookup tables -------------------------------------------- */
   add('skyStars', genSkyStars(S * 2, S, seed + 80), {
     srgb: true, wrap: 'repeat', mipmaps: true, anisotropy: aniso, alphaMask: true
-  });
+  }, _mark());
   add('noiseBlue', genNoiseBlue(64, seed + 81), {
     srgb: false, wrap: 'repeat', mipmaps: false, filter: 'nearest', anisotropy: 1
-  });
+  }, _mark());
   add('gradientRamp', genGradientRamp(256, 64), {
     srgb: false, wrap: 'clamp', mipmaps: false, filter: 'linear', anisotropy: 1, alphaMask: true
-  });
+  }, _mark());
 
   const keys = Object.keys(textures);
   const library = textures;
   library.canvases = canvases;
-  library.stats = { count: keys.length, bytes: bytes, ms: Math.round((nowMs() - t0) * 100) / 100 };
+  library.stats = { count: keys.length, bytes: bytes, ms: Math.round((nowMs() - t0) * 100) / 100, perTexture: timings };
   library.size = S;
   library.seed = seed;
   /**
