@@ -85,7 +85,7 @@ class Game {
     this.mines = [];          // 매설된 지뢰
     this.planes = [];         // 보급기 / 폭격기
     this.bonusCredits = 0;    // 전리품 상자로 얻은 크레딧
-    this.supplyIn = 2 + Math.floor(Math.random() * 3);   // 몇 라운드 뒤 보급기가 오는지
+    this.supplyIn = 2 + Math.floor(Math.random() * 3);   // 몇 라운드 뒤 첫 보급기가 오는지
     this.time = 0;
     this.stateT = 0;
     this.turnLeft = TURN_SECONDS;
@@ -190,8 +190,9 @@ class Game {
     // 라운드가 넘어갈 때 보급기 등장 / 바람이 바뀔 때가 됐는지 확인
     if (wrapped) {
       if (--this.supplyIn <= 0) {
-        this.callSupplyPlane(1 + (Math.random() < 0.45 ? 1 : 0));
-        this.supplyIn = 2 + Math.floor(Math.random() * 3);
+        // 상자가 굴러다니고 있으면 굳이 더 뿌리지 않습니다
+        if (this.crates.length < 2) this.callSupplyPlane(1 + (Math.random() < 0.18 ? 1 : 0));
+        this.supplyIn = 4 + Math.floor(Math.random() * 4);
       }
       if (--this.windHold <= 0) this.rollWind(false);
     }
@@ -223,6 +224,8 @@ class Game {
     // 한 턴짜리 사격 강화는 턴이 시작될 때 초기화
     t.buffs.extraShot = 0;
     t.movedThisTurn = false;
+    t.wasHitLastTurn = !!t.hitSinceTurn;
+    t.hitSinceTurn = false;
     if (t.buffs.dome > 0) t.buffs.dome--;
     if (t.buffs.heatsink) {
       const before = t.hp;
@@ -518,6 +521,7 @@ class Game {
 
   damage(t, dmg, srcId, silent) {
     if (dmg <= 0 || !t.alive) return;
+    t.hitSinceTurn = true;   // 자리가 들켰다는 표시 — AI 가 다음 턴에 옮길지 판단합니다
     const src = srcId != null && srcId >= 0 ? this.tanks[srcId] : null;
     const friendly = src && src !== t && src.team === t.team;
 
@@ -617,9 +621,10 @@ class Game {
       });
       this.floaters.push({ x: t.x, y: t.y - 96, text: '💀 자폭!', t: 0, color: '#ff5348', big: true });
     }
-    // 파괴된 전차는 보급 상자를 떨굽니다
-    this.dropCrate(t.x, t.y - 30, rollDropItem(this.stage), true);
-    this.ui.banner(`💥 ${t.name} 격파! — 보급품을 떨어뜨렸습니다`, 1500);
+    // 파괴된 전차는 절반쯤 확률로 보급 상자를 남깁니다
+    const dropped = Math.random() < 0.5;
+    if (dropped) this.dropCrate(t.x, t.y - 30, rollDropItem(this.stage), true);
+    this.ui.banner(`💥 ${t.name} 격파!${dropped ? ' — 보급품을 떨어뜨렸습니다' : ''}`, 1500);
   }
 
   /* ═════════════ 아이템 · 보급 ═════════════ */

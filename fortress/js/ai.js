@@ -2,11 +2,11 @@
 /* ai.js — 탄도 시뮬레이션 기반 AI */
 const AI = (() => {
   const DIFF = {
-    easy:   { angleErr: 7.0, powerErr: 9.0, moveChance: 0.20, fine: false, targetNoise: 42, weaponNoise: 40, coarse: 3.0,
+    easy:   { angleErr: 7.0, powerErr: 9.0, moveChance: 0.35, fine: false, targetNoise: 42, weaponNoise: 40, coarse: 3.0,
               crateChance: 0.30, crateSmart: false, itemChance: 0.45, itemSmart: false, itemBar: 30 },
-    normal: { angleErr: 2.4, powerErr: 3.0, moveChance: 0.50, fine: true,  targetNoise: 16, weaponNoise: 18, coarse: 2.5,
+    normal: { angleErr: 2.4, powerErr: 3.0, moveChance: 0.70, fine: true,  targetNoise: 16, weaponNoise: 18, coarse: 2.5,
               crateChance: 0.68, crateSmart: true,  itemChance: 0.75, itemSmart: true,  itemBar: 52 },
-    hard:   { angleErr: 0.6, powerErr: 0.7, moveChance: 0.80, fine: true,  targetNoise: 5,  weaponNoise: 6,  coarse: 2.0,
+    hard:   { angleErr: 0.6, powerErr: 0.7, moveChance: 0.85, fine: true,  targetNoise: 5,  weaponNoise: 6,  coarse: 2.0,
               crateChance: 0.92, crateSmart: true,  itemChance: 0.92, itemSmart: true,  itemBar: 42 },
   };
 
@@ -108,7 +108,33 @@ const AI = (() => {
     return false;
   }
 
-  const CRATE_BASE = { common: 34, rare: 62, epic: 98, legend: 142 };
+  const CRATE_BASE = { common: 40, rare: 70, epic: 108, legend: 152 };
+
+  /**
+   * 그 자리가 전술적으로 얼마나 좋은지 — 명중률과는 별개입니다.
+   * 사거리 간격, 고지, 불바다를 봅니다.
+   */
+  function positionValue(game, me, target, x, y) {
+    let v = 0;
+    const dist = Math.abs(target.x - x);
+    const hpFrac = me.hp / me.maxHp;
+
+    // 간격 — 다칠수록 멀찍이 떨어져 싸웁니다
+    const ideal = 300 + (1 - hpFrac) * 280;
+    v -= Math.abs(dist - ideal) * 0.045;
+    if (dist < 160) v -= (160 - dist) * 0.30;      // 코앞은 산탄에 같이 휘말립니다
+
+    // 고지 — 적보다 높으면 유리합니다
+    v += clamp((target.cy - y) * 0.05, -12, 14);
+
+    // 불바다 위에 서 있으면 매 턴 탑니다
+    for (const b of game.burns) if (Math.abs(b.x - x) < b.r + 8) v -= 50;
+
+    // 벽에 몰리면 피할 데가 없습니다
+    if (x < 90 || x > W - 90) v -= 14;
+
+    return v;
+  }
 
   /**
    * 상자 하나가 지금 나에게 얼마나 값어치가 있는지.
@@ -257,8 +283,24 @@ const AI = (() => {
     const fuel = me.fuel;
     // { dx, bonus } — bonus 가 클수록 그 자리로 가려고 합니다
     const candidates = [{ dx: 0, bonus: 0 }];
-    if (Math.random() < d.moveChance && fuel > 20) {
-      for (const dx of [-fuel * 0.95, fuel * 0.95, -fuel * 0.5, fuel * 0.5]) candidates.push({ dx, bonus: 0 });
+
+    /* 이동은 이유가 있을 때만 합니다 — 아무 때나 왔다 갔다 하지 않습니다
+     *   · 지난 턴에 맞았다 = 자리가 들켰다
+     *   · 불바다 위에 서 있다
+     *   · 적과의 간격이 나쁘다 (너무 붙었거나 너무 멀다)
+     *   · 상대가 나를 못 때리게 언덕 뒤로 빠질 만하다 (사격 해가 안 나올 때)
+     */
+    const hpFrac = me.hp / me.maxHp;
+    const idealGap = 300 + (1 - hpFrac) * 280;
+    const inBurn = game.burns.some((b) => Math.abs(b.x - me.x) < b.r + 8);
+    const badGap = dist < 175 || Math.abs(dist - idealGap) > 250;
+    const restless = Math.random() < 0.18;   // 가끔은 그냥 자리를 바꿔 봅니다
+    const reasons = (me.wasHitLastTurn ? 1 : 0) + (inBurn ? 1 : 0) + (badGap ? 1 : 0) + (restless ? 1 : 0);
+    if (fuel > 16 && reasons > 0 && Math.random() < d.moveChance) {
+      for (const f of [0.45, 1.0]) {
+        candidates.push({ dx: -fuel * f, move: true });
+        candidates.push({ dx: fuel * f, move: true });
+      }
     }
     // 보급 상자 — 값어치를 따져 보고 주우러 갈지 정합니다
     const reach = 26 * me.type.size * (me.buffs.magnet || 1);
@@ -274,23 +316,32 @@ const AI = (() => {
           if (e.alive && e.team !== me.team && Math.abs(e.x - c.x) < Math.abs(dx) * 0.8) { bonus *= 0.55; break; }
         }
         // 이동 비용 — 멀수록, 그리고 체력이 없을수록 손해
-        bonus -= Math.max(0, walk) * (0.05 + (1 - me.hp / me.maxHp) * 0.06);
-        if (bonus > 10) candidates.push({ dx, bonus, crate: c });
+        bonus -= Math.max(0, walk) * (0.035 + (1 - me.hp / me.maxHp) * 0.05);
+        if (bonus > 6) candidates.push({ dx, bonus, crate: c });
       }
     }
 
     // 확실한 마무리 한 방이 보이면 상자는 나중에
     const lethal = target.hp <= (weapon.damage || 30) * 0.95;
 
+    const stayValue = positionValue(game, me, target, me.x, me.y);
+
     let best = null;
     for (const cand of candidates) {
       const dx = cand.dx;
       const pos = dx === 0 ? { x: me.x, y: me.y } : game.probeWalk(me, dx);
-      let bonus = cand.bonus;
+      let bonus = cand.bonus || 0;
       if (cand.crate) {
         // 지형에 막혀 실제로는 상자까지 못 가는 경우가 있습니다
         if (Math.abs(pos.x - cand.crate.x) > reach) bonus = 0;
         else if (lethal && best && best.err < 5) bonus *= 0.25;
+      }
+      if (dx !== 0) {
+        // 옮긴 자리가 전술적으로 나아지는 만큼만 값을 쳐 줍니다
+        bonus += positionValue(game, me, target, pos.x, pos.y) - stayValue;
+        if (me.wasHitLastTurn) bonus += 26;   // 들킨 자리는 뜨는 게 상책
+        if (restless) bonus += 16;            // 가끔은 그냥 자리를 옮겨 예측을 흐립니다
+        bonus -= 5;                           // 그 밖에는 굳이 움직이지 않습니다
       }
       const ghost = {
         id: me.id, team: me.team, alive: true, x: pos.x, y: pos.y,
@@ -302,8 +353,8 @@ const AI = (() => {
       s.adj = s.err - bonus;
       s.crate = cand.crate || null;
       if (!best || s.adj < best.adj - 9) best = s;
-      // 제자리에서 완벽한 해가 나와도, 노려 볼 상자가 있으면 마저 따져 봅니다
-      if (best.err < 3 && dx === 0 && !candidates.some((c) => c.crate)) break;
+      // 따져 볼 다른 자리가 아예 없을 때만 일찍 끝냅니다
+      if (best.err < 3 && dx === 0 && candidates.length === 1) break;
     }
 
     // 아무리 해도 못 맞추면: 순간이동이 있으면 적 쪽으로 도약
