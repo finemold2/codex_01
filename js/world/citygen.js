@@ -1173,10 +1173,11 @@ function buildRoads(ctx) {
         x: cx, z: cz, hx: len * 0.5 + grow, hz: e.width * 0.5 + SIDEWALK_W, rot, road
       });
     }
-    ctx.nodes[e.a].roads.push(e.roadIds[0]);
-    ctx.nodes[e.b].roads.push(e.roadIds[e.roadIds.length - 1]);
+    if (e.roadIds.length > 0) {
+      ctx.nodes[e.a].roads.push(e.roadIds[0]);
+      ctx.nodes[e.b].roads.push(e.roadIds[e.roadIds.length - 1]);
+    }
   }
-
 }
 
 /* ------------------------------------------------------------------ *
@@ -2498,7 +2499,52 @@ function polyAt(pts, s, outP, outD) {
 }
 
 /**
- * Appends a prop.
+ * Ground footprint radius of each prop type at scale 1, in metres. Used to keep
+ * street furniture out of the carriageway and out of each other.
+ */
+const PROP_RADIUS = {
+  streetlight: 0.45, tree: 1.5, palm: 1.3, bench: 1.0, hydrant: 0.35,
+  trafficlight: 0.45, sign: 0.25, bin: 0.45, busstop: 2.2, billboard: 1.8,
+  barrier: 1.1, cone: 0.3, dumpster: 1.3, planter: 0.9, bollard: 0.25,
+  atm: 0.6, phonebox: 0.7, streetvendor: 1.2, lamp: 0.4
+};
+
+/** Largest possible prop radius (table maximum times the largest scale used). */
+const PROP_MAX_RADIUS = 3.2;
+
+/** Scratch list for prop-occupancy queries (never aliases {@link _hits}). */
+const _phits = [];
+
+/**
+ * True when nothing already standing is close enough to interpenetrate.
+ * @param {object} ctx Generation context.
+ * @param {number} x Candidate x.
+ * @param {number} z Candidate z.
+ * @param {number} r Candidate footprint radius.
+ * @returns {boolean} True when the spot is free.
+ */
+function propSpotFree(ctx, x, z, r) {
+  const reach = r + PROP_MAX_RADIUS;
+  ctx.propGrid.query(x - reach, z - reach, x + reach, z + reach, _phits);
+  for (let i = 0; i < _phits.length; i++) {
+    const o = _phits[i];
+    const dx = o.x - x;
+    const dz = o.z - z;
+    const need = (r + o.r) * 0.8;
+    if (dx * dx + dz * dz < need * need) return false;
+  }
+  return true;
+}
+
+/**
+ * Appends a prop, first making sure it is not standing in a traffic lane and
+ * not sharing its patch of pavement with something else.
+ *
+ * Sidewalk furniture is laid out from the centre line of one road, so near an
+ * intersection the offset that clears *that* road can still land on the
+ * crossing carriageway; when an outward direction is supplied the prop is
+ * nudged away from the kerb before being rejected.
+ *
  * @param {object} ctx Generation context.
  * @param {string} type Prop type.
  * @param {number} x World x.
@@ -2507,10 +2553,39 @@ function polyAt(pts, s, outP, outD) {
  * @param {number} rot Yaw in radians.
  * @param {number} scale Uniform scale.
  * @param {object|null} extra Type specific payload.
- * @returns {void}
+ * @param {{nx?:number, nz?:number, onRoad?:boolean, noClash?:boolean}} [opts]
+ *   `nx`/`nz`: outward unit direction the prop may slide along to find pavement.
+ *   `onRoad`: the prop belongs on the asphalt (roadworks). `noClash`: the prop
+ *   is mounted above head height, so the ground occupancy test does not apply.
+ * @returns {boolean} True when the prop was placed.
  */
-function addProp(ctx, type, x, y, z, rot, scale, extra) {
-  ctx.props.push({ type, x, y, z, rot, scale, extra: extra || null });
+function addProp(ctx, type, x, y, z, rot, scale, extra, opts) {
+  const r = (PROP_RADIUS[type] || 0.35) * (scale > 0 ? scale : 1);
+  const onRoad = opts !== undefined && opts.onRoad === true;
+  let px = x;
+  let pz = z;
+  if (!onRoad) {
+    const nx = opts !== undefined && opts.nx !== undefined ? opts.nx : 0;
+    const nz = opts !== undefined && opts.nz !== undefined ? opts.nz : 0;
+    const clearance = Math.min(r, 0.9);
+    const steps = (nx === 0 && nz === 0) ? 1 : 5;
+    let free = false;
+    for (let step = 0; step < steps; step++) {
+      const qx = x + nx * step * 0.7;
+      const qz = z + nz * step * 0.7;
+      if (pointClearOfRoads(ctx, qx, qz, clearance)) {
+        px = qx;
+        pz = qz;
+        free = true;
+        break;
+      }
+    }
+    if (!free) return false;
+  }
+  if (!(opts !== undefined && opts.noClash === true) && !propSpotFree(ctx, px, pz, r)) return false;
+  ctx.props.push({ type, x: px, y, z: pz, rot, scale, extra: extra || null });
+  ctx.propGrid.insert(px - r, pz - r, px + r, pz + r, { x: px, z: pz, r });
+  return true;
 }
 
 /**
@@ -2536,7 +2611,8 @@ function edgeFurniture(ctx, e, dk, rng) {
     const rx = -_pd[1] * side;
     const rz = _pd[0] * side;
     addProp(ctx, 'streetlight', _pp[0] + rx * kerb, SIDEWALK_H, _pp[1] + rz * kerb,
-      yawFromDir(-rx, -rz), 1, { arm: e.kind === 'avenue' || e.kind === 'boulevard' ? 2 : 1 });
+      yawFromDir(-rx, -rz), 1, { arm: e.kind === 'avenue' || e.kind === 'boulevard' ? 2 : 1 },
+      { nx: rx, nz: rz });
   }
 
   // Trees / palms.
@@ -2552,7 +2628,7 @@ function edgeFurniture(ctx, e, dk, rng) {
         const rx = -_pd[1] * side;
         const rz = _pd[0] * side;
         addProp(ctx, treeType, _pp[0] + rx * inner, SIDEWALK_H, _pp[1] + rz * inner,
-          rr(rng, 0, Math.PI * 2), rr(rng, 0.82, 1.28), null);
+          rr(rng, 0, Math.PI * 2), rr(rng, 0.82, 1.28), null, { nx: rx, nz: rz });
       }
     }
   }
@@ -2569,26 +2645,27 @@ function edgeFurniture(ctx, e, dk, rng) {
       const pz = _pp[1] + rz * kerb;
       const qx = _pp[0] + rx * inner;
       const qz = _pp[1] + rz * inner;
+      const away = { nx: rx, nz: rz };
       if (roll < 0.035) {
-        addProp(ctx, 'hydrant', px, SIDEWALK_H, pz, face, 1, null);
+        addProp(ctx, 'hydrant', px, SIDEWALK_H, pz, face, 1, null, away);
       } else if (roll < 0.075) {
         addProp(ctx, 'bin', qx, SIDEWALK_H, qz, face, 1,
-          { full: rchance(rng, 0.4) });
+          { full: rchance(rng, 0.4) }, away);
       } else if (roll < 0.115 && (dk === 'downtown' || dk === 'midtown' || dk === 'beach')) {
-        addProp(ctx, 'bench', qx, SIDEWALK_H, qz, face + Math.PI * 0.5, 1, null);
+        addProp(ctx, 'bench', qx, SIDEWALK_H, qz, face + Math.PI * 0.5, 1, null, away);
       } else if (roll < 0.145 && (dk === 'downtown' || dk === 'midtown')) {
-        addProp(ctx, 'sign', px, SIDEWALK_H, pz, face, 1, { kind: 'meter' });
+        addProp(ctx, 'sign', px, SIDEWALK_H, pz, face, 1, { kind: 'meter' }, away);
       } else if (roll < 0.165 && dk !== 'industrial') {
-        addProp(ctx, 'planter', qx, SIDEWALK_H, qz, face, rr(rng, 0.9, 1.2), null);
+        addProp(ctx, 'planter', qx, SIDEWALK_H, qz, face, rr(rng, 0.9, 1.2), null, away);
       } else if (roll < 0.185 && (e.kind === 'avenue' || e.kind === 'boulevard')) {
-        addProp(ctx, 'bollard', px, SIDEWALK_H, pz, face, 1, null);
+        addProp(ctx, 'bollard', px, SIDEWALK_H, pz, face, 1, null, away);
       } else if (roll < 0.196 && dk === 'downtown') {
-        addProp(ctx, 'atm', qx, SIDEWALK_H, qz, face, 1, null);
+        addProp(ctx, 'atm', qx, SIDEWALK_H, qz, face, 1, null, away);
       } else if (roll < 0.206 && (dk === 'downtown' || dk === 'residential')) {
-        addProp(ctx, 'phonebox', qx, SIDEWALK_H, qz, face, 1, null);
+        addProp(ctx, 'phonebox', qx, SIDEWALK_H, qz, face, 1, null, away);
       } else if (roll < 0.216 && (dk === 'downtown' || dk === 'midtown' || dk === 'beach')) {
         addProp(ctx, 'streetvendor', qx, SIDEWALK_H, qz, face, 1,
-          { menu: rpick(rng, ['어묵', '타코야키', '핫도그', '군밤']) });
+          { menu: rpick(rng, ['어묵', '타코야키', '핫도그', '군밤']) }, away);
       }
     }
   }
@@ -2600,7 +2677,7 @@ function edgeFurniture(ctx, e, dk, rng) {
     const rx = -_pd[1] * side;
     const rz = _pd[0] * side;
     addProp(ctx, 'busstop', _pp[0] + rx * inner, SIDEWALK_H, _pp[1] + rz * inner,
-      yawFromDir(-rx, -rz), 1, { line: ri(rng, 100, 899) + '번' });
+      yawFromDir(-rx, -rz), 1, { line: ri(rng, 100, 899) + '번' }, { nx: rx, nz: rz });
   }
 
   // Boulevard billboards.
@@ -2611,7 +2688,7 @@ function edgeFurniture(ctx, e, dk, rng) {
     const rz = _pd[0] * side;
     addProp(ctx, 'billboard', _pp[0] + rx * (half + 3.0), SIDEWALK_H,
       _pp[1] + rz * (half + 3.0), yawFromDir(-rx, -rz), rr(rng, 1.0, 1.3),
-      { text: rpick(rng, BILLBOARD_TEXTS), onWall: false });
+      { text: rpick(rng, BILLBOARD_TEXTS), onWall: false }, { nx: rx, nz: rz });
   }
 }
 
@@ -2624,6 +2701,8 @@ function edgeFurniture(ctx, e, dk, rng) {
 function buildProps(ctx) {
   const rng = new Rand(mixSeed(ctx.seed, 'props'));
   ctx.props = [];
+  const pb = ctx.bounds;
+  ctx.propGrid = new Grid2D(pb.min[0], pb.min[1], pb.max[0], pb.max[1], 8);
 
   for (const e of ctx.edges) {
     const mid = e.pts[Math.floor(e.pts.length / 2)];
@@ -2653,7 +2732,7 @@ function buildProps(ctx) {
       const off = e.width * 0.5 + 1.5;
       addProp(ctx, 'trafficlight',
         node.x - dx * trim + rx * off, SIDEWALK_H, node.z - dz * trim + rz * off,
-        yawFromDir(-dx, -dz), 1, { nodeId: node.id, edgeId: e.id });
+        yawFromDir(-dx, -dz), 1, { nodeId: node.id, edgeId: e.id }, { nx: rx, nz: rz });
     }
   }
 
@@ -2745,7 +2824,8 @@ function buildProps(ctx) {
     const halfOut = (b.face === 0 || b.face === 2) ? b.w * 0.5 : b.d * 0.5;
     addProp(ctx, 'billboard', b.x + nx * (halfOut + 0.2), Math.min(b.h * 0.62, 16),
       b.z + nz * (halfOut + 0.2), yawFromDir(nx, nz), rr(rng, 0.9, 1.35),
-      { text: rpick(rng, BILLBOARD_TEXTS), onWall: true, buildingId: b.id });
+      { text: rpick(rng, BILLBOARD_TEXTS), onWall: true, buildingId: b.id },
+      { onRoad: true, noClash: true });
   }
 
   // Roadworks: a few coned-off stretches.
@@ -2766,14 +2846,16 @@ function buildProps(ctx) {
       const rz = _pd[0] * side;
       const lat = e.width * 0.25;
       addProp(ctx, 'cone', _pp[0] + rx * lat, 0, _pp[1] + rz * lat,
-        yawFromDir(-rx, -rz), 1, null);
+        yawFromDir(-rx, -rz), 1, null, { onRoad: true });
     }
     polyAt(e.pts, start - 1.5, _pp, _pd);
     addProp(ctx, 'barrier', _pp[0] - _pd[1] * side * e.width * 0.25, 0,
-      _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null);
+      _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null,
+      { onRoad: true });
     polyAt(e.pts, start + 23, _pp, _pd);
     addProp(ctx, 'barrier', _pp[0] - _pd[1] * side * e.width * 0.25, 0,
-      _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null);
+      _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null,
+      { onRoad: true });
   }
 }
 
@@ -3009,12 +3091,20 @@ function buildSpawns(ctx, city) {
   const pz = plazaLot ? plazaLot.z + (plazaLot.d * 0.5 + 12) : 0;
   sidewalkPoint(city, px, pz, _pp);
   {
-    const dx = px - _pp[0];
-    const dz = pz - _pp[1];
-    const l = Math.hypot(dx, dz) || 1;
+    // Look north across the central plaza at the downtown skyline. Deriving the
+    // facing from the anchor point instead would leave it at the mercy of a
+    // sub-metre snap offset (and can even hand back a signed zero), so aim at
+    // the plaza centre and only fall back if the spawn landed exactly on it.
+    let dx = (plazaLot ? plazaLot.x : 0) - _pp[0];
+    let dz = (plazaLot ? plazaLot.z : 0) - _pp[1];
+    if (Math.hypot(dx, dz) < 0.5) {
+      dx = px - _pp[0];
+      dz = pz - _pp[1];
+    }
+    const l = Math.hypot(dx, dz);
     spawns.player = {
       x: _pp[0], y: SIDEWALK_H, z: _pp[1],
-      yaw: yawFromDir(dx / l, dz / l)
+      yaw: l > 1e-4 ? yawFromDir(dx / l, dz / l) : 0
     };
   }
 
@@ -3031,8 +3121,11 @@ function buildSpawns(ctx, city) {
     const z = _pp[1];
     const dx = sx - x;
     const dz = sz - z;
-    const l = Math.hypot(dx, dz) || 1;
-    spawns.police.push({ x, y: SIDEWALK_H, z, yaw: yawFromDir(dx / l, dz / l) });
+    const l = Math.hypot(dx, dz);
+    spawns.police.push({
+      x, y: SIDEWALK_H, z,
+      yaw: l > 1e-4 ? yawFromDir(dx / l, dz / l) : yawFromDir(-ring[i][0], -ring[i][1])
+    });
   }
 
   // --- mission points ----------------------------------------------------
@@ -3108,6 +3201,16 @@ class PolyIndex {
       minX = -1; minZ = -1; maxX = 1; maxZ = 1;
     }
     this.grid = new Grid2D(minX, minZ, maxX, maxZ, cell);
+    // Every segment of every polyline is indexed. A flat segment table keeps
+    // the payload a plain integer without imposing any limit on how many
+    // points a lane or sidewalk may have.
+    let segCount = 0;
+    for (let i = 0; i < items.length; i++) segCount += Math.max(0, items[i].pts.length - 1);
+    /** Owning polyline of each indexed segment. */
+    this.segItem = new Int32Array(segCount);
+    /** Index of the segment inside its polyline. */
+    this.segIndex = new Int32Array(segCount);
+    let seg = 0;
     for (let i = 0; i < items.length; i++) {
       const pts = items[i].pts;
       const cum = new Float64Array(pts.length);
@@ -3119,10 +3222,11 @@ class PolyIndex {
         const bx = pts[s + 1][0];
         const bz = pts[s + 1][1];
         acc += Math.hypot(bx - ax, bz - az);
-        if (s < 127) {
-          this.grid.insert(Math.min(ax, bx), Math.min(az, bz),
-            Math.max(ax, bx), Math.max(az, bz), i * 128 + s);
-        }
+        this.segItem[seg] = i;
+        this.segIndex[seg] = s;
+        this.grid.insert(Math.min(ax, bx), Math.min(az, bz),
+          Math.max(ax, bx), Math.max(az, bz), seg);
+        seg++;
       }
       cum[pts.length - 1] = acc;
       this.cum[i] = cum;
@@ -3149,8 +3253,8 @@ class PolyIndex {
       this.grid.query(x - r, z - r, x + r, z + r, _qhits);
       for (let n = 0; n < _qhits.length; n++) {
         const code = _qhits[n];
-        const i = (code / 128) | 0;
-        const s = code % 128;
+        const i = this.segItem[code];
+        const s = this.segIndex[code];
         const pts = this.items[i].pts;
         const ax = pts[s][0];
         const az = pts[s][1];

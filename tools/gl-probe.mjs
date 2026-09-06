@@ -17,6 +17,17 @@ const shotIdx = process.argv.indexOf('--shot');
 const SHOT = shotIdx >= 0 && process.argv[shotIdx + 1] ? process.argv[shotIdx + 1] : null;
 const viewIdx = process.argv.indexOf('--view');
 const VIEW = viewIdx >= 0 && process.argv[viewIdx + 1] ? process.argv[viewIdx + 1] : undefined;
+// --stub redirects the not-yet-written entity modules to tools/stubs/* via an import map, so the
+// full game boot path can be exercised before those modules land.
+const STUB = process.argv.includes('--stub');
+const IMPORT_MAP = STUB ? `<script type="importmap">${JSON.stringify({
+  imports: {
+    '/js/entities/vehicle.js': '/tools/stubs/vehicle.js',
+    '/js/entities/ped.js': '/tools/stubs/ai.js',
+    '/js/entities/traffic.js': '/tools/stubs/ai.js',
+    '/js/entities/police.js': '/tools/stubs/ai.js',
+  },
+})}</script>` : '';
 if (!target) { console.error('usage: node tools/gl-probe.mjs <module path relative to repo root>'); process.exit(2); }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -37,12 +48,14 @@ const server = createServer(async (req, res) => {
     let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (p === '/__probe') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(`<!doctype html><meta charset="utf-8"><canvas id="c" width="1280" height="720"></canvas>
+      const html = `<!doctype html><meta charset="utf-8">${IMPORT_MAP}<canvas id="c" width="1280" height="720"></canvas>
 <script type="module">
   import probe from '/${target.replace(/^\.?\//, '')}';
   window.__run = () => probe({ canvas: document.getElementById('c') });
   window.__loaded = true;
-</script>`);
+</script>`;
+      if (process.env.PROBE_DUMP) console.error('--- probe html ---\n' + html + '\n---');
+      res.end(html);
       return;
     }
     if (p.endsWith('/')) p += 'index.html';

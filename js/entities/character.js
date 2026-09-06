@@ -263,7 +263,10 @@ const RUN_FLIGHT = {
 };
 CLIP_SPECS.run = {
   loop: true, duration: 1, gait: true,
-  legs: { stride: 2.45, stance: 0.36, lift: 0.26, heelRise: 0.085, frontFrac: 0.46, toeOff: 0.50, heelStrike: 0.10, flightArc: 0.045 },
+  legs: {
+    stride: 2.45, stance: 0.36, lift: 0.26, heelRise: 0.085,
+    frontFrac: 0.46, toeOff: 0.50, heelStrike: 0.10, flightArc: 0.045
+  },
   keys: [
     [0.0, RUN_CONTACT],
     [0.25, RUN_FLIGHT],
@@ -292,7 +295,10 @@ const SPRINT_FLIGHT = {
 };
 CLIP_SPECS.sprint = {
   loop: true, duration: 1, gait: true,
-  legs: { stride: 3.30, stance: 0.28, lift: 0.34, heelRise: 0.08, frontFrac: 0.47, toeOff: 0.55, heelStrike: 0.05, flightArc: 0.065 },
+  legs: {
+    stride: 3.30, stance: 0.28, lift: 0.34, heelRise: 0.08,
+    frontFrac: 0.47, toeOff: 0.55, heelStrike: 0.05, flightArc: 0.065
+  },
   keys: [
     [0.0, SPRINT_CONTACT],
     [0.25, SPRINT_FLIGHT],
@@ -354,7 +360,10 @@ const CROUCHWALK_PASS = {
 };
 CLIP_SPECS.crouchWalk = {
   loop: true, duration: 1, gait: true,
-  legs: { stride: 1.00, stance: 0.62, lift: 0.09, heelRise: 0.05, frontFrac: 0.45, toeOff: 0.30, heelStrike: 0.12, hipFixed: 0.665 },
+  legs: {
+    stride: 1.00, stance: 0.62, lift: 0.09, heelRise: 0.05,
+    frontFrac: 0.45, toeOff: 0.30, heelStrike: 0.12, hipFixed: 0.665
+  },
   keys: [
     [0.0, CROUCHWALK_CONTACT],
     [0.25, CROUCHWALK_PASS],
@@ -1089,7 +1098,10 @@ function ringStack(sections, seg, opts) {
     for (let i = capSeg; i >= 1; i--) {
       const a = (i / (capSeg + 1)) * Math.PI * 0.5;
       const s = Math.cos(a);
-      rings.push({ y: first.y + Math.sin(a) * rt, rx: first.rx * s, rz: first.rz * s, x: first.x, z: first.z, c: first.c });
+      rings.push({
+        y: first.y + Math.sin(a) * rt, rx: first.rx * s, rz: first.rz * s,
+        x: first.x, z: first.z, c: first.c
+      });
     }
   }
   for (let i = 0; i < sections.length; i++) rings.push(sections[i]);
@@ -1098,7 +1110,10 @@ function ringStack(sections, seg, opts) {
     for (let i = 1; i <= capSeg; i++) {
       const a = (i / (capSeg + 1)) * Math.PI * 0.5;
       const s = Math.cos(a);
-      rings.push({ y: last.y - Math.sin(a) * rb, rx: last.rx * s, rz: last.rz * s, x: last.x, z: last.z, c: last.c });
+      rings.push({
+        y: last.y - Math.sin(a) * rb, rx: last.rx * s, rz: last.rz * s,
+        x: last.x, z: last.z, c: last.c
+      });
     }
   }
 

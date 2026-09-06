@@ -68,7 +68,7 @@ export class Game {
     this.gl = createGLContext(canvas, {});
     if (!this.gl) throw new Error('이 브라우저/기기에서 WebGL2를 사용할 수 없습니다.');
 
-    this.rng = new Rand(0xC17Y5EED);
+    this.rng = new Rand(0xC17E5EED);
     this.time = { now: 0, dt: 0, scale: 1, elapsed: 0, frame: 0, hours: 9.5, daySpeed: 0.02 };
     this.paused = true;
     this.started = false;

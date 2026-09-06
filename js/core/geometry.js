@@ -534,7 +534,13 @@ export function cylinder(rTop, rBottom, height, radialSeg = 16, capped = true) {
   const uvs = [];
   const indices = [];
   const slope = rBottom - rTop;
-  const nScale = 1 / Math.max(TINY, Math.sqrt(slope * slope + height * height));
+  // Side normal is (radial * height, slope, ...) normalized; a zero-height stub has
+  // no slant, so fall back to a purely radial normal instead of a zero vector.
+  const slantLen = Math.sqrt(slope * slope + height * height);
+  const degenerateSide = slantLen < TINY;
+  const nScale = degenerateSide ? 0 : 1 / slantLen;
+  const nRadial = degenerateSide ? 1 : height * nScale;
+  const nAxial = degenerateSide ? 0 : slope * nScale;
   const topApex = Math.abs(rTop) < TINY;
   const bottomApex = Math.abs(rBottom) < TINY;
 
@@ -548,7 +554,7 @@ export function cylinder(rTop, rBottom, height, radialSeg = 16, capped = true) {
       const cp = Math.cos(phi);
       pushVertex(positions, normals, uvs,
         sp * r, y, cp * r,
-        sp * height * nScale, slope * nScale, cp * height * nScale,
+        sp * nRadial, nAxial, cp * nRadial,
         i / seg, j);
     }
   }
@@ -1083,13 +1089,16 @@ export function extrudePolygon(points2d, height, opts = {}) {
       const ez = b1z - b0z;
       const edgeLen = Math.sqrt(ex * ex + ez * ez);
       if (edgeLen < 1e-9) continue;
-      // Exact face normal from the (planar) trapezoid.
+      // Exact face normal from the (planar) trapezoid. The top edge is parallel to
+      // the bottom edge (the taper is a uniform scale about the centroid), so the
+      // rising edge crossed with the bottom edge gives the same normal and stays
+      // valid when the top collapses to a point (taper == 1, spire roofs).
       const ux = t0x - b0x;
       const uy = y1 - y0;
       const uz = t0z - b0z;
-      const wx = t1x - b0x;
-      const wy = y1 - y0;
-      const wz = t1z - b0z;
+      const wx = ex;
+      const wy = 0;
+      const wz = ez;
       let nx = uy * wz - uz * wy;
       let ny = uz * wx - ux * wz;
       let nz = ux * wy - uy * wx;
