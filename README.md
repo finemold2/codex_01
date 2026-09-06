@@ -1,3 +1,7 @@
+> 이 저장소에는 두 개의 정적 웹앱이 있습니다.
+> - **🏃 RunClub** (루트, 아래 설명) — GPS 러닝 트래커
+> - **🧱 TETRIS** ([`tetris/`](tetris/README.md)) — 모바일 터치 최적화 테트리스 PWA · 실행: `python3 -m http.server 8000` 후 `http://localhost:8000/tetris/`
+
 # 🏃 RunClub — 러닝 트래커 웹앱
 
 런데이 / Nike Run Club 스타일의 **GPS 러닝 트래커** 웹앱입니다.
