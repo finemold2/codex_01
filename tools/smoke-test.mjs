@@ -102,7 +102,7 @@ const warn = [];
     }));
     fail.push(`boot timeout: ${JSON.stringify(status)}`);
   });
-  await page.screenshot({ path: join(SHOTS, '01-menu.png') });
+  await page.screenshot({ path: join(SHOTS, '01-menu.png'), timeout: 240000 });
 
   const bootInfo = await page.evaluate(() => window.__NEON && window.__NEON.info || null);
   console.log('boot info:', JSON.stringify(bootInfo));
@@ -110,7 +110,7 @@ const warn = [];
   // 2) start the game (test hook bypasses the click-to-start gesture requirement)
   await page.evaluate(() => window.__NEON.startGame());
   await page.waitForTimeout(1500);
-  await page.screenshot({ path: join(SHOTS, '02-ingame.png') });
+  await page.screenshot({ path: join(SHOTS, '02-ingame.png'), timeout: 240000 });
 
   // 3) drive input: look around + walk
   const canvas = await page.$('#game-canvas');
@@ -122,7 +122,7 @@ const warn = [];
     await page.waitForTimeout(70);
   }
   await page.keyboard.up('KeyW');
-  await page.screenshot({ path: join(SHOTS, '03-walk-rotate.png') });
+  await page.screenshot({ path: join(SHOTS, '03-walk-rotate.png'), timeout: 240000 });
 
   // 4) run the in-page self-test battery
   const selfTest = await page.evaluate(() => window.__NEON.selfTest());
@@ -141,9 +141,17 @@ const warn = [];
     return { fps: (N.frameCount() - f0) / dt, frames: N.frameCount() - f0, stats: N.stats() };
   }, SECONDS);
   console.log('render sample:', JSON.stringify(sample));
-  if (!sample.frames || sample.frames < 5) fail.push(`frame loop stalled (${sample.frames} frames in ${SECONDS}s)`);
+  // A software rasteriser needs seconds per frame for a 2.3M-triangle city, so only require that
+  // the loop is alive there; on a real GPU expect a proper frame rate.
+  const software = /swiftshader|llvmpipe|softwarerasterizer/i.test((bootInfo && bootInfo.renderer) || '');
+  const minFrames = software ? 1 : 5;
+  if (!sample.frames || sample.frames < minFrames) {
+    fail.push(`frame loop stalled (${sample.frames} frames in ${SECONDS}s, ${software ? 'software' : 'hardware'} renderer)`);
+  } else if (software) {
+    console.log(`  note: software renderer — ${sample.frames} frame(s) in ${SECONDS}s is expected`);
+  }
 
-  await page.screenshot({ path: join(SHOTS, '04-later.png') });
+  await page.screenshot({ path: join(SHOTS, '04-later.png'), timeout: 240000 });
 
   // 6) non-blank frame check
   const pix = await page.evaluate(() => window.__NEON.pixelStats());
@@ -154,7 +162,7 @@ const warn = [];
   const flows = await page.evaluate(() => window.__NEON.exerciseFlows());
   console.log('flows:', JSON.stringify(flows));
   if (flows && flows.errors && flows.errors.length) for (const e of flows.errors) fail.push(`flow: ${e}`);
-  await page.screenshot({ path: join(SHOTS, '05-vehicle.png') });
+  await page.screenshot({ path: join(SHOTS, '05-vehicle.png'), timeout: 240000 });
 
   await browser.close();
   server.close();
