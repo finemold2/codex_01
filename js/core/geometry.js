@@ -626,7 +626,9 @@ export function capsule(radius, height, radialSeg = 12, capSeg = 6) {
     rows.push({ st: Math.sin(theta), ct: Math.cos(theta), yOff: hh });
   }
   // Bottom hemisphere: theta PI/2 (bottom of the barrel) down to PI (south pole).
-  for (let j = 0; j <= caps; j++) {
+  // With no mid-section the two equator rings coincide, so the duplicate is skipped.
+  const firstBottom = h > 1e-9 ? 0 : 1;
+  for (let j = firstBottom; j <= caps; j++) {
     const theta = Math.PI * 0.5 + (j / caps) * (Math.PI * 0.5);
     rows.push({ st: Math.sin(theta), ct: Math.cos(theta), yOff: -hh });
   }
@@ -858,9 +860,10 @@ function pointInTriangle(ax, az, bx, bz, cx, cz, px, pz) {
 /**
  * Ear clipping triangulation for simple polygons, concave included.
  * Input winding does not matter: the traversal is normalized so every emitted
- * triple is positively oriented in the (x, z) shoelace sense. Collinear and
- * duplicated corners are dropped without emitting degenerate triangles, and a
- * forced-progress fallback guarantees termination on malformed input.
+ * triple is positively oriented in the (x, z) shoelace sense. Real ears are always
+ * preferred; collinear or duplicated corners are only dropped when no ear is left,
+ * which keeps genuine corners in the triangulation and never emits a zero-area
+ * triangle. A forced-progress pass guarantees termination on malformed input.
  * @param {ArrayLike<ArrayLike<number>>} pts Polygon points as [x, z] pairs.
  * @param {number[]} out Array receiving flat index triples (cleared first).
  * @returns {number[]} out
@@ -878,26 +881,28 @@ function earClipPolygon(pts, out) {
   }
 
   let count = v.length;
-  let i = 0;
-  let attempts = 0;
+  let start = 0;
   while (count > 3) {
-    if (i >= count) i = 0;
-    const pi = (i + count - 1) % count;
-    const ni = (i + 1) % count;
-    const a = pts[v[pi]];
-    const b = pts[v[i]];
-    const c = pts[v[ni]];
-    const ax = a[0], az = a[1];
-    const bx = b[0], bz = b[1];
-    const cx = c[0], cz = c[1];
-    const cross = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
-    let clip = false;
-    let emit = false;
-    if (cross > COLLINEAR_EPS) {
+    let chosen = -1;
+    let emit = true;
+
+    // Pass 1: the first genuine ear (convex corner whose triangle is empty).
+    for (let k = 0; k < count; k++) {
+      const i = (start + k) % count;
+      const pi = (i + count - 1) % count;
+      const ni = (i + 1) % count;
+      const a = pts[v[pi]];
+      const b = pts[v[i]];
+      const c = pts[v[ni]];
+      const ax = a[0], az = a[1];
+      const bx = b[0], bz = b[1];
+      const cx = c[0], cz = c[1];
+      const cross = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+      if (cross <= COLLINEAR_EPS) continue;
       let blocked = false;
-      for (let k = 0; k < count; k++) {
-        if (k === pi || k === i || k === ni) continue;
-        const p = pts[v[k]];
+      for (let q = 0; q < count; q++) {
+        if (q === pi || q === i || q === ni) continue;
+        const p = pts[v[q]];
         const px = p[0];
         const pz = p[1];
         if ((px === ax && pz === az) || (px === bx && pz === bz) || (px === cx && pz === cz)) continue;
@@ -907,28 +912,51 @@ function earClipPolygon(pts, out) {
         }
       }
       if (!blocked) {
-        clip = true;
-        emit = true;
+        chosen = i;
+        break;
       }
-    } else if (cross > -COLLINEAR_EPS) {
-      // Collinear or duplicated corner: remove it, it carries no area.
-      clip = true;
     }
-    if (!clip && attempts >= count * 3) {
-      // Self-intersecting or otherwise broken input: force progress.
-      clip = true;
-      emit = cross > COLLINEAR_EPS;
+
+    // Pass 2: no ear available, so drop a collinear or duplicated corner. It carries
+    // no area, and deferring it until now keeps real corners in the triangulation.
+    if (chosen < 0) {
+      for (let k = 0; k < count; k++) {
+        const i = (start + k) % count;
+        const a = pts[v[(i + count - 1) % count]];
+        const b = pts[v[i]];
+        const c = pts[v[(i + 1) % count]];
+        const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if (cross > -COLLINEAR_EPS && cross < COLLINEAR_EPS) {
+          chosen = i;
+          emit = false;
+          break;
+        }
+      }
     }
-    if (clip) {
-      if (emit) out.push(v[pi], v[i], v[ni]);
-      v.splice(i, 1);
-      count--;
-      attempts = 0;
-      i = i > 0 ? i - 1 : count - 1;
-    } else {
-      i++;
-      attempts++;
+
+    // Pass 3: malformed (self-intersecting) input. Clip the most convex corner so
+    // the loop always terminates.
+    if (chosen < 0) {
+      let best = -Infinity;
+      for (let i = 0; i < count; i++) {
+        const a = pts[v[(i + count - 1) % count]];
+        const b = pts[v[i]];
+        const c = pts[v[(i + 1) % count]];
+        const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if (cross > best) {
+          best = cross;
+          chosen = i;
+        }
+      }
+      emit = best > COLLINEAR_EPS;
     }
+
+    const pi = (chosen + count - 1) % count;
+    const ni = (chosen + 1) % count;
+    if (emit) out.push(v[pi], v[chosen], v[ni]);
+    v.splice(chosen, 1);
+    count--;
+    start = count > 0 ? chosen % count : 0;
   }
   if (count === 3) {
     const a = pts[v[0]];

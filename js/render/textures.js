@@ -1960,6 +1960,9 @@ function genChrome(S, seed) {
 
 /**
  * Writes an emissive mask into the alpha channel of an RGBA buffer.
+ * Called *after* the opaque colour has been committed to the canvas, so
+ * `canvases.*Facade` stays a fully visible image for UI use while the uploaded
+ * pixel buffer carries the mask in alpha.
  * @param {Uint8ClampedArray} px RGBA pixels.
  * @param {Float32Array} mask Mask in 0..1.
  * @returns {void}
@@ -2051,8 +2054,8 @@ function genGlassFacade(S, seed) {
       mask[i] = m;
     }
   }
-  applyMask(px, mask);
   ctx.putImageData(img, 0, 0);
+  applyMask(px, mask);
   return { canvas: canvas, pixels: px };
 }
 
@@ -2142,8 +2145,8 @@ function genOfficeFacade(S, seed) {
       mask[i] = m;
     }
   }
-  applyMask(px, mask);
   ctx.putImageData(img, 0, 0);
+  applyMask(px, mask);
   return { canvas: canvas, pixels: px };
 }
 
@@ -2254,8 +2257,8 @@ function genApartmentFacade(S, seed) {
       mask[i] = m;
     }
   }
-  applyMask(px, mask);
   ctx.putImageData(img, 0, 0);
+  applyMask(px, mask);
   return { canvas: canvas, pixels: px };
 }
 
@@ -2383,7 +2386,6 @@ function genGroundFloorShops(S, seed) {
     if (d > 24) mask[i] = 1;
   }
   applyMask(outPx, mask);
-  ctx.putImageData(after, 0, 0);
   return { canvas: canvas, pixels: outPx };
 }
 
@@ -3100,24 +3102,23 @@ function genCrackDecal(S, seed) {
    */
   const branch = (x, y, ang, len, width, depth) => {
     let cx = x, cy = y, a = ang, remaining = len, w = width;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
     while (remaining > 0) {
       const step = Math.min(remaining, S * rng.range(0.02, 0.06));
       a += rng.range(-0.45, 0.45);
-      cx += Math.cos(a) * step;
-      cy += Math.sin(a) * step;
+      const nx = cx + Math.cos(a) * step;
+      const ny = cy + Math.sin(a) * step;
       ctx.lineWidth = Math.max(0.6, w);
-      ctx.lineTo(cx, cy);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(nx, ny);
+      ctx.stroke();
+      cx = nx; cy = ny;
       remaining -= step;
       w *= 0.94;
       if (depth < 3 && rng.chance(0.18)) {
         branch(cx, cy, a + (rng.chance(0.5) ? 1 : -1) * rng.range(0.5, 1.1), remaining * rng.range(0.4, 0.8), w * 0.7, depth + 1);
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
       }
     }
-    ctx.stroke();
   };
 
   const n = 7;
@@ -3231,7 +3232,8 @@ function genSkyStars(W, H, seed) {
       const yy = Math.round(y);
       if (yy >= 0 && yy < H) bright[yy * W + xx] += f;
       const yk = yy + k;
-      if (yk >= 0 && yk < H) bright[yk * W + Math.round(x) % W] += f;
+      const xr = Math.round(x) % W;
+      if (yk >= 0 && yk < H) bright[yk * W + xr] += f;
     }
     if (rng.chance(0.5)) splatStar(warm, W, H, x, y, rng.range(1.4, 2.4), b * 0.6);
   }

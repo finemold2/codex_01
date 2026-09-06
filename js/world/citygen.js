@@ -2406,3 +2406,247 @@ function buildProps(ctx) {
       _pp[1] + _pd[0] * side * e.width * 0.25, yawFromDir(_pd[0], _pd[1]), 1, null);
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Phase 8 — landmarks and spawns
+ * ------------------------------------------------------------------ */
+
+/**
+ * Centre of a block in world coordinates.
+ * @param {object} ctx Generation context.
+ * @param {number} i Block column.
+ * @param {number} j Block row.
+ * @returns {number[]} `[x, z]`.
+ */
+function blockCenter(ctx, i, j) {
+  const ii = clamp(i, 0, ctx.blocksX - 1);
+  const jj = clamp(j, 0, ctx.blocksZ - 1);
+  return [
+    (ctx.xRoad[ii] + ctx.roadWX[ii] * 0.5 + ctx.xRoad[ii + 1] - ctx.roadWX[ii + 1] * 0.5) * 0.5,
+    (ctx.zRoad[jj] + ctx.roadWZ[jj] * 0.5 + ctx.zRoad[jj + 1] - ctx.roadWZ[jj + 1] * 0.5) * 0.5
+  ];
+}
+
+/**
+ * Finds the building closest to a point, optionally filtered.
+ * @param {object} ctx Generation context.
+ * @param {number} x Anchor x.
+ * @param {number} z Anchor z.
+ * @param {(b: object) => boolean} pred Filter.
+ * @returns {object|null} Building or null.
+ */
+function nearestBuilding(ctx, x, z, pred) {
+  let best = null;
+  let bestD = Infinity;
+  for (const b of ctx.buildings) {
+    if (b.landmark) continue;
+    if (!pred(b)) continue;
+    const dx = b.x - x;
+    const dz = b.z - z;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) {
+      bestD = d;
+      best = b;
+    }
+  }
+  return best;
+}
+
+/**
+ * Builds the landmark list used by the map screen and the mission markers.
+ * @param {object} ctx Generation context.
+ * @returns {object[]} Landmarks.
+ */
+function buildLandmarks(ctx) {
+  const marks = [];
+  /**
+   * @param {string} name Korean name.
+   * @param {number} x World x.
+   * @param {number} z World z.
+   * @param {string} kind Landmark kind.
+   * @returns {void}
+   */
+  const add = (name, x, z, kind) => {
+    marks.push({ id: marks.length, name, x, z, kind });
+  };
+
+  for (let i = 0; i < ctx.landmarkTowers.length; i++) {
+    const b = ctx.landmarkTowers[i];
+    add(b.name, b.x, b.z, 'tower');
+  }
+  for (const sb of ctx.superblocks) {
+    if (sb.lotId === undefined) continue;
+    const lot = ctx.lots[sb.lotId];
+    const kind = sb.kind === 'railyard' ? 'railyard' : sb.kind === 'stadium' ? 'stadium'
+      : sb.kind === 'park' ? 'park' : sb.kind === 'parking' ? 'parking' : 'plaza';
+    add(sb.name, lot.x, lot.z, kind);
+  }
+
+  const police = nearestBuilding(ctx, ...blockCenter(ctx, Math.round(ctx.blocksX * 0.21),
+    Math.round(ctx.blocksZ * 0.43)), (b) => b.h > 12 && b.style !== 'house');
+  if (police) {
+    police.name = '중앙 경찰서';
+    police.landmark = true;
+    ctx.policeStation = police;
+    add('중앙 경찰서', police.x, police.z, 'police');
+  }
+  const hospital = nearestBuilding(ctx, ...blockCenter(ctx, Math.round(ctx.blocksX * 0.71),
+    Math.round(ctx.blocksZ * 0.36)), (b) => b.h > 14 && b.style !== 'house');
+  if (hospital) {
+    hospital.name = '시립 병원';
+    hospital.landmark = true;
+    add('시립 병원', hospital.x, hospital.z, 'hospital');
+  }
+  const hall = nearestBuilding(ctx, ...blockCenter(ctx, Math.round(ctx.blocksX * 0.43),
+    Math.round(ctx.blocksZ * 0.57)), (b) => b.h > 20);
+  if (hall) {
+    hall.name = '시청';
+    hall.landmark = true;
+    add('시청', hall.x, hall.z, 'civic');
+  }
+  const port = nearestBuilding(ctx, ctx.gridMaxX - 60, ctx.gridMaxZ - 60,
+    (b) => b.style === 'warehouse');
+  if (port) {
+    port.name = '항구 창고';
+    port.landmark = true;
+    ctx.portWarehouse = port;
+    add('컨테이너 부두', port.x, port.z, 'port');
+  }
+  if (ctx.waterfrontEdges.length > 0) {
+    const e = ctx.edges[ctx.waterfrontEdges[Math.floor(ctx.waterfrontEdges.length / 4)]];
+    const mid = e.pts[Math.floor(e.pts.length / 2)];
+    add('해변 산책로', mid[0], mid[1], 'beach');
+  }
+  return marks;
+}
+
+/**
+ * Places the player, traffic, pedestrian, police and mission spawn points.
+ * @param {object} ctx Generation context.
+ * @param {object} city The assembled city (lanes/walks already final).
+ * @returns {object} The `spawns` structure.
+ */
+function buildSpawns(ctx, city) {
+  const rng = new Rand(mixSeed(ctx.seed, 'spawns'));
+  const spawns = { player: null, vehicles: [], peds: [], police: [], missionPoints: [] };
+
+  // --- vehicles ----------------------------------------------------------
+  const roadLanes = [];
+  for (const lane of city.lanes) {
+    if (lane.edgeId < 0) continue;
+    if (polyLength(lane.pts) < 16) continue;
+    roadLanes.push(lane.id);
+  }
+  for (let i = roadLanes.length - 1; i > 0; i--) {
+    const j = Math.floor(rng.next() * (i + 1));
+    const t = roadLanes[i];
+    roadLanes[i] = roadLanes[j];
+    roadLanes[j] = t;
+  }
+  const wantVehicles = Math.min(roadLanes.length, 240);
+  for (let i = 0; i < wantVehicles; i++) {
+    const lane = city.lanes[roadLanes[i]];
+    const t = rr(rng, 0.22, 0.78);
+    polySample(lane.pts, t, _pp);
+    polyDirAt(lane.pts, t, _pd);
+    spawns.vehicles.push({
+      x: _pp[0], y: 0, z: _pp[1],
+      yaw: yawFromDir(_pd[0], _pd[1]),
+      laneId: lane.id
+    });
+  }
+
+  // --- pedestrians -------------------------------------------------------
+  const walkIds = [];
+  for (const w of city.walks) {
+    if (w.crossing || (w.id & 1) === 1) continue;
+    if (polyLength(w.pts) < 8) continue;
+    walkIds.push(w.id);
+  }
+  for (let i = walkIds.length - 1; i > 0; i--) {
+    const j = Math.floor(rng.next() * (i + 1));
+    const t = walkIds[i];
+    walkIds[i] = walkIds[j];
+    walkIds[j] = t;
+  }
+  const wantPeds = Math.min(walkIds.length, 320);
+  for (let i = 0; i < wantPeds; i++) {
+    const w = city.walks[walkIds[i]];
+    polySample(w.pts, rr(rng, 0.15, 0.85), _pp);
+    spawns.peds.push({ x: _pp[0], y: SIDEWALK_H, z: _pp[1] });
+  }
+
+  // --- player ------------------------------------------------------------
+  const plazaLot = ctx.sbPlaza >= 0 && ctx.superblocks[ctx.sbPlaza]
+    ? ctx.lots[ctx.superblocks[ctx.sbPlaza].lotId] : null;
+  const px = plazaLot ? plazaLot.x : 0;
+  const pz = plazaLot ? plazaLot.z + (plazaLot.d * 0.5 + 12) : 0;
+  const near = walkAt(city, px, pz);
+  if (near) {
+    const dx = px - near.point[0];
+    const dz = pz - near.point[1];
+    const l = Math.hypot(dx, dz) || 1;
+    spawns.player = {
+      x: near.point[0], y: SIDEWALK_H, z: near.point[1],
+      yaw: yawFromDir(dx / l, dz / l)
+    };
+  } else {
+    spawns.player = { x: px, y: SIDEWALK_H, z: pz, yaw: 0 };
+  }
+
+  // --- police ------------------------------------------------------------
+  const station = ctx.policeStation;
+  const sx = station ? station.x : px;
+  const sz = station ? station.z : pz;
+  const ring = [[18, 0], [-18, 0], [0, 18], [0, -18], [14, 14], [-14, -14]];
+  for (let i = 0; i < ring.length; i++) {
+    const tx = sx + ring[i][0];
+    const tz = sz + ring[i][1];
+    const hit = walkAt(city, tx, tz);
+    const x = hit ? hit.point[0] : tx;
+    const z = hit ? hit.point[1] : tz;
+    const dx = sx - x;
+    const dz = sz - z;
+    const l = Math.hypot(dx, dz) || 1;
+    spawns.police.push({ x, y: SIDEWALK_H, z, yaw: yawFromDir(dx / l, dz / l) });
+  }
+
+  // --- mission points ----------------------------------------------------
+  /**
+   * @param {string} name Korean name.
+   * @param {number} x Anchor x.
+   * @param {number} z Anchor z.
+   * @returns {void}
+   */
+  const addMission = (name, x, z) => {
+    const hit = walkAt(city, x, z);
+    spawns.missionPoints.push({
+      x: hit ? hit.point[0] : x,
+      y: SIDEWALK_H,
+      z: hit ? hit.point[1] : z,
+      name
+    });
+  };
+  /**
+   * @param {string} kind Landmark kind.
+   * @returns {object|null} First landmark of that kind.
+   */
+  const mark = (kind) => city.landmarks.find((m) => m.kind === kind) || null;
+  const port = ctx.portWarehouse;
+  addMission('항구 창고', port ? port.x : ctx.gridMaxX - 60, port ? port.z + 14 : ctx.gridMaxZ - 60);
+  addMission('중앙 광장', px, pz);
+  const stadium = mark('stadium');
+  addMission('스타디움', stadium ? stadium.x : px, stadium ? stadium.z : pz);
+  const beach = mark('beach');
+  addMission('해변 산책로', beach ? beach.x : px, beach ? beach.z : pz);
+  const park = mark('park');
+  addMission('네온 공원', park ? park.x : px, park ? park.z : pz);
+  const yard = mark('railyard');
+  addMission('차량기지', yard ? yard.x : px, yard ? yard.z : pz);
+  const tower = ctx.landmarkTowers[0];
+  addMission('전망대 타워', tower ? tower.x + tower.w * 0.5 + 8 : px,
+    tower ? tower.z : pz);
+  const c = blockCenter(ctx, Math.round(ctx.blocksX * 0.14), Math.round(ctx.blocksZ * 0.86));
+  addMission('리버사이드 주택가', c[0], c[1]);
+  return spawns;
+}
