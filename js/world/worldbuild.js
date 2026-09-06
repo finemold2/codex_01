@@ -405,17 +405,17 @@ class MeshBuilder {
    * @returns {void}
    */
   addOrientedQuad(cx, cz, y, hw, hd, dirX, dirZ, r, color) {
-    // Right vector = forward rotated -90 degrees about Y.
-    const rx = dirZ, rz = -dirX;
+    // Right vector for the game's yaw convention: forward (0,0,1) has right (-1,0,0).
+    const rx = -dirZ, rz = dirX;
     const cr = color[0], cg = color[1], cb = color[2];
-    const ax = cx - rx * hw - dirX * hd, az = cz - rz * hw - dirZ * hd;
-    const bx = cx + rx * hw - dirX * hd, bz = cz + rz * hw - dirZ * hd;
-    const dx = cx + rx * hw + dirX * hd, dz = cz + rz * hw + dirZ * hd;
-    const ex = cx - rx * hw + dirX * hd, ez = cz - rz * hw + dirZ * hd;
-    const i0 = this.vert(ax, y, az, 0, 1, 0, r.u0, r.v0, cr, cg, cb);
-    const i1 = this.vert(ex, y, ez, 0, 1, 0, r.u0, r.v1, cr, cg, cb);
-    const i2 = this.vert(dx, y, dz, 0, 1, 0, r.u1, r.v1, cr, cg, cb);
-    const i3 = this.vert(bx, y, bz, 0, 1, 0, r.u1, r.v0, cr, cg, cb);
+    const lbx = cx - rx * hw - dirX * hd, lbz = cz - rz * hw - dirZ * hd;
+    const rbx = cx + rx * hw - dirX * hd, rbz = cz + rz * hw - dirZ * hd;
+    const rfx = cx + rx * hw + dirX * hd, rfz = cz + rz * hw + dirZ * hd;
+    const lfx = cx - rx * hw + dirX * hd, lfz = cz - rz * hw + dirZ * hd;
+    const i0 = this.vert(lbx, y, lbz, 0, 1, 0, r.u0, r.v0, cr, cg, cb);
+    const i1 = this.vert(rbx, y, rbz, 0, 1, 0, r.u1, r.v0, cr, cg, cb);
+    const i2 = this.vert(rfx, y, rfz, 0, 1, 0, r.u1, r.v1, cr, cg, cb);
+    const i3 = this.vert(lfx, y, lfz, 0, 1, 0, r.u0, r.v1, cr, cg, cb);
     this.quad(i0, i1, i2, i3);
   }
 
@@ -1057,4 +1057,362 @@ function patchMaterial(renderer, mat, patch) {
   for (let i = 0; i < keys.length; i++) mat[keys[i]] = patch[keys[i]];
   if (typeof mat.version === 'number') mat.version++;
   mat.dirty = true;
+}
+
+/* --------------------------------------------------------- ground & water */
+
+/**
+ * Converts a canvas-space atlas rectangle into GL UV space (the texture uploader flips Y).
+ * @param {{u0:number,v0:number,u1:number,v1:number}} r Canvas-space rectangle.
+ * @returns {{u0:number,v0:number,u1:number,v1:number}} GL-space rectangle.
+ */
+function glRect(r) {
+  return { u0: r.u0, v0: 1 - r.v1, u1: r.u1, v1: 1 - r.v0 };
+}
+
+/**
+ * Picks the ground tint for a world position: district colour, dirt/grass noise, a sand
+ * band along the shoreline and a darker, bluer bed below the waterline.
+ * @param {object} bc Build context.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @param {number} h Terrain height at the sample.
+ * @param {number[]} out Destination rgb.
+ * @returns {number[]} out
+ */
+function groundTint(bc, x, z, h, out) {
+  const d = districtAtPoint(bc, x, z);
+  const base = (d && DISTRICT_GROUND[d.kind]) || DISTRICT_GROUND.residential;
+  const n = fbm(x * 0.035, z * 0.035, bc.seed + 991, 3);
+  const k = 0.72 + n * 0.55;
+  out[0] = base[0] * k;
+  out[1] = base[1] * k;
+  out[2] = base[2] * k;
+  const wl = bc.terrain.waterLevel;
+  if (wl !== null) {
+    // Sand band just above the waterline, wet mud just below it.
+    const beach = 1 - smoothstep(0.0, 3.4, h - wl);
+    if (beach > 0) {
+      const sand = DISTRICT_GROUND.beach;
+      out[0] = lerp(out[0], sand[0] * k, beach);
+      out[1] = lerp(out[1], sand[1] * k, beach);
+      out[2] = lerp(out[2], sand[2] * k, beach);
+    }
+    const deep = smoothstep(0, 6, wl - h);
+    if (deep > 0) {
+      out[0] = lerp(out[0], 0.075 * k, deep);
+      out[1] = lerp(out[1], 0.085 * k, deep);
+      out[2] = lerp(out[2], 0.075 * k, deep);
+    }
+  }
+  return out;
+}
+
+/**
+ * Finds the district containing a point (linear scan over a handful of rectangles).
+ * @param {object} bc Build context.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @returns {object|null} District or null.
+ */
+function districtAtPoint(bc, x, z) {
+  const list = bc.city.districts;
+  if (!list) return null;
+  let best = null, bestD = Infinity;
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i].rect;
+    const x0 = r.x0 !== undefined ? r.x0 : r.x;
+    const z0 = r.z0 !== undefined ? r.z0 : r.z;
+    const x1 = r.x1 !== undefined ? r.x1 : r.x + r.w;
+    const z1 = r.z1 !== undefined ? r.z1 : r.z + r.d;
+    if (x >= x0 && x <= x1 && z >= z0 && z <= z1) return list[i];
+    const dx = Math.max(x0 - x, x - x1, 0);
+    const dz = Math.max(z0 - z, z - z1, 0);
+    const d = dx * dx + dz * dz;
+    if (d < bestD) { bestD = d; best = list[i]; }
+  }
+  return best;
+}
+
+/**
+ * Builds the terrain mesh as a grid of patches (one static batch each) so the horizon can be
+ * frustum culled. Heights come straight from {@link Terrain} so collision and visuals agree.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildTerrainMesh(bc) {
+  const t = bc.terrain;
+  const cell = 10;
+  const patches = 5;
+  const spanX = t.maxX - t.minX;
+  const spanZ = t.maxZ - t.minZ;
+  const nx = Math.ceil(spanX / cell);
+  const nz = Math.ceil(spanZ / cell);
+  const perX = Math.ceil(nx / patches);
+  const perZ = Math.ceil(nz / patches);
+  const col = [0, 0, 0];
+
+  for (let pz = 0; pz < patches; pz++) {
+    for (let px = 0; px < patches; px++) {
+      const i0 = px * perX, i1 = Math.min(nx, i0 + perX);
+      const j0 = pz * perZ, j1 = Math.min(nz, j0 + perZ);
+      if (i0 >= i1 || j0 >= j1) continue;
+      const mb = new MeshBuilder((i1 - i0 + 1) * (j1 - j0 + 1));
+      const w = i1 - i0 + 1;
+      for (let j = j0; j <= j1; j++) {
+        const z = t.minZ + j * cell;
+        for (let i = i0; i <= i1; i++) {
+          const x = t.minX + i * cell;
+          const h = t.height(x, z);
+          groundTint(bc, x, z, h, col);
+          // Normal from central differences on the height field.
+          const hx = t.height(x + cell, z) - t.height(x - cell, z);
+          const hz = t.height(x, z + cell) - t.height(x, z - cell);
+          const nxv = -hx, nyv = 2 * cell, nzv = -hz;
+          const len = Math.hypot(nxv, nyv, nzv) || 1;
+          mb.vert(x, h - GROUND_DROP, z, nxv / len, nyv / len, nzv / len,
+            x * 0.08, z * 0.08, col[0], col[1], col[2]);
+        }
+      }
+      for (let j = 0; j < j1 - j0; j++) {
+        for (let i = 0; i < i1 - i0; i++) {
+          const a = j * w + i;
+          mb.quad(a, a + w, a + w + 1, a + 1);
+        }
+      }
+      const geo = mb.toGeometry();
+      if (!geo) continue;
+      bc.stats.batches++;
+      bc.stats.triangles += geo.indices.length / 3;
+      if (typeof bc.renderer.addStatic === 'function') {
+        const id = bc.renderer.addStatic(geo, bc.mats.terrain);
+        if (id !== undefined && id !== null) bc.staticIds.push(id);
+      }
+    }
+  }
+}
+
+/**
+ * Builds the sea: one gently tessellated plane at `waterLevel` covering the whole terrain.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildWaterMesh(bc) {
+  const wl = bc.terrain.waterLevel;
+  if (wl === null) return;
+  const t = bc.terrain;
+  const seg = 24;
+  const mb = new MeshBuilder((seg + 1) * (seg + 1));
+  const x0 = t.minX - 300, z0 = t.minZ - 300;
+  const x1 = t.maxX + 300, z1 = t.maxZ + 300;
+  const dx = (x1 - x0) / seg, dz = (z1 - z0) / seg;
+  for (let j = 0; j <= seg; j++) {
+    for (let i = 0; i <= seg; i++) {
+      const x = x0 + i * dx, z = z0 + j * dz;
+      mb.vert(x, wl, z, 0, 1, 0, x * 0.02, z * 0.02, 1, 1, 1);
+    }
+  }
+  for (let j = 0; j < seg; j++) {
+    for (let i = 0; i < seg; i++) {
+      const a = j * (seg + 1) + i;
+      mb.quad(a, a + seg + 1, a + seg + 2, a + 1);
+    }
+  }
+  const geo = mb.toGeometry();
+  if (!geo) return;
+  bc.stats.batches++;
+  bc.stats.triangles += geo.indices.length / 3;
+  if (typeof bc.renderer.addStatic === 'function') {
+    const id = bc.renderer.addStatic(geo, bc.mats.water);
+    if (id !== undefined && id !== null) bc.staticIds.push(id);
+  }
+}
+
+/* ------------------------------------------------------------------ roads */
+
+/**
+ * Emits one flat, world-UV quad. Overlapping road quads are harmless because the UVs are
+ * derived from world position, so the overlap samples exactly the same texels.
+ * @param {MeshBuilder} mb Target builder.
+ * @param {number} cx Centre x.
+ * @param {number} cz Centre z.
+ * @param {number} dirX Unit direction x.
+ * @param {number} dirZ Unit direction z.
+ * @param {number} hw Half width.
+ * @param {number} hl Half length.
+ * @param {number} y Height.
+ * @param {number} s UV scale (tiles per metre).
+ * @param {number[]} color Vertex colour.
+ * @returns {void}
+ */
+function pushSurfaceQuad(mb, cx, cz, dirX, dirZ, hw, hl, y, s, color) {
+  const rx = -dirZ, rz = dirX;
+  const r = color[0], g = color[1], b = color[2];
+  const xs = [cx - rx * hw - dirX * hl, cx + rx * hw - dirX * hl,
+    cx + rx * hw + dirX * hl, cx - rx * hw + dirX * hl];
+  const zs = [cz - rz * hw - dirZ * hl, cz + rz * hw - dirZ * hl,
+    cz + rz * hw + dirZ * hl, cz - rz * hw + dirZ * hl];
+  const i0 = mb.vert(xs[0], y, zs[0], 0, 1, 0, xs[0] * s, zs[0] * s, r, g, b);
+  const i1 = mb.vert(xs[1], y, zs[1], 0, 1, 0, xs[1] * s, zs[1] * s, r, g, b);
+  const i2 = mb.vert(xs[2], y, zs[2], 0, 1, 0, xs[2] * s, zs[2] * s, r, g, b);
+  const i3 = mb.vert(xs[3], y, zs[3], 0, 1, 0, xs[3] * s, zs[3] * s, r, g, b);
+  mb.quad(i0, i1, i2, i3);
+}
+
+/**
+ * Builds every road surface plus square pads under the intersections.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildRoadSurfaces(bc) {
+  const roads = bc.city.roads || [];
+  const col = [1, 1, 1];
+  const uv = 1 / 9;
+  for (let i = 0; i < roads.length; i++) {
+    const r = roads[i];
+    const dx = r.bx - r.ax, dz = r.bz - r.az;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.01) continue;
+    const ux = dx / len, uz = dz / len;
+    const cx = (r.ax + r.bx) * 0.5, cz = (r.az + r.bz) * 0.5;
+    const half = r.width * 0.5;
+    // Extend by half a width at each end so consecutive segments and corners never gap.
+    const hl = len * 0.5 + half;
+    const shade = 0.86 + hash2(Math.round(cx), Math.round(cz), bc.seed) * 0.2;
+    col[0] = shade; col[1] = shade; col[2] = shade * 1.01;
+    pushSurfaceQuad(bc.coarse.at(cx, cz, 'asphalt'), cx, cz, ux, uz, half, hl, ROAD_Y, uv, col);
+  }
+  const nodes = bc.city.nodes || [];
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const half = bc.nodeHalf[i];
+    if (!(half > 0)) continue;
+    col[0] = 0.9; col[1] = 0.9; col[2] = 0.91;
+    pushSurfaceQuad(bc.coarse.at(n.x, n.z, 'asphalt'), n.x, n.z, 0, 1, half, half, ROAD_Y, uv, col);
+  }
+}
+
+/**
+ * Paints the road-marking decal layer from the `roadLines` atlas: lane dashes, the double
+ * yellow centre line on multi-lane roads, stop bars, zebra crossings and lane arrows at
+ * every signalled approach.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildRoadMarkings(bc) {
+  const src = (TEXLIB && TEXLIB.ROAD_MARKING_UV) || FALLBACK_MARKING_UV;
+  const R = {
+    dash: glRect(src.dash), solid: glRect(src.solid), doubleYellow: glRect(src.doubleYellow),
+    stopBar: glRect(src.stopBar), crosswalk: glRect(src.crosswalk),
+    arrowStraight: glRect(src.arrowStraight), arrowLeft: glRect(src.arrowLeft),
+    arrowRight: glRect(src.arrowRight), parking: glRect(src.parking)
+  };
+  bc.markRects = R;
+  const roads = bc.city.roads || [];
+  const nodes = bc.city.nodes || [];
+  const white = [1, 1, 1];
+
+  for (let i = 0; i < roads.length; i++) {
+    const r = roads[i];
+    const dx = r.bx - r.ax, dz = r.bz - r.az;
+    const len = Math.hypot(dx, dz);
+    if (len < 6) continue;
+    const ux = dx / len, uz = dz / len;
+    const half = r.width * 0.5;
+    const lanesPerDir = Math.max(1, r.lanesPerDir || Math.max(1, Math.round((r.lanes || 2) / 2)));
+    const laneW = r.width / (lanesPerDir * 2);
+
+    // Trim the ends that sit inside an intersection.
+    const na = nodes[r.nodeA], nb = nodes[r.nodeB];
+    let t0 = 0, t1 = len;
+    if (na && Math.hypot(na.x - r.ax, na.z - r.az) < 1.2) t0 = bc.nodeHalf[r.nodeA] + 3.2;
+    if (nb && Math.hypot(nb.x - r.bx, nb.z - r.bz) < 1.2) t1 = len - (bc.nodeHalf[r.nodeB] + 3.2);
+    if (t1 - t0 < 4) continue;
+
+    // Centre line: double yellow when the road carries opposing traffic, otherwise nothing.
+    if (lanesPerDir >= 1 && r.kind !== 'turn') {
+      const segLen = t1 - t0;
+      const cx = r.ax + ux * (t0 + segLen * 0.5);
+      const cz = r.az + uz * (t0 + segLen * 0.5);
+      const mb = bc.coarse.at(cx, cz, 'mark');
+      // Tile the yellow band along the road by emitting 12 m chunks (keeps UVs in 0..1).
+      const chunks = Math.max(1, Math.round(segLen / 12));
+      const cl = segLen / chunks;
+      for (let c = 0; c < chunks; c++) {
+        const s = t0 + cl * (c + 0.5);
+        mb.addOrientedQuad(r.ax + ux * s, r.az + uz * s, MARK_Y, 0.7, cl * 0.5, ux, uz, R.doubleYellow, white);
+      }
+    }
+
+    // Lane dashes on every interior lane boundary of each direction.
+    for (let side = -1; side <= 1; side += 2) {
+      for (let k = 1; k < lanesPerDir; k++) {
+        const off = side * k * laneW;
+        const period = 9;
+        const count = Math.floor((t1 - t0) / period);
+        for (let c = 0; c < count; c++) {
+          const s = t0 + period * (c + 0.5);
+          const px = r.ax + ux * s - uz * off;
+          const pz = r.az + uz * s + ux * off;
+          const mb = bc.coarse.at(px, pz, 'mark');
+          mb.addOrientedQuad(px, pz, MARK_Y, 0.46, 1.6, ux, uz, R.dash, white);
+        }
+      }
+    }
+
+    // Kerb-side solid edge line on wide roads.
+    if (r.width >= 18) {
+      const period = 12;
+      const count = Math.floor((t1 - t0) / period);
+      for (let side = -1; side <= 1; side += 2) {
+        const off = side * (half - 0.55);
+        for (let c = 0; c < count; c++) {
+          const s = t0 + period * (c + 0.5);
+          const px = r.ax + ux * s - uz * off;
+          const pz = r.az + uz * s + ux * off;
+          bc.coarse.at(px, pz, 'mark')
+            .addOrientedQuad(px, pz, MARK_Y, 0.46, period * 0.5, ux, uz, R.solid, white);
+        }
+      }
+    }
+  }
+
+  // Intersection furniture: zebra crossings, stop bars and lane arrows on each approach.
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const half = bc.nodeHalf[i];
+    if (!(half > 0)) continue;
+    const approaches = bc.nodeApproaches[i];
+    if (!approaches || approaches.length < 3) continue;
+    const signalled = !!n.hasTrafficLight;
+    for (let a = 0; a < approaches.length; a++) {
+      const ap = approaches[a];
+      // ap.dx/dz points away from the node, along the outgoing road.
+      const outX = ap.dx, outZ = ap.dz;
+      const w = ap.width;
+      const cw = half + 2.6;
+      const px = n.x + outX * cw, pz = n.z + outZ * cw;
+      const mb = bc.coarse.at(px, pz, 'mark');
+      mb.addOrientedQuad(px, pz, MARK_Y, w * 0.5, 1.9, outX, outZ, R.crosswalk, white);
+      // Stop bar for the traffic coming towards the node: right half of the carriageway.
+      const sx = n.x + outX * (cw + 2.6), sz = n.z + outZ * (cw + 2.6);
+      const rx = -outZ, rz = outX;
+      const bx = sx + rx * w * 0.25, bz = sz + rz * w * 0.25;
+      bc.coarse.at(bx, bz, 'mark')
+        .addOrientedQuad(bx, bz, MARK_Y, w * 0.25, 0.5, outX, outZ, R.stopBar, white);
+      if (signalled && w >= 11) {
+        // Lane arrows pointing into the junction (so drawn facing -out).
+        const lanes = Math.max(1, Math.round(w / 7));
+        for (let l = 0; l < lanes; l++) {
+          const t = (l + 0.5) / lanes;
+          const off = w * 0.25 * (t * 2 - 1) + w * 0.25;
+          const ax2 = sx + rx * off + outX * 6.5;
+          const az2 = sz + rz * off + outZ * 6.5;
+          const rect = l === 0 ? R.arrowRight : (l === lanes - 1 && lanes > 2 ? R.arrowLeft : R.arrowStraight);
+          bc.coarse.at(ax2, az2, 'mark')
+            .addOrientedQuad(ax2, az2, MARK_Y, 1.25, 1.7, -outX, -outZ, rect, white);
+        }
+      }
+    }
+  }
 }

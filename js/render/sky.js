@@ -40,7 +40,11 @@ const HM = 1.2;
 /** Rayleigh scattering coefficients per km at sea level (680/550/440 nm). */
 const BETA_R = [5.8e-3, 13.5e-3, 33.1e-3];
 /** Base Mie scattering coefficient per km at sea level (turbidity 1). */
-const BETA_M_BASE = 6.5e-3;
+const BETA_M_BASE = 4.0e-3;
+/** Desaturated Rayleigh coefficients used by the isotropic multiple-scattering term. */
+const BETA_MS = [0.0099, 0.0149, 0.0277];
+/** Softening applied to the optical depth inside the multiple-scattering term. */
+const MS_SOFT = 0.28;
 /** Mie extinction is a little larger than scattering (single scattering albedo ~0.9). */
 const MIE_ALBEDO = 0.9;
 /** Sample distribution steepness for the view-ray integral (higher = more samples near the eye). */
@@ -146,7 +150,7 @@ function raySphere(rx, ry, rz, dx, dy, dz, radius, out) {
 const _roots = new Float32Array(2);
 
 /** Azimuth weights for the fog colour average; the sun's side counts double. */
-const FOG_AZIMUTH_WEIGHTS = [0.4, 0.2, 0.2, 0.2];
+const FOG_AZIMUTH_WEIGHTS = [0.34, 0.22, 0.22, 0.22];
 
 /* -------------------------------------------------------------------------- */
 /* GLSL                                                                        */
@@ -189,6 +193,7 @@ uniform vec3 uGroundAlbedo;   // distant terrain seen below the horizon
 uniform float uSunIrradiance;
 uniform float uMieBeta;
 uniform float uMieG;
+uniform float uMultiScatter;
 uniform float uTime;
 uniform float uNightFactor;
 uniform float uStarIntensity;
@@ -212,6 +217,10 @@ const float RA = 6420.0;
 const float HR = 8.0;
 const float HM = 1.2;
 const vec3 BETA_R = vec3(5.8e-3, 13.5e-3, 33.1e-3);
+// Desaturated Rayleigh coefficients driving the isotropic multiple-scattering term: real
+// skies keep plenty of blue at low sun because light bounces more than once.
+const vec3 BETA_MS = vec3(0.0099, 0.0149, 0.0277);
+const float MS_SOFT = 0.28;
 const float STEP_K = 6.0;
 const float CLOUD_ALT_A = 1500.0;
 const float CLOUD_ALT_B = 5400.0;
@@ -281,6 +290,7 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
   float odM = 0.0;
   vec3 sumR = vec3(0.0);
   vec3 sumM = vec3(0.0);
+  vec3 sumMS = vec3(0.0);
   float kInv = 1.0 / (exp(STEP_K) - 1.0);
   float tPrev = 0.0;
 
@@ -303,10 +313,12 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
     vec3 T = exp(-min(tau, 60.0));
     sumR += T * dR;
     sumM += T * dM;
+    sumMS += exp(-min(tau * MS_SOFT, 60.0)) * (dR + dM);
   }
 
   viewT = exp(-min(BETA_R * odR + betaMe * odM, 60.0));
-  return uSunIrradiance * (BETA_R * (phR * sumR) + betaMs * (phM * sumM));
+  return uSunIrradiance * (BETA_R * (phR * sumR) + betaMs * (phM * sumM)
+    + BETA_MS * (uMultiScatter * 0.0795775 * sumMS));
 }
 
 /* --------------------------------------------------------------------- hash */
@@ -414,9 +426,9 @@ vec4 cloudsLow(vec3 rd, vec3 sunDir, float mu) {
   float lit = exp(-depth * 2.6) * (0.35 + 0.65 * clamp(sunDir.y * 3.0 + 0.35, 0.0, 1.0));
   float silver = clamp(density - toward, 0.0, 1.0);
 
-  float hg = phaseHG(mu, 0.62) * 2.4 + 0.25;
-  vec3 col = uAmbientSky * (0.55 + 0.55 * density)
-    + uKeyLight * (lit * 0.85 + silver * hg * 1.35)
+  float hg = phaseHG(mu, 0.62) * 1.6 + 0.2;
+  vec3 col = uAmbientSky * (0.5 + 0.5 * density)
+    + uKeyLight * (lit * 0.62 + silver * hg * 0.9)
     + uMoonLight * 0.6;
 
   float fade = smoothstep(0.012, 0.085, rd.y);
@@ -435,8 +447,8 @@ vec4 cloudsHigh(vec3 rd, vec3 sunDir, float mu) {
   float density = smoothstep(uCloudCoverB, uCloudCoverB + 0.30, d);
   if (density <= 0.001) return vec4(0.0);
 
-  float hg = phaseHG(mu, 0.5) * 1.6 + 0.3;
-  vec3 col = uAmbientSky * 0.75 + uKeyLight * (0.55 + 0.5 * hg) + uMoonLight * 0.4;
+  float hg = phaseHG(mu, 0.5) * 1.1 + 0.25;
+  vec3 col = uAmbientSky * 0.7 + uKeyLight * (0.35 + 0.35 * hg) + uMoonLight * 0.4;
   float fade = smoothstep(0.02, 0.11, rd.y);
   float aerial = 1.0 - smoothstep(0.05, 0.34, rd.y);
   col = mix(col, uHorizonColor, aerial * 0.7);
@@ -473,8 +485,11 @@ vec3 starLayer(vec2 uv, float face, float density, float seed, float twinkle) {
   if (h.z > 0.55) return vec3(0.0);
 
   float mag = fract(h.z * 57.31);
-  float pxCell = uPixelAngle * density * 1.2732;
-  float rad = max(0.028 + 0.055 * mag, pxCell * 1.35);
+  float base = 0.020 + 0.038 * mag;
+  // Grow the star with the pixel angle so it never aliases away, but dim it as it grows so
+  // low resolutions get points of light instead of a glowing mush.
+  float rad = clamp(max(base, uPixelAngle * density * 1.2732 * 0.8), 0.008, 0.30);
+  float gain = clamp(base / rad, 0.30, 1.0);
   vec2 pos = clamp(h.xy, min(rad, 0.5), max(1.0 - rad, 0.5));
   float d = length(f - pos);
   float s = 1.0 - smoothstep(0.0, rad, d);
@@ -483,7 +498,7 @@ vec3 starLayer(vec2 uv, float face, float density, float seed, float twinkle) {
 
   float tw = 1.0 + twinkle * 0.55 * sin(uTime * (1.6 + 4.5 * mag) + h.x * 41.0);
   vec3 tint = mix(vec3(0.70, 0.80, 1.0), vec3(1.0, 0.86, 0.66), fract(h.y * 33.7));
-  return tint * (s * (0.25 + 1.35 * mag * mag) * max(tw, 0.0));
+  return tint * (s * gain * (0.18 + 1.5 * mag * mag) * max(tw, 0.0));
 }
 
 /* --------------------------------------------------------------------- moon */
@@ -564,7 +579,7 @@ void main() {
       float band = exp(-b * b * 15.0);
       float dust = fbmStars(rd * 3.4);
       float mw = band * (0.35 + 0.9 * dust * dust) * uMilkyWay;
-      stars += vec3(0.62, 0.66, 0.92) * mw * 0.085;
+      stars += vec3(0.62, 0.66, 0.92) * mw * 0.016;
       col += stars * uStarIntensity * viewT;
     }
 
@@ -654,20 +669,21 @@ export class Sky {
      * @type {Object}
      */
     this.params = {
-      cloudiness: 0.5,
-      cirrus: 0.55,
+      cloudiness: 0.38,
+      cirrus: 0.45,
       cloudSharpness: 0.22,
       cloudSpeed: 1.0,
       windX: 1.0,
       windZ: 0.35,
       turbidity: 1.0,
       mieG: 0.76,
-      sunIrradiance: 22.0,
+      sunIrradiance: 13.0,
+      multiScatter: 0.35,
       sunAngularRadius: 0.0125,
       moonAngularRadius: 0.026,
       moonElongation: 118.0,
       moonBrightness: 1.35,
-      starDensity: 52.0,
+      starDensity: 46.0,
       milkyWay: 1.0,
       haze: 1.0,
       lightPollution: 1.0,
@@ -869,6 +885,7 @@ export class Sky {
     shader.setFloat('uSunIrradiance', this.params.sunIrradiance);
     shader.setFloat('uMieBeta', this._betaM);
     shader.setFloat('uMieG', this.params.mieG);
+    shader.setFloat('uMultiScatter', this.params.multiScatter);
     shader.setFloat('uTime', this.elapsed);
     shader.setFloat('uNightFactor', this.nightFactor);
     shader.setFloat('uStarIntensity', this.starIntensity);
@@ -1024,7 +1041,7 @@ export class Sky {
     let hz = sz;
     const hl = Math.hypot(hx, hz);
     if (hl < 1e-4) { hx = 0; hz = -1; } else { hx /= hl; hz /= hl; }
-    const hy = 0.015;
+    const hy = 0.045;
     const inv = 1.0 / Math.sqrt(1.0 + hy * hy);
     this.fogColor[0] = 0; this.fogColor[1] = 0; this.fogColor[2] = 0;
     // Weighted azimuth average: the sun's side counts double so sunset fog stays warm.
@@ -1111,6 +1128,7 @@ export class Sky {
     let odM = 0.0;
     let sumR0 = 0.0, sumR1 = 0.0, sumR2 = 0.0;
     let sumM0 = 0.0, sumM1 = 0.0, sumM2 = 0.0;
+    let sumS0 = 0.0, sumS1 = 0.0, sumS2 = 0.0;
     const kInv = 1.0 / (Math.exp(STEP_K) - 1.0);
     let tPrev = 0.0;
     for (let i = 0; i < CPU_STEPS; i++) {
@@ -1131,20 +1149,28 @@ export class Sky {
       const cosZ = (px * sun[0] + py * sun[1] + pz * sun[2]) / pr;
       const sR = HR * Math.exp(-alt / HR) * chapman(pr / HR, cosZ);
       const sM = HM * Math.exp(-alt / HM) * chapman(pr / HM, cosZ);
-      const t0 = Math.exp(-Math.min(BETA_R[0] * (odR + sR) + betaMe * (odM + sM), 60.0));
-      const t1 = Math.exp(-Math.min(BETA_R[1] * (odR + sR) + betaMe * (odM + sM), 60.0));
-      const t2 = Math.exp(-Math.min(BETA_R[2] * (odR + sR) + betaMe * (odM + sM), 60.0));
+      const tau0 = Math.min(BETA_R[0] * (odR + sR) + betaMe * (odM + sM), 60.0);
+      const tau1 = Math.min(BETA_R[1] * (odR + sR) + betaMe * (odM + sM), 60.0);
+      const tau2 = Math.min(BETA_R[2] * (odR + sR) + betaMe * (odM + sM), 60.0);
+      const t0 = Math.exp(-tau0);
+      const t1 = Math.exp(-tau1);
+      const t2 = Math.exp(-tau2);
       sumR0 += t0 * dR; sumR1 += t1 * dR; sumR2 += t2 * dR;
       sumM0 += t0 * dM; sumM1 += t1 * dM; sumM2 += t2 * dM;
+      const dms = dR + dM;
+      sumS0 += Math.exp(-tau0 * MS_SOFT) * dms;
+      sumS1 += Math.exp(-tau1 * MS_SOFT) * dms;
+      sumS2 += Math.exp(-tau2 * MS_SOFT) * dms;
     }
 
     const I = this.params.sunIrradiance;
     _trans[0] = Math.exp(-Math.min(BETA_R[0] * odR + betaMe * odM, 60.0));
     _trans[1] = Math.exp(-Math.min(BETA_R[1] * odR + betaMe * odM, 60.0));
     _trans[2] = Math.exp(-Math.min(BETA_R[2] * odR + betaMe * odM, 60.0));
-    out[0] = I * (BETA_R[0] * phR * sumR0 + betaMs * phM * sumM0);
-    out[1] = I * (BETA_R[1] * phR * sumR1 + betaMs * phM * sumM1);
-    out[2] = I * (BETA_R[2] * phR * sumR2 + betaMs * phM * sumM2);
+    const ms = this.params.multiScatter * 0.0795775;
+    out[0] = I * (BETA_R[0] * phR * sumR0 + betaMs * phM * sumM0 + BETA_MS[0] * ms * sumS0);
+    out[1] = I * (BETA_R[1] * phR * sumR1 + betaMs * phM * sumM1 + BETA_MS[1] * ms * sumS1);
+    out[2] = I * (BETA_R[2] * phR * sumR2 + betaMs * phM * sumM2 + BETA_MS[2] * ms * sumS2);
 
     // Night terms, mirroring the fragment shader.
     if (this.nightFactor > 0.002) {

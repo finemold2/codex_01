@@ -1658,17 +1658,26 @@ const _d1 = [0, 0];
 const _d2 = [0, 0];
 
 /**
- * Distance a lane/sidewalk must keep from a node centre so it stops at the
- * kerb line of every crossing road (exact for perpendicular crossings).
+ * Distance an offset centre line must keep from a node so that it clears the
+ * carriageway of every road crossing there.
+ *
+ * The line is `P(t) = node + away * t + lat`. For a crossing road with kerb
+ * normal `n` and half width `h` we need `|P(t) - node| . n >= h`, which gives
+ * `t >= (h - sign(away.n) * (lat.n)) / |away.n|`. For perpendicular crossings
+ * `lat . n` is zero, so this reduces to the exact kerb distance `h` and the
+ * sidewalk corners of the grid coincide bit-for-bit.
+ *
  * @param {object} ctx Generation context.
  * @param {number} nodeId Node id.
- * @param {number} edgeId Edge being trimmed.
- * @param {number} dx Travel direction x at the node.
- * @param {number} dz Travel direction z at the node.
+ * @param {number} edgeId Edge being trimmed (skipped as a crossing road).
+ * @param {number} awayX Unit direction leading away from the node.
+ * @param {number} awayZ Unit direction leading away from the node.
+ * @param {number} latX Lateral offset already applied to the line.
+ * @param {number} latZ Lateral offset already applied to the line.
  * @param {number} extra Additional clearance (sidewalk offset for walks).
  * @returns {number} Trim distance in metres.
  */
-function nodeTrim(ctx, nodeId, edgeId, dx, dz, extra) {
+function nodeTrim(ctx, nodeId, edgeId, awayX, awayZ, latX, latZ, extra) {
   const node = ctx.nodes[nodeId];
   let best = 0;
   for (let i = 0; i < node.edges.length; i++) {
@@ -1686,9 +1695,13 @@ function nodeTrim(ctx, nodeId, edgeId, dx, dz, extra) {
       fx = -_d2[0];
       fz = -_d2[1];
     }
-    const sn = Math.abs(dx * fz - dz * fx);
-    if (sn < 0.4) continue;
-    const t = (f.width * 0.5 + extra) / sn;
+    const nx = -fz;
+    const nz = fx;
+    const a = awayX * nx + awayZ * nz;
+    const abs = Math.abs(a);
+    if (abs < 0.4) continue;
+    const b = latX * nx + latZ * nz;
+    const t = (f.width * 0.5 + extra - (a >= 0 ? b : -b)) / abs;
     if (t > best) best = t;
   }
   return best;
@@ -1702,22 +1715,23 @@ function nodeTrim(ctx, nodeId, edgeId, dx, dz, extra) {
  */
 function buildEdgeLanes(ctx, e) {
   const len = polyLength(e.pts);
-  polyStartDir(e.pts, _d0);
-  polyEndDir(e.pts, _d1);
-  const capA = len * 0.42;
-  const capB = len * 0.42;
-  const trimA = Math.min(nodeTrim(ctx, e.a, e.id, _d0[0], _d0[1], 0), capA);
-  const trimB = Math.min(nodeTrim(ctx, e.b, e.id, _d1[0], _d1[1], 0), capB);
+  const cap = len * 0.42;
   const L = e.lanesPerDir;
   const slot = e.width / (2 * L);
   const rev = e.pts.slice().reverse();
 
   for (let dir = 0; dir < 2; dir++) {
     const base = dir === 0 ? e.pts : rev;
-    const ts = dir === 0 ? trimA : trimB;
-    const te = dir === 0 ? trimB : trimA;
+    const nodeStart = dir === 0 ? e.a : e.b;
+    const nodeEnd = dir === 0 ? e.b : e.a;
+    polyStartDir(base, _d0);
+    polyEndDir(base, _d1);
     for (let k = 0; k < L; k++) {
       const off = (k + 0.5) * slot;
+      const ts = Math.min(cap, nodeTrim(ctx, nodeStart, e.id, _d0[0], _d0[1],
+        -_d0[1] * off, _d0[0] * off, 0));
+      const te = Math.min(cap, nodeTrim(ctx, nodeEnd, e.id, -_d1[0], -_d1[1],
+        -_d1[1] * off, _d1[0] * off, 0));
       const line = polyTrim(polyOffset(base, off), ts, te);
       if (!line) continue;
       const lane = {
@@ -1825,6 +1839,20 @@ function buildLanes(ctx) {
     node.hasTrafficLight = app.length >= 4 ||
       (app.length === 3 && dk !== undefined && (dk.kind === 'downtown' || dk.kind === 'midtown'));
 
+    /** Outgoing lanes that already received at least one connection. */
+    const covered = new Set();
+    /**
+     * Connects two lanes and records the outgoing lane as reachable.
+     * @param {object} inLane Incoming lane.
+     * @param {object} outLane Outgoing lane.
+     * @param {string} turn Turn classification.
+     * @returns {void}
+     */
+    const link = (inLane, outLane, turn) => {
+      connectLanes(ctx, node, inLane, outLane, turn);
+      covered.add(outLane.id);
+    };
+
     for (let a = 0; a < app.length; a++) {
       const A = app[a];
       if (A.inLanes.length === 0) continue;
@@ -1847,16 +1875,43 @@ function buildLanes(ctx) {
               const j = clamp(k + o, 0, Lout - 1);
               if (j === prev) continue;
               prev = j;
-              connectLanes(ctx, node, inLane, ctx.lanes[B.outLanes[j]], 'straight');
+              link(inLane, ctx.lanes[B.outLanes[j]], 'straight');
             }
           }
         } else if (ang > 0) {
-          connectLanes(ctx, node, ctx.lanes[A.inLanes[Lin - 1]],
-            ctx.lanes[B.outLanes[Lout - 1]], 'right');
+          link(ctx.lanes[A.inLanes[Lin - 1]], ctx.lanes[B.outLanes[Lout - 1]], 'right');
         } else {
-          connectLanes(ctx, node, ctx.lanes[A.inLanes[0]],
-            ctx.lanes[B.outLanes[0]], 'left');
+          link(ctx.lanes[A.inLanes[0]], ctx.lanes[B.outLanes[0]], 'left');
         }
+      }
+    }
+
+    // Coverage pass: an outgoing lane nobody can enter would strand traffic,
+    // so feed it from the most aligned incoming approach.
+    for (let b = 0; b < app.length; b++) {
+      const B = app[b];
+      for (let j = 0; j < B.outLanes.length; j++) {
+        const outId = B.outLanes[j];
+        if (covered.has(outId)) continue;
+        let bestA = null;
+        let bestScore = -Infinity;
+        for (let a = 0; a < app.length; a++) {
+          if (a === b && app.length > 1) continue;
+          const A = app[a];
+          if (A.inLanes.length === 0) continue;
+          const score = A.inDir[0] * B.outDir[0] + A.inDir[1] * B.outDir[1];
+          if (score > bestScore) {
+            bestScore = score;
+            bestA = A;
+          }
+        }
+        if (bestA === null) continue;
+        const k = Math.min(j, bestA.inLanes.length - 1);
+        const cross = bestA.inDir[0] * B.outDir[1] - bestA.inDir[1] * B.outDir[0];
+        const ang = Math.atan2(cross, bestScore);
+        const turn = Math.abs(ang) <= 0.7 ? 'straight'
+          : Math.abs(ang) > 2.62 ? 'uturn' : ang > 0 ? 'right' : 'left';
+        link(ctx.lanes[bestA.inLanes[k]], ctx.lanes[outId], turn);
       }
     }
 
@@ -1869,7 +1924,7 @@ function buildLanes(ctx) {
         if (inLane.next.length > 0) continue;
         const j = Math.min(k, A.outLanes.length - 1);
         if (j < 0) continue;
-        connectLanes(ctx, node, inLane, ctx.lanes[A.outLanes[j]], 'uturn');
+        link(inLane, ctx.lanes[A.outLanes[j]], 'uturn');
       }
     }
   }
@@ -1965,12 +2020,15 @@ function buildWalks(ctx) {
 
   for (const e of order) {
     const len = polyLength(e.pts);
+    const cap = len * 0.45;
     polyStartDir(e.pts, _d0);
     polyEndDir(e.pts, _d1);
-    const trimA = Math.min(nodeTrim(ctx, e.a, e.id, _d0[0], _d0[1], WALK_OFFSET), len * 0.45);
-    const trimB = Math.min(nodeTrim(ctx, e.b, e.id, _d1[0], _d1[1], WALK_OFFSET), len * 0.45);
     for (let side = 0; side < 2; side++) {
       const off = (side === 0 ? 1 : -1) * (e.width * 0.5 + WALK_OFFSET);
+      const trimA = Math.min(cap, nodeTrim(ctx, e.a, e.id, _d0[0], _d0[1],
+        -_d0[1] * off, _d0[0] * off, WALK_OFFSET));
+      const trimB = Math.min(cap, nodeTrim(ctx, e.b, e.id, -_d1[0], -_d1[1],
+        -_d1[1] * off, _d1[0] * off, WALK_OFFSET));
       const line = polyTrim(polyOffset(e.pts, off), trimA, trimB);
       if (!line) continue;
       const c0 = snapCorner(ctx, e.a, line[0][0], line[0][1]);
@@ -2271,7 +2329,7 @@ function buildProps(ctx) {
         dx = _d2[0];
         dz = _d2[1];
       }
-      const trim = Math.min(nodeTrim(ctx, node.id, e.id, dx, dz, 0), 26) + 1.6;
+      const trim = Math.min(nodeTrim(ctx, node.id, e.id, -dx, -dz, 0, 0, 0), 26) + 1.6;
       const rx = -dz;
       const rz = dx;
       const off = e.width * 0.5 + 1.5;

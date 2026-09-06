@@ -69,6 +69,18 @@ const MAX_CHUNK_VERTICES = 900000;
 /** Hard cap on per-frame dynamic submissions, guards against runaway callers. */
 const MAX_DYNAMIC_SUBMITS = 20000;
 
+/**
+ * Returns `arr` limited to `n` elements, as a view when possible and a copy otherwise.
+ * @param {Float32Array|number[]} arr Source array.
+ * @param {number} n Element count.
+ * @returns {Float32Array|number[]} A same-length-or-shorter array.
+ */
+function fitArray(arr, n) {
+  if (arr.length === n) return arr;
+  if (arr.subarray) return arr.subarray(0, n);
+  return arr.slice(0, n);
+}
+
 /** Monotonic clock in milliseconds. @returns {number} Milliseconds. */
 function nowMs() {
   return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
@@ -604,7 +616,7 @@ export class InstancedBatch {
    */
   setAll(float32Array, count) {
     const n = clamp(count === undefined ? (float32Array.length / 20) | 0 : count | 0, 0, this.capacity);
-    this.data.set(float32Array.subarray(0, n * 20));
+    this.data.set(fitArray(float32Array, n * 20));
     this.count = n;
     this.dirty = true;
     return this;
@@ -1295,7 +1307,7 @@ export class Renderer {
       for (let e = start; e < end; e++) {
         const geo = list[e];
         const vCount = (geo.positions.length / 3) | 0;
-        positions.set(geo.positions.subarray ? geo.positions.subarray(0, vCount * 3) : geo.positions, vo * 3);
+        positions.set(fitArray(geo.positions, vCount * 3), vo * 3);
         for (let i = 0; i < vCount; i++) {
           const x = geo.positions[i * 3];
           const y = geo.positions[i * 3 + 1];
@@ -1309,17 +1321,17 @@ export class Renderer {
         }
         if (normals) {
           if (geo.normals && geo.normals.length >= vCount * 3) {
-            normals.set(geo.normals.subarray ? geo.normals.subarray(0, vCount * 3) : geo.normals, vo * 3);
+            normals.set(fitArray(geo.normals, vCount * 3), vo * 3);
           } else {
             for (let i = 0; i < vCount; i++) normals[(vo + i) * 3 + 1] = 1;
           }
         }
         if (uvs && geo.uvs && geo.uvs.length >= vCount * 2) {
-          uvs.set(geo.uvs.subarray ? geo.uvs.subarray(0, vCount * 2) : geo.uvs, vo * 2);
+          uvs.set(fitArray(geo.uvs, vCount * 2), vo * 2);
         }
         if (colors) {
           if (geo.colors && geo.colors.length >= vCount * 3) {
-            colors.set(geo.colors.subarray ? geo.colors.subarray(0, vCount * 3) : geo.colors, vo * 3);
+            colors.set(fitArray(geo.colors, vCount * 3), vo * 3);
           } else {
             for (let i = 0; i < vCount * 3; i++) colors[vo * 3 + i] = 1;
           }

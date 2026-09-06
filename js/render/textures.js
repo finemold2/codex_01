@@ -447,14 +447,15 @@ function addValueOctave(dst, w, h, cellsX, cellsY, noise, amp, phase) {
 }
 
 /**
- * Smallest power of two greater than or equal to `v`.
- * @param {number} v Input.
- * @returns {number} Power of two.
+ * Chooses a rasterisation grid size: `v` rounded up to a multiple of 16 and
+ * clamped to the final texture size.
+ * @param {number} v Wanted sample count.
+ * @param {number} max Final size.
+ * @returns {number} Grid size to rasterise at.
  */
-function pow2ceil(v) {
-  let p = 8;
-  while (p < v) p *= 2;
-  return p;
+function gridSize(v, max) {
+  const g = Math.max(16, Math.ceil(v / 16) * 16);
+  return g < max ? g : max;
 }
 
 /**
@@ -510,17 +511,26 @@ function fbmField(w, h, noise, opts) {
   const useValue = !!o.value;
   let fx = o.freqX || o.freq || 4;
   let fy = o.freqY || o.freq || 4;
-  /* Low-frequency fields are rasterised on a smaller torus and upsampled:
-     the result is identical to within interpolation error but far cheaper. */
-  const spread = Math.pow(lac, octaves - 1);
-  const spp = mode === 0 ? 8 : 12;
-  const gw = o.exact ? w : Math.min(w, pow2ceil(fx * spread * spp));
-  const gh = o.exact ? h : Math.min(h, pow2ceil(fy * spread * spp));
-  let out = new Float32Array(gw * gh);
+  /* Octaves are rasterised on the smallest torus that still resolves them and
+     the accumulator is promoted as the frequency climbs. The field is
+     mathematically the same fBm, but the cheap octaves stay cheap. */
+  const spp = mode === 0 ? 6 : 10;
+  let gw = 0, gh = 0;
+  let out = null;
   let amp = 1, norm = 0;
   for (let i = 0; i < octaves; i++) {
     const cx = Math.max(1, Math.round(fx));
     const cy = Math.max(1, Math.round(fy));
+    const nw = o.exact ? w : gridSize(cx * spp, w);
+    const nh = o.exact ? h : gridSize(cy * spp, h);
+    if (out === null) {
+      gw = nw; gh = nh;
+      out = new Float32Array(gw * gh);
+    } else if (nw > gw || nh > gh) {
+      const tw = nw > gw ? nw : gw, th = nh > gh ? nh : gh;
+      out = upsampleField(out, gw, gh, tw, th);
+      gw = tw; gh = th;
+    }
     if (useValue) addValueOctave(out, gw, gh, cx, cy, noise, amp, i * 11 + 1);
     else addPerlinOctave(out, gw, gh, cx, cy, noise, amp, mode, i * 7 + 1);
     norm += amp;
@@ -556,11 +566,13 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
   const mode = o.mode || 'f1';
   const jitter = o.jitter === undefined ? 0.9 : o.jitter;
   const outId = o.outId || null;
-  /* Rasterise coarse cell patterns small, then upsample (ids stay exact). */
-  const spp = mode === 'f2f1' ? 12 : 8;
-  const gw = outId ? w : Math.min(w, pow2ceil(cellsX * spp));
-  const gh = outId ? h : Math.min(h, pow2ceil(cellsY * spp));
+  /* Rasterise the cell pattern on the smallest grid that resolves it. F1 is
+     piecewise linear, so bilinear upsampling costs almost nothing visually. */
+  const spp = mode === 'f2f1' ? 10 : 5;
+  const gw = gridSize(cellsX * spp, w);
+  const gh = gridSize(cellsY * spp, h);
   const out = new Float32Array(gw * gh);
+  const ids = outId ? new Float32Array(gw * gh) : null;
   const cw = gw / cellsX, ch = gh / cellsY;
   const total = cellsX * cellsY;
   const fpx = new Float32Array(total);
@@ -605,9 +617,18 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
           }
           const f1 = Math.sqrt(d1) * norm;
           out[row + x] = mode === 'f2f1' ? clamp((Math.sqrt(d2) - Math.sqrt(d1)) * norm, 0, 1) : clamp(f1, 0, 1);
-          if (outId) outId[row + x] = id;
+          if (ids) ids[row + x] = id;
         }
       }
+    }
+  }
+  if (ids) {
+    /* Nearest-neighbour for ids: they are per-cell constants, not a signal. */
+    const ax = gw / w, ay = gh / h;
+    for (let y = 0; y < h; y++) {
+      const sr = Math.min(gh - 1, (y * ay) | 0) * gw;
+      const dr = y * w;
+      for (let x = 0; x < w; x++) outId[dr + x] = ids[sr + Math.min(gw - 1, (x * ax) | 0)];
     }
   }
   return upsampleField(out, gw, gh, w, h);
