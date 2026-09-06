@@ -33,6 +33,57 @@ const FONT_MONO = '"Courier New",monospace';
 /** Base texture resolution per quality preset. */
 const QUALITY_SIZE = { low: 256, medium: 512, high: 1024, ultra: 1024 };
 
+/*
+ * Hot-loop scalar helpers. These mirror `clamp` / `lerp` / `smoothstep` from
+ * core/math.js but are module-local: texture generation evaluates them tens of
+ * millions of times per build and the cross-module call is measurable there.
+ * The shared versions are still used on the cold paths.
+ */
+
+/**
+ * Clamps a value to a range.
+ * @param {number} v Value.
+ * @param {number} lo Lower bound.
+ * @param {number} hi Upper bound.
+ * @returns {number} Clamped value.
+ */
+function sat3(v, lo, hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/**
+ * Clamps a value to 0..1.
+ * @param {number} v Value.
+ * @returns {number} Clamped value.
+ */
+function sat(v) {
+  return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+
+/**
+ * Linear interpolation.
+ * @param {number} a Start.
+ * @param {number} b End.
+ * @param {number} t Factor.
+ * @returns {number} Interpolated value.
+ */
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+/**
+ * Hermite smoothstep.
+ * @param {number} e0 Lower edge.
+ * @param {number} e1 Upper edge.
+ * @param {number} x Sample.
+ * @returns {number} Value in 0..1.
+ */
+function ss(e0, e1, x) {
+  let t = (x - e0) / (e1 - e0);
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return t * t * (3 - 2 * t);
+}
+
 /* ------------------------------------------------------------------------- *
  * 1. Canvas / pixel helpers
  * ------------------------------------------------------------------------- */
@@ -313,8 +364,8 @@ class NoiseSource {
       }
     }
     f1 = Math.sqrt(f1); f2 = Math.sqrt(f2);
-    if (mode === 'f2f1') return clamp(f2 - f1, 0, 1);
-    return clamp(f1, 0, 1);
+    if (mode === 'f2f1') return sat(f2 - f1);
+    return sat(f1);
   }
 }
 
@@ -514,7 +565,7 @@ function fbmField(w, h, noise, opts) {
   /* Octaves are rasterised on the smallest torus that still resolves them and
      the accumulator is promoted as the frequency climbs. The field is
      mathematically the same fBm, but the cheap octaves stay cheap. */
-  const spp = mode === 0 ? 6 : 10;
+  const spp = mode === 0 ? 5 : 7;
   let gw = 0, gh = 0;
   let out = null;
   let amp = 1, norm = 0;
@@ -568,7 +619,7 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
   const outId = o.outId || null;
   /* Rasterise the cell pattern on the smallest grid that resolves it. F1 is
      piecewise linear, so bilinear upsampling costs almost nothing visually. */
-  const spp = mode === 'f2f1' ? 10 : 5;
+  const spp = mode === 'f2f1' ? 7 : 4;
   const gw = gridSize(cellsX * spp, w);
   const gh = gridSize(cellsY * spp, h);
   const out = new Float32Array(gw * gh);
@@ -616,7 +667,7 @@ function worleyField(w, h, noise, cellsX, cellsY, opts) {
             if (d < d1) { d2 = d1; d1 = d; id = candId[i]; } else if (d < d2) { d2 = d; }
           }
           const f1 = Math.sqrt(d1) * norm;
-          out[row + x] = mode === 'f2f1' ? clamp((Math.sqrt(d2) - Math.sqrt(d1)) * norm, 0, 1) : clamp(f1, 0, 1);
+          out[row + x] = mode === 'f2f1' ? sat3((Math.sqrt(d2) - Math.sqrt(d1)) * norm, 0, 1) : sat(f1);
           if (ids) ids[row + x] = id;
         }
       }
@@ -853,7 +904,7 @@ function fieldToCanvas(field, w, h, opts) {
   const img = newImage(ctx, w, h);
   const px = img.data;
   for (let i = 0, p = 0; i < field.length; i++, p += 4) {
-    const t = field[i] < 0 ? 0 : (field[i] > 1 ? 1 : field[i]);
+    const t = clamp(field[i], 0, 1);
     px[p] = a[0] + (b[0] - a[0]) * t;
     px[p + 1] = a[1] + (b[1] - a[1]) * t;
     px[p + 2] = a[2] + (b[2] - a[2]) * t;
@@ -1040,10 +1091,10 @@ function genAsphalt(S, seed) {
 
   const cells = Math.max(10, Math.round(S / 9));
   const blotch = fbmField(S, S, noise, { freq: 3, octaves: 4, gain: 0.55 });
-  const grain = fbmField(S, S, new NoiseSource(seed + 3), { freq: Math.max(32, S / 5), octaves: 2, gain: 0.5, value: true });
+  const grain = fbmField(S, S, new NoiseSource(seed + 3), { freq: Math.max(32, S / 5), octaves: 1, value: true });
   const aggId = new Float32Array(S * S);
   const agg = worleyField(S, S, new NoiseSource(seed + 5), cells, cells, { mode: 'f1', jitter: 1, outId: aggId });
-  const crack = fbmField(S, S, new NoiseSource(seed + 7), { freq: 5, octaves: 5, gain: 0.58, mode: 'ridged' });
+  const crack = fbmField(S, S, new NoiseSource(seed + 7), { freq: 5, octaves: 4, gain: 0.58, mode: 'ridged' });
 
   /* Oil stains, splatted as wrapped blobs so the tile stays seamless. */
   const oil = new Float32Array(S * S);
@@ -1078,7 +1129,7 @@ function genAsphalt(S, seed) {
 
       let tone = 30 + blotch[i] * 20;
       /* Aggregate: bright stone chips with per-stone tint. */
-      const chip = smoothstep(0.62, 0.16, agg[i]);
+      const chip = ss(0.62, 0.16, agg[i]);
       const chipTone = 0.55 + aggId[i] * 0.9;
       tone += chip * 26 * chipTone;
       /* Fine grain. */
@@ -1086,24 +1137,24 @@ function genAsphalt(S, seed) {
       tone += g * 15;
 
       /* Wheel-polished lanes running along +V. */
-      const laneA = 1 - smoothstep(0.02, 0.13, Math.abs(u - 0.27));
-      const laneB = 1 - smoothstep(0.02, 0.13, Math.abs(u - 0.73));
+      const laneA = 1 - ss(0.02, 0.13, Math.abs(u - 0.27));
+      const laneB = 1 - ss(0.02, 0.13, Math.abs(u - 0.73));
       const lane = Math.max(laneA, laneB) * (0.55 + blotch[i] * 0.45);
-      tone = lerp(tone, tone * 0.86 + 4, lane * 0.75);
+      tone = mix(tone, tone * 0.86 + 4, lane * 0.75);
 
       /* Tar seams. */
       let du = Math.abs(u - seamU[y]); du = Math.min(du, 1 - du);
       let dv = Math.abs(v - seamV[x]); dv = Math.min(dv, 1 - dv);
-      const seam = Math.max(1 - smoothstep(0.002, 0.012, du), 1 - smoothstep(0.002, 0.010, dv));
-      tone = lerp(tone, 22 + grain[i] * 8, seam * 0.9);
+      const seam = Math.max(1 - ss(0.002, 0.012, du), 1 - ss(0.002, 0.010, dv));
+      tone = mix(tone, 22 + grain[i] * 8, seam * 0.9);
 
       /* Cracks. */
-      const cr = smoothstep(0.80, 0.97, crack[i]);
-      tone = lerp(tone, 16, cr * 0.85);
+      const cr = ss(0.80, 0.97, crack[i]);
+      tone = mix(tone, 16, cr * 0.85);
 
       /* Oil. */
       const ol = oil[i];
-      tone = lerp(tone, tone * 0.32 + 3, clamp(ol, 0, 1) * 0.9);
+      tone = mix(tone, tone * 0.32 + 3, sat(ol) * 0.9);
 
       const p = i * 4;
       px[p] = tone * 0.98;
@@ -1111,7 +1162,7 @@ function genAsphalt(S, seed) {
       px[p + 2] = tone * 1.07 + 1;
       px[p + 3] = 255;
 
-      height[i] = clamp(0.45 + chip * 0.35 + g * 0.25 - cr * 0.55 - seam * 0.3 - lane * 0.06, 0, 1);
+      height[i] = sat(0.45 + chip * 0.35 + g * 0.25 - cr * 0.55 - seam * 0.3 - lane * 0.06);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1235,16 +1286,16 @@ function genRoadLines(S, seed) {
   /* Wear the paint with noise so markings never look like decals. */
   const noise = new NoiseSource(seed);
   const wear = fbmField(S, S, noise, { freq: 14, octaves: 4, gain: 0.55 });
-  const scuff = fbmField(S, S, new NoiseSource(seed + 4), { freq: Math.max(40, S / 6), octaves: 2, value: true });
+  const scuff = fbmField(S, S, new NoiseSource(seed + 4), { freq: Math.max(40, S / 6), octaves: 1, value: true });
   const img = ctx.getImageData(0, 0, S, S);
   const px = img.data;
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
     if (px[p + 3] === 0) continue;
     const w = wear[i];
     let a = px[p + 3] / 255;
-    a *= 0.66 + 0.34 * smoothstep(0.25, 0.72, w);
+    a *= 0.66 + 0.34 * ss(0.25, 0.72, w);
     a *= 0.86 + 0.14 * scuff[i];
-    if (w < 0.24) a *= smoothstep(0.10, 0.24, w) * 0.8 + 0.2;
+    if (w < 0.24) a *= ss(0.10, 0.24, w) * 0.8 + 0.2;
     px[p + 3] = a * 255;
     const dirt = (scuff[i] - 0.5) * 26 - (1 - w) * 12;
     px[p] += dirt; px[p + 1] += dirt; px[p + 2] += dirt * 0.9;
@@ -1272,7 +1323,7 @@ function genSidewalk(S, seed) {
   const slabTone = new Float32Array(SLABS * SLABS);
   for (let i = 0; i < slabTone.length; i++) slabTone[i] = rng.range(-1, 1);
 
-  const speck = fbmField(S, S, noise, { freq: Math.max(48, S / 4), octaves: 2, value: true });
+  const speck = fbmField(S, S, noise, { freq: Math.max(48, S / 4), octaves: 1, value: true });
   const mottle = fbmField(S, S, new NoiseSource(seed + 2), { freq: 7, octaves: 4, gain: 0.5 });
   const chipN = fbmField(S, S, new NoiseSource(seed + 3), { freq: 26, octaves: 3 });
   const stain = new Float32Array(S * S);
@@ -1280,7 +1331,7 @@ function genSidewalk(S, seed) {
   for (let i = 0; i < 7; i++) {
     splatBlob(stain, S, S, rng.next() * S, rng.next() * S, S * rng.range(0.03, 0.10), rng.range(0.25, 0.6), stainJ);
   }
-  const grit = worleyField(S, S, new NoiseSource(seed + 9), Math.max(20, Math.round(S / 5)), Math.max(20, Math.round(S / 5)), { mode: 'f1' });
+  const grit = worleyField(S, S, new NoiseSource(seed + 9), Math.max(16, Math.round(S / 9)), Math.max(16, Math.round(S / 9)), { mode: 'f1' });
 
   const height = new Float32Array(S * S);
   const g = 0.030;   // grout half-width in cell units
@@ -1297,20 +1348,20 @@ function genSidewalk(S, seed) {
       const ex = Math.min(lx, 1 - lx);
       const ey = Math.min(ly, 1 - ly);
       let edge = Math.min(ex, ey) + (chipN[i] - 0.5) * 0.028;
-      const groove = 1 - smoothstep(g, g + 0.022, edge);
+      const groove = 1 - ss(g, g + 0.022, edge);
 
       const tone = slabTone[(cy % SLABS) * SLABS + (cx % SLABS)];
       let c = 158 + tone * 9 + (mottle[i] - 0.5) * 26 + (speck[i] - 0.5) * 20;
-      c += smoothstep(0.55, 0.05, grit[i]) * 12;
-      c = lerp(c, 96 + (speck[i] - 0.5) * 14, groove);
-      c = lerp(c, c * 0.62, clamp(stain[i], 0, 1));
+      c += ss(0.55, 0.05, grit[i]) * 12;
+      c = mix(c, 96 + (speck[i] - 0.5) * 14, groove);
+      c = mix(c, c * 0.62, sat(stain[i]));
 
       const p = i * 4;
       px[p] = c * 1.02;
       px[p + 1] = c;
       px[p + 2] = c * 0.95;
       px[p + 3] = 255;
-      height[i] = clamp(0.72 - groove * 0.62 + (speck[i] - 0.5) * 0.12 + smoothstep(0.5, 0.05, grit[i]) * 0.06, 0, 1);
+      height[i] = sat3(0.72 - groove * 0.62 + (speck[i] - 0.5) * 0.12 + ss(0.5, 0.05, grit[i]) * 0.06, 0, 1);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1334,7 +1385,7 @@ function genConcrete(S, seed) {
   const wx = fbmField(S, S, new NoiseSource(seed + 21), { freq: 3, octaves: 2 });
   const wy = fbmField(S, S, new NoiseSource(seed + 22), { freq: 3, octaves: 2 });
   const mottle = warpField(base, S, S, wx, wy, S * 0.06);
-  const grain = fbmField(S, S, new NoiseSource(seed + 23), { freq: Math.max(64, S / 4), octaves: 2, value: true });
+  const grain = fbmField(S, S, new NoiseSource(seed + 23), { freq: Math.max(64, S / 4), octaves: 1, value: true });
   const pits = worleyField(S, S, new NoiseSource(seed + 24), Math.max(14, Math.round(S / 12)), Math.max(14, Math.round(S / 12)), { mode: 'f1' });
   const streak = fbmField(S, S, new NoiseSource(seed + 25), { freqX: 6, freqY: 40, octaves: 3 });
 
@@ -1344,22 +1395,22 @@ function genConcrete(S, seed) {
     const v = y / S;
     /* Two horizontal form-board seams per tile. */
     const seam = Math.max(
-      1 - smoothstep(0.0, 0.006, Math.abs(v - 0.5)),
-      1 - smoothstep(0.0, 0.006, Math.min(v, 1 - v))
+      1 - ss(0.0, 0.006, Math.abs(v - 0.5)),
+      1 - ss(0.0, 0.006, Math.min(v, 1 - v))
     );
     for (let x = 0; x < S; x++) {
       const i = row + x;
       let c = 150 + (mottle[i] - 0.5) * 46 + (grain[i] - 0.5) * 16;
-      c -= smoothstep(0.5, 1.0, streak[i]) * 10;
-      const pit = smoothstep(0.30, 0.0, pits[i]);
+      c -= ss(0.5, 1.0, streak[i]) * 10;
+      const pit = ss(0.30, 0.0, pits[i]);
       c -= pit * 30;
-      c = lerp(c, c * 0.82, seam);
+      c = mix(c, c * 0.82, seam);
       const p = i * 4;
       px[p] = c * 1.0;
       px[p + 1] = c * 0.99;
       px[p + 2] = c * 0.96;
       px[p + 3] = 255;
-      height[i] = clamp(0.6 + (mottle[i] - 0.5) * 0.3 + (grain[i] - 0.5) * 0.18 - pit * 0.5 - seam * 0.35, 0, 1);
+      height[i] = sat3(0.6 + (mottle[i] - 0.5) * 0.3 + (grain[i] - 0.5) * 0.18 - pit * 0.5 - seam * 0.35, 0, 1);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1408,8 +1459,8 @@ function genBrick(S, seed) {
 
       const ex = Math.min(lx, 1 - lx) + (chip[i] - 0.5) * 0.05;
       const ey = Math.min(ly, 1 - ly) + (chip[i] - 0.5) * 0.10;
-      const mx = 1 - smoothstep(mortarX, mortarX + 0.02, ex);
-      const my = 1 - smoothstep(mortarY, mortarY + 0.05, ey);
+      const mx = 1 - ss(mortarX, mortarX + 0.02, ex);
+      const my = 1 - ss(mortarY, mortarY + 0.05, ey);
       const mortar = Math.max(mx, my);
 
       const id = (ry % ROWS) * COLS + (((rx % COLS) + COLS) % COLS);
@@ -1420,17 +1471,17 @@ function genBrick(S, seed) {
       const gr = (grain[i] - 0.5) * 26 + (blotch[i] - 0.5) * 22;
       r += gr; gch += gr * 0.7; b += gr * 0.5;
       /* Weathering streaks below each course. */
-      const wsh = smoothstep(0.45, 1.0, dirt[i]) * 16;
+      const wsh = ss(0.45, 1.0, dirt[i]) * 16;
       r -= wsh; gch -= wsh * 0.8; b -= wsh * 0.6;
 
       const mc = 168 + (mortarN[i] - 0.5) * 34;
-      r = lerp(r, mc, mortar);
-      gch = lerp(gch, mc * 0.98, mortar);
-      b = lerp(b, mc * 0.92, mortar);
+      r = mix(r, mc, mortar);
+      gch = mix(gch, mc * 0.98, mortar);
+      b = mix(b, mc * 0.92, mortar);
 
       const p = i * 4;
       px[p] = r; px[p + 1] = gch; px[p + 2] = b; px[p + 3] = 255;
-      height[i] = clamp(0.78 - mortar * 0.6 + (grain[i] - 0.5) * 0.14, 0, 1);
+      height[i] = sat(0.78 - mortar * 0.6 + (grain[i] - 0.5) * 0.14);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1465,7 +1516,7 @@ function genMetal(S, seed) {
       const i = row + x;
       const fx = x / S * PANELS, lx = fx - Math.floor(fx);
       const ex = Math.min(lx, 1 - lx), ey = Math.min(ly, 1 - ly);
-      const seam = Math.max(1 - smoothstep(0.004, 0.012, ex), 1 - smoothstep(0.004, 0.012, ey));
+      const seam = Math.max(1 - ss(0.004, 0.012, ex), 1 - ss(0.004, 0.012, ey));
 
       /* Rivets march along the seams. */
       const nrx = (x / S * PANELS * 16) % 1, nry = (y / S * PANELS * 16) % 1;
@@ -1474,7 +1525,7 @@ function genMetal(S, seed) {
       if (nearSeamX || nearSeamY) {
         const dx = (nrx - 0.5), dy = (nry - 0.5);
         const d = Math.sqrt(dx * dx + dy * dy);
-        rivet = 1 - smoothstep(0.16, 0.26, d);
+        rivet = 1 - ss(0.16, 0.26, d);
         if (nearSeamX && nearSeamY) rivet *= 1;
       }
 
@@ -1482,17 +1533,17 @@ function genMetal(S, seed) {
       let r = base * 0.96, g = base * 0.99, b = base * 1.04;
       r += rivet * 26; g += rivet * 26; b += rivet * 26;
       const seamShade = seam * 0.55;
-      r = lerp(r, r * 0.55, seamShade); g = lerp(g, g * 0.55, seamShade); b = lerp(b, b * 0.58, seamShade);
+      r = mix(r, r * 0.55, seamShade); g = mix(g, g * 0.55, seamShade); b = mix(b, b * 0.58, seamShade);
 
       /* Rust blooms. */
-      const rz = smoothstep(0.58, 0.86, rust[i]) * (0.5 + rustFine[i] * 0.7);
-      r = lerp(r, 118 + rustFine[i] * 40, rz);
-      g = lerp(g, 62 + rustFine[i] * 26, rz);
-      b = lerp(b, 34 + rustFine[i] * 16, rz);
+      const rz = ss(0.58, 0.86, rust[i]) * (0.5 + rustFine[i] * 0.7);
+      r = mix(r, 118 + rustFine[i] * 40, rz);
+      g = mix(g, 62 + rustFine[i] * 26, rz);
+      b = mix(b, 34 + rustFine[i] * 16, rz);
 
       const p = i * 4;
       px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
-      height[i] = clamp(0.6 - seam * 0.45 + rivet * 0.35 + (brush[i] - 0.5) * 0.08 + (dents[i] - 0.5) * 0.12 - rz * 0.1, 0, 1);
+      height[i] = sat3(0.6 - seam * 0.45 + rivet * 0.35 + (brush[i] - 0.5) * 0.08 + (dents[i] - 0.5) * 0.12 - rz * 0.1, 0, 1);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1510,9 +1561,9 @@ function genRoofGravel(S, seed) {
   const cells = Math.max(24, Math.round(S / 6));
   const id = new Float32Array(S * S);
   const stones = worleyField(S, S, noise, cells, cells, { mode: 'f1', jitter: 1, outId: id });
-  const small = worleyField(S, S, new NoiseSource(seed + 51), cells * 2, cells * 2, { mode: 'f1', jitter: 1 });
+  const small = worleyField(S, S, new NoiseSource(seed + 51), Math.round(cells * 1.6), Math.round(cells * 1.6), { mode: 'f1', jitter: 1 });
   const tar = fbmField(S, S, new NoiseSource(seed + 52), { freq: 5, octaves: 4 });
-  const grain = fbmField(S, S, new NoiseSource(seed + 53), { freq: Math.max(60, S / 4), octaves: 2, value: true });
+  const grain = fbmField(S, S, new NoiseSource(seed + 53), { freq: Math.max(60, S / 4), octaves: 1, value: true });
 
   const canvas = createCanvas(S, S);
   const ctx = ctx2d(canvas);
@@ -1520,17 +1571,17 @@ function genRoofGravel(S, seed) {
   const px = img.data;
   const height = new Float32Array(S * S);
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
-    const st = smoothstep(0.72, 0.10, stones[i]);
-    const sm = smoothstep(0.62, 0.12, small[i]) * 0.6;
+    const st = ss(0.72, 0.10, stones[i]);
+    const sm = ss(0.62, 0.12, small[i]) * 0.6;
     const tint = id[i];
     let c = 46 + tar[i] * 22 + (grain[i] - 0.5) * 12;
     const stoneC = 92 + tint * 78;
-    c = lerp(c, stoneC * (0.8 + (grain[i] - 0.5) * 0.3), Math.max(st, sm));
+    c = mix(c, stoneC * (0.8 + (grain[i] - 0.5) * 0.3), Math.max(st, sm));
     px[p] = c * (0.96 + tint * 0.1);
     px[p + 1] = c * (0.97 + tint * 0.04);
     px[p + 2] = c * (0.92 + tint * 0.06);
     px[p + 3] = 255;
-    height[i] = clamp(0.3 + st * 0.55 + sm * 0.2 + (grain[i] - 0.5) * 0.1, 0, 1);
+    height[i] = sat(0.3 + st * 0.55 + sm * 0.2 + (grain[i] - 0.5) * 0.1);
   }
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px, height: height };
@@ -1549,11 +1600,11 @@ function genTileFloor(S, seed) {
   const tone = new Float32Array(TILES * TILES);
   for (let i = 0; i < tone.length; i++) tone[i] = rng.range(-1, 1);
 
-  const veinBase = fbmField(S, S, noise, { freq: 4, octaves: 4, mode: 'ridged' });
+  const veinBase = fbmField(S, S, noise, { freq: 4, octaves: 3, mode: 'ridged' });
   const wx = fbmField(S, S, new NoiseSource(seed + 61), { freq: 2, octaves: 3 });
   const wy = fbmField(S, S, new NoiseSource(seed + 62), { freq: 2, octaves: 3 });
   const veins = warpField(veinBase, S, S, wx, wy, S * 0.12);
-  const grain = fbmField(S, S, new NoiseSource(seed + 63), { freq: Math.max(60, S / 4), octaves: 2, value: true });
+  const grain = fbmField(S, S, new NoiseSource(seed + 63), { freq: Math.max(60, S / 4), octaves: 1, value: true });
   const wear = fbmField(S, S, new NoiseSource(seed + 64), { freq: 7, octaves: 3 });
 
   const canvas = createCanvas(S, S);
@@ -1569,22 +1620,22 @@ function genTileFloor(S, seed) {
       const i = row + x;
       const fx = x / S * TILES, tx = Math.floor(fx), lx = fx - tx;
       const edge = Math.min(Math.min(lx, 1 - lx), Math.min(ly, 1 - ly));
-      const grout = 1 - smoothstep(g, g + 0.014, edge);
+      const grout = 1 - ss(g, g + 0.014, edge);
       const t = tone[(ty % TILES) * TILES + (tx % TILES)];
 
       let c = 206 + t * 10 + (grain[i] - 0.5) * 10;
-      const vein = smoothstep(0.72, 0.98, veins[i]);
-      c = lerp(c, 150 + t * 8, vein * 0.85);
-      c -= smoothstep(0.55, 0.95, wear[i]) * 10;
+      const vein = ss(0.72, 0.98, veins[i]);
+      c = mix(c, 150 + t * 8, vein * 0.85);
+      c -= ss(0.55, 0.95, wear[i]) * 10;
       const gc = 128 + (grain[i] - 0.5) * 16;
-      c = lerp(c, gc, grout);
+      c = mix(c, gc, grout);
 
       const p = i * 4;
       px[p] = c * 1.0;
       px[p + 1] = c * 0.995;
       px[p + 2] = c * 0.97;
       px[p + 3] = 255;
-      height[i] = clamp(0.85 - grout * 0.7 - vein * 0.05 + (grain[i] - 0.5) * 0.05, 0, 1);
+      height[i] = sat(0.85 - grout * 0.7 - vein * 0.05 + (grain[i] - 0.5) * 0.05);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1615,13 +1666,13 @@ function genGrass(S, seed) {
     const shade = 0.72 + clump[i] * 0.5 + bl * 0.45;
     let r = 44 * shade, g = 86 * shade, b = 34 * shade;
     /* Dry / yellowed patches. */
-    const d = smoothstep(0.55, 0.85, dry[i]);
-    r = lerp(r, r * 1.55 + 22, d); g = lerp(g, g * 1.12 + 14, d); b = lerp(b, b * 0.7, d);
+    const d = ss(0.55, 0.85, dry[i]);
+    r = mix(r, r * 1.55 + 22, d); g = mix(g, g * 1.12 + 14, d); b = mix(b, b * 0.7, d);
     /* Bare earth showing through. */
-    const e = smoothstep(0.74, 0.93, bare[i]);
-    r = lerp(r, 84 + bl * 26, e); g = lerp(g, 66 + bl * 20, e); b = lerp(b, 46 + bl * 14, e);
+    const e = ss(0.74, 0.93, bare[i]);
+    r = mix(r, 84 + bl * 26, e); g = mix(g, 66 + bl * 20, e); b = mix(b, 46 + bl * 14, e);
     px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
-    height[i] = clamp(0.5 + bl * 0.6 + (clump[i] - 0.5) * 0.4 - e * 0.25, 0, 1);
+    height[i] = sat(0.5 + bl * 0.6 + (clump[i] - 0.5) * 0.4 - e * 0.25);
   }
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px, height: height };
@@ -1636,7 +1687,7 @@ function genGrass(S, seed) {
 function genDirt(S, seed) {
   const noise = new NoiseSource(seed);
   const base = fbmField(S, S, noise, { freq: 4, octaves: 5, gain: 0.55 });
-  const grain = fbmField(S, S, new NoiseSource(seed + 81), { freq: Math.max(70, S / 4), octaves: 2, value: true });
+  const grain = fbmField(S, S, new NoiseSource(seed + 81), { freq: Math.max(70, S / 4), octaves: 1, value: true });
   const pebbleId = new Float32Array(S * S);
   const pebbles = worleyField(S, S, new NoiseSource(seed + 82), Math.max(18, Math.round(S / 12)), Math.max(18, Math.round(S / 12)), { mode: 'f1', jitter: 1, outId: pebbleId });
   const crackCells = worleyField(S, S, new NoiseSource(seed + 83), 7, 7, { mode: 'f2f1', jitter: 0.9 });
@@ -1650,15 +1701,15 @@ function genDirt(S, seed) {
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
     const t = base[i] * 0.7 + grain[i] * 0.3;
     let r = 118 + t * 46, g = 92 + t * 38, b = 66 + t * 28;
-    const peb = smoothstep(0.34, 0.06, pebbles[i]);
+    const peb = ss(0.34, 0.06, pebbles[i]);
     const pt = 0.7 + pebbleId[i] * 0.7;
-    r = lerp(r, 128 * pt, peb); g = lerp(g, 118 * pt, peb); b = lerp(b, 104 * pt, peb);
-    const cr = 1 - smoothstep(0.0, 0.06, crackCells[i]);
-    r = lerp(r, r * 0.42, cr); g = lerp(g, g * 0.42, cr); b = lerp(b, b * 0.44, cr);
-    const dm = smoothstep(0.62, 0.92, damp[i]);
-    r = lerp(r, r * 0.72, dm); g = lerp(g, g * 0.74, dm); b = lerp(b, b * 0.78, dm);
+    r = mix(r, 128 * pt, peb); g = mix(g, 118 * pt, peb); b = mix(b, 104 * pt, peb);
+    const cr = 1 - ss(0.0, 0.06, crackCells[i]);
+    r = mix(r, r * 0.42, cr); g = mix(g, g * 0.42, cr); b = mix(b, b * 0.44, cr);
+    const dm = ss(0.62, 0.92, damp[i]);
+    r = mix(r, r * 0.72, dm); g = mix(g, g * 0.74, dm); b = mix(b, b * 0.78, dm);
     px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
-    height[i] = clamp(0.55 + peb * 0.4 + (grain[i] - 0.5) * 0.25 - cr * 0.6, 0, 1);
+    height[i] = sat(0.55 + peb * 0.4 + (grain[i] - 0.5) * 0.25 - cr * 0.6);
   }
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px, height: height };
@@ -1672,7 +1723,7 @@ function genDirt(S, seed) {
  */
 function genSand(S, seed) {
   const noise = new NoiseSource(seed);
-  const grain = fbmField(S, S, noise, { freq: Math.max(90, S / 3), octaves: 2, value: true });
+  const grain = fbmField(S, S, noise, { freq: Math.max(90, S / 3), octaves: 1, value: true });
   const dunes = fbmField(S, S, new NoiseSource(seed + 91), { freq: 3, octaves: 4 });
   const rippleWarp = fbmField(S, S, new NoiseSource(seed + 92), { freq: 4, octaves: 3 });
   const shellId = new Float32Array(S * S);
@@ -1693,14 +1744,14 @@ function genSand(S, seed) {
       const rip = Math.sin(phase) * 0.5 + 0.5;
       const t = dunes[i] * 0.5 + grain[i] * 0.5;
       let c = 196 + t * 34 + (rip - 0.5) * 16;
-      const sh = smoothstep(0.16, 0.02, shells[i]) * (shellId[i] > 0.55 ? 1 : 0);
-      c = lerp(c, 236, sh);
+      const sh = ss(0.16, 0.02, shells[i]) * (shellId[i] > 0.55 ? 1 : 0);
+      c = mix(c, 236, sh);
       const p = i * 4;
       px[p] = c * 1.02;
       px[p + 1] = c * 0.955;
       px[p + 2] = c * 0.79;
       px[p + 3] = 255;
-      height[i] = clamp(0.5 + (rip - 0.5) * 0.5 + (grain[i] - 0.5) * 0.3 + (dunes[i] - 0.5) * 0.3 + sh * 0.3, 0, 1);
+      height[i] = sat3(0.5 + (rip - 0.5) * 0.5 + (grain[i] - 0.5) * 0.3 + (dunes[i] - 0.5) * 0.3 + sh * 0.3, 0, 1);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -1731,18 +1782,18 @@ function genTreeBark(S, seed) {
   const height = new Float32Array(S * S);
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
     const f = warped[i];
-    const crack = smoothstep(0.32, 0.0, f);
-    const ridge = smoothstep(0.45, 0.95, f);
+    const crack = ss(0.32, 0.0, f);
+    const ridge = ss(0.45, 0.95, f);
     let shade = 0.55 + ridge * 0.55 - crack * 0.35 + (fine[i] - 0.5) * 0.3;
-    const knot = smoothstep(0.22, 0.02, knots[i]);
-    shade = lerp(shade, 0.42, knot * 0.8);
+    const knot = ss(0.22, 0.02, knots[i]);
+    shade = mix(shade, 0.42, knot * 0.8);
     let r = 96 * shade, g = 74 * shade, b = 56 * shade;
-    const mo = smoothstep(0.66, 0.9, moss[i]) * (1 - crack * 0.5);
-    r = lerp(r, 62 * shade + 10, mo * 0.7);
-    g = lerp(g, 84 * shade + 16, mo * 0.7);
-    b = lerp(b, 48 * shade + 8, mo * 0.7);
+    const mo = ss(0.66, 0.9, moss[i]) * (1 - crack * 0.5);
+    r = mix(r, 62 * shade + 10, mo * 0.7);
+    g = mix(g, 84 * shade + 16, mo * 0.7);
+    b = mix(b, 48 * shade + 8, mo * 0.7);
     px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
-    height[i] = clamp(0.45 + ridge * 0.5 - crack * 0.55 + (fine[i] - 0.5) * 0.15 - knot * 0.2, 0, 1);
+    height[i] = sat(0.45 + ridge * 0.5 - crack * 0.55 + (fine[i] - 0.5) * 0.15 - knot * 0.2);
   }
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px, height: height };
@@ -1808,7 +1859,7 @@ function genLeaves(S, seed) {
       const len = S * cfg.len * rng.range(0.6, 1.25);
       const hue = 88 + rng.range(-14, 18);
       const sat = 0.38 + rng.next() * 0.26;
-      const lig = clamp((0.17 + rng.next() * 0.16) * cfg.light, 0.05, 0.62);
+      const lig = sat3((0.17 + rng.next() * 0.16) * cfg.light, 0.05, 0.62);
       leaf(x, y, len, rng.next() * TWO_PI, hsl(hue, sat, lig), hsl(hue - 6, sat * 0.8, lig * 0.62));
     }
   }
@@ -1828,12 +1879,12 @@ function genLeaves(S, seed) {
       const dx = (x - cx) / (S * 0.5);
       const d = Math.sqrt(dx * dx + dy * dy);
       let a = px[p + 3] / 255;
-      a *= 1 - smoothstep(0.72, 1.0, d + (holes[i] - 0.5) * 0.42);
-      if (holes[i] < 0.30) a *= smoothstep(0.16, 0.30, holes[i]);
+      a *= 1 - ss(0.72, 1.0, d + (holes[i] - 0.5) * 0.42);
+      if (holes[i] < 0.30) a *= ss(0.16, 0.30, holes[i]);
       px[p + 3] = a > 0.42 ? 255 : 0;    // alpha cut-out, no soft fringe
     }
   }
-  bleedAlpha(px, S, S, 5);
+  bleedAlpha(px, S, S, 3);
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
 }
@@ -1850,12 +1901,12 @@ function genWater(S, seed) {
   const wx = fbmField(S, S, new NoiseSource(seed + 111), { freq: 3, octaves: 2 });
   const wy = fbmField(S, S, new NoiseSource(seed + 112), { freq: 3, octaves: 2 });
   const swell = warpField(swellBase, S, S, wx, wy, S * 0.05);
-  const ripple = fbmField(S, S, new NoiseSource(seed + 113), { freqX: 18, freqY: 22, octaves: 3, mode: 'ridged' });
+  const ripple = fbmField(S, S, new NoiseSource(seed + 113), { freqX: 18, freqY: 22, octaves: 2, mode: 'ridged' });
   const fine = fbmField(S, S, new NoiseSource(seed + 114), { freq: Math.max(48, S / 6), octaves: 2 });
 
   const height = new Float32Array(S * S);
   for (let i = 0; i < height.length; i++) {
-    height[i] = clamp(swell[i] * 0.55 + ripple[i] * 0.33 + fine[i] * 0.12, 0, 1);
+    height[i] = sat(swell[i] * 0.55 + ripple[i] * 0.33 + fine[i] * 0.12);
   }
   const canvas = createCanvas(S, S);
   const ctx = ctx2d(canvas);
@@ -1867,15 +1918,15 @@ function genWater(S, seed) {
       const i = row + x;
       const hgt = height[i];
       /* Fake sky reflection: crests catch light, troughs go deep teal. */
-      const crest = smoothstep(0.55, 0.92, hgt);
-      const trough = smoothstep(0.45, 0.05, hgt);
+      const crest = ss(0.55, 0.92, hgt);
+      const trough = ss(0.45, 0.05, hgt);
       let r = 14 + crest * 76 - trough * 6;
       let g = 46 + crest * 96 - trough * 14;
       let b = 62 + crest * 96 - trough * 18;
-      const foam = smoothstep(0.86, 0.99, ripple[i] * 0.6 + hgt * 0.6);
-      r = lerp(r, 208, foam * 0.75);
-      g = lerp(g, 224, foam * 0.75);
-      b = lerp(b, 232, foam * 0.75);
+      const foam = ss(0.86, 0.99, ripple[i] * 0.6 + hgt * 0.6);
+      r = mix(r, 208, foam * 0.75);
+      g = mix(g, 224, foam * 0.75);
+      b = mix(b, 232, foam * 0.75);
       const p = i * 4;
       px[p] = r; px[p + 1] = g; px[p + 2] = b; px[p + 3] = 255;
     }
@@ -1892,7 +1943,7 @@ function genWater(S, seed) {
  */
 function genCarPaintNoise(S, seed) {
   const noise = new NoiseSource(seed);
-  const flake = fbmField(S, S, noise, { freq: Math.max(96, S / 2), octaves: 2, value: true });
+  const flake = fbmField(S, S, noise, { freq: Math.max(96, S / 2), octaves: 1, value: true });
   const flake2 = worleyField(S, S, new NoiseSource(seed + 121), Math.max(64, Math.round(S / 3)), Math.max(64, Math.round(S / 3)), { mode: 'f1', jitter: 1 });
   const orangePeel = fbmField(S, S, new NoiseSource(seed + 122), { freq: 22, octaves: 3 });
   const canvas = createCanvas(S, S);
@@ -1900,7 +1951,7 @@ function genCarPaintNoise(S, seed) {
   const img = newImage(ctx, S, S);
   const px = img.data;
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
-    const sparkle = smoothstep(0.30, 0.0, flake2[i]) * (0.35 + flake[i] * 0.9);
+    const sparkle = ss(0.30, 0.0, flake2[i]) * (0.35 + flake[i] * 0.9);
     let c = 128 + (orangePeel[i] - 0.5) * 26 + (flake[i] - 0.5) * 22 + sparkle * 74;
     px[p] = c; px[p + 1] = c * 0.995; px[p + 2] = c * 1.01; px[p + 3] = 255;
   }
@@ -1919,7 +1970,7 @@ function genTire(S, seed) {
   const canvas = createCanvas(S, S);
   const ctx = ctx2d(canvas);
   const noise = new NoiseSource(seed);
-  const grain = fbmField(S, S, noise, { freq: Math.max(60, S / 4), octaves: 2, value: true });
+  const grain = fbmField(S, S, noise, { freq: Math.max(60, S / 4), octaves: 1, value: true });
   const wear = fbmField(S, S, new NoiseSource(seed + 131), { freq: 8, octaves: 3 });
 
   const img = newImage(ctx, S, S);
@@ -1939,23 +1990,23 @@ function genTire(S, seed) {
         const skew = (v - 0.5) * 2.2;
         const bu = (u * BLOCKS + skew * 1.4) % 1;
         const bv = (v * 6) % 1;
-        const gx = 1 - smoothstep(0.06, 0.14, Math.min(bu, 1 - bu));
-        const gy = 1 - smoothstep(0.08, 0.18, Math.min(bv, 1 - bv));
+        const gx = 1 - ss(0.06, 0.14, Math.min(bu, 1 - bu));
+        const gy = 1 - ss(0.08, 0.18, Math.min(bv, 1 - bv));
         const groove = Math.max(gx, gy * 0.9);
         /* Two continuous circumferential grooves. */
         const circ = Math.max(
-          1 - smoothstep(0.012, 0.03, Math.abs(across - 0.24)),
-          1 - smoothstep(0.010, 0.028, Math.abs(across - 0.50))
+          1 - ss(0.012, 0.03, Math.abs(across - 0.24)),
+          1 - ss(0.010, 0.028, Math.abs(across - 0.50))
         );
         tread = Math.max(groove, circ);
       }
-      const shoulder = smoothstep(0.62, 0.80, across);
+      const shoulder = ss(0.62, 0.80, across);
       let c = 30 + (grain[i] - 0.5) * 14 + wear[i] * 8;
       c *= 1 - tread * 0.55;
       c *= 1 - shoulder * 0.12;
       const p = i * 4;
       px[p] = c; px[p + 1] = c * 1.0; px[p + 2] = c * 1.03; px[p + 3] = 255;
-      height[i] = clamp(0.7 - tread * 0.6 - across * 0.1 + (grain[i] - 0.5) * 0.1, 0, 1);
+      height[i] = sat(0.7 - tread * 0.6 - across * 0.1 + (grain[i] - 0.5) * 0.1);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -2008,16 +2059,16 @@ function genChrome(S, seed) {
       let r, g, b;
       if (v < 0.5) {
         /* Sky: deep blue to pale horizon with clouds. */
-        const t = smoothstep(0.0, 0.5, v);
-        r = lerp(56, 176, t) + clouds[i] * 46;
-        g = lerp(96, 198, t) + clouds[i] * 42;
-        b = lerp(158, 216, t) + clouds[i] * 30;
+        const t = ss(0.0, 0.5, v);
+        r = mix(56, 176, t) + clouds[i] * 46;
+        g = mix(96, 198, t) + clouds[i] * 42;
+        b = mix(158, 216, t) + clouds[i] * 30;
       } else {
         /* Horizon band with building silhouettes, then dark ground. */
-        const t = smoothstep(0.5, 1.0, v);
+        const t = ss(0.5, 1.0, v);
         const sil = 0.5 + skyline[i] * 0.5;
         const isBuilding = v < 0.5 + sil * 0.12 ? 1 : 0;
-        r = lerp(150, 34, t); g = lerp(158, 32, t); b = lerp(164, 34, t);
+        r = mix(150, 34, t); g = mix(158, 32, t); b = mix(164, 34, t);
         if (isBuilding) { r *= 0.45; g *= 0.46; b *= 0.52; }
       }
       const gm = (grime[i] - 0.5) * 14;
@@ -2068,7 +2119,7 @@ function genGlassFacade(S, seed) {
   }
   const clouds = fbmField(S, S, noise, { freqX: 4, freqY: 6, octaves: 4, gain: 0.55 });
   const grime = fbmField(S, S, new NoiseSource(seed + 151), { freqX: 8, freqY: 30, octaves: 3 });
-  const dust = fbmField(S, S, new NoiseSource(seed + 152), { freq: Math.max(48, S / 6), octaves: 2, value: true });
+  const dust = fbmField(S, S, new NoiseSource(seed + 152), { freq: Math.max(48, S / 6), octaves: 1, value: true });
 
   const canvas = createCanvas(S, S);
   const ctx = ctx2d(canvas);
@@ -2093,7 +2144,7 @@ function genGlassFacade(S, seed) {
 
       if (inSpandrel) {
         /* Opaque spandrel panel hiding the floor slab. */
-        const t = smoothstep(spandrelTop, spandrelTop + 0.04, ly);
+        const t = ss(spandrelTop, spandrelTop + 0.04, ly);
         const shade = 0.55 + t * 0.35 + (dust[i] - 0.5) * 0.12;
         r = 44 * shade + 8; g = 50 * shade + 9; b = 56 * shade + 11;
         if (ly > 0.965) { r *= 0.5; g *= 0.5; b *= 0.55; }
@@ -2102,26 +2153,27 @@ function genGlassFacade(S, seed) {
         r = 92 * shade; g = 98 * shade; b = 104 * shade;
       } else {
         /* Glass: sky gradient + cloud reflection + per-pane variation. */
-        const t = clamp((ly - glassTop) / (spandrelTop - glassTop), 0, 1);
-        const refl = Math.pow(1 - t, 1.5) * paneRefl[id];
+        const t = sat3((ly - glassTop) / (spandrelTop - glassTop), 0, 1);
+        const it = 1 - t;
+        const refl = it * Math.sqrt(it) * paneRefl[id];
         const cloud = clouds[i];
         const tint = paneTint[id];
         const skyR = 96 + cloud * 84 + tint * 10;
         const skyG = 140 + cloud * 78 + tint * 8;
         const skyB = 184 + cloud * 60 + tint * 6;
         const baseR = 16 + tint * 5, baseG = 33 + tint * 6, baseB = 41 + tint * 7;
-        r = lerp(baseR, skyR, clamp(refl * 0.62, 0, 1));
-        g = lerp(baseG, skyG, clamp(refl * 0.62, 0, 1));
-        b = lerp(baseB, skyB, clamp(refl * 0.62, 0, 1));
+        r = mix(baseR, skyR, sat(refl * 0.62));
+        g = mix(baseG, skyG, sat(refl * 0.62));
+        b = mix(baseB, skyB, sat(refl * 0.62));
         /* Diagonal glazing streak. */
-        const streak = smoothstep(0.72, 1.0, Math.sin((lx * 1.6 + t * 2.2 + id * 0.31) * Math.PI));
+        const streak = ss(0.72, 1.0, Math.sin((lx * 1.6 + t * 2.2 + id * 0.31) * Math.PI));
         r += streak * 26; g += streak * 30; b += streak * 34;
         /* Some panes show a dark interior instead of a reflection. */
         const dk = paneDark[id];
         r *= dk; g *= dk; b *= dk;
         /* Rain streak grime running down the glass. */
-        const gm = smoothstep(0.55, 0.95, grime[i]) * t * 0.35;
-        r = lerp(r, r * 0.7 + 12, gm); g = lerp(g, g * 0.72 + 12, gm); b = lerp(b, b * 0.75 + 12, gm);
+        const gm = ss(0.55, 0.95, grime[i]) * t * 0.35;
+        r = mix(r, r * 0.7 + 12, gm); g = mix(g, g * 0.72 + 12, gm); b = mix(b, b * 0.75 + 12, gm);
         m = 1;
       }
       const p = i * 4;
@@ -2155,7 +2207,7 @@ function genOfficeFacade(S, seed) {
     dark[i] = rng.range(0.75, 1.15);
   }
   const wallN = fbmField(S, S, noise, { freq: 6, octaves: 4, gain: 0.55 });
-  const wallFine = fbmField(S, S, new NoiseSource(seed + 161), { freq: Math.max(64, S / 4), octaves: 2, value: true });
+  const wallFine = fbmField(S, S, new NoiseSource(seed + 161), { freq: Math.max(64, S / 4), octaves: 1, value: true });
   const runoff = fbmField(S, S, new NoiseSource(seed + 162), { freqX: 22, freqY: 5, octaves: 3 });
   const clouds = fbmField(S, S, new NoiseSource(seed + 163), { freqX: 5, freqY: 7, octaves: 3 });
 
@@ -2182,14 +2234,14 @@ function genOfficeFacade(S, seed) {
 
       if (!inWin) {
         /* Concrete wall with a pilaster rhythm and floor bands. */
-        const pil = 1 - smoothstep(0.02, 0.10, Math.min(lx, 1 - lx));
-        const band = 1 - smoothstep(0.0, 0.035, Math.min(ly, 1 - ly));
+        const pil = 1 - ss(0.02, 0.10, Math.min(lx, 1 - lx));
+        const band = 1 - ss(0.0, 0.035, Math.min(ly, 1 - ly));
         let c = 148 + (wallN[i] - 0.5) * 30 + (wallFine[i] - 0.5) * 14;
         c += pil * 12 - band * 26;
         /* Dirt streaks running below the sills. */
         const sillShadow = (ly > WY1 && ly < WY1 + 0.22 && lx > WX0 - 0.02 && lx < WX1 + 0.02) ? 1 : 0;
-        const dirt = sillShadow * smoothstep(0.35, 0.95, runoff[i]) * smoothstep(WY1 + 0.22, WY1, ly);
-        c = lerp(c, c * 0.68, dirt * 0.8);
+        const dirt = sillShadow * ss(0.35, 0.95, runoff[i]) * ss(WY1 + 0.22, WY1, ly);
+        c = mix(c, c * 0.68, dirt * 0.8);
         /* Protruding sill catches light. */
         if (ly > WY1 && ly < WY1 + 0.035 && lx > WX0 - 0.03 && lx < WX1 + 0.03) c *= 1.16;
         r = c * 1.0; g = c * 0.985; b = c * 0.95;
@@ -2197,19 +2249,20 @@ function genOfficeFacade(S, seed) {
         const c = 176 + (wallFine[i] - 0.5) * 18;
         r = c * 0.96; g = c * 0.98; b = c;
       } else {
-        const t = clamp((ly - WY0) / (WY1 - WY0), 0, 1);
-        const refl = Math.pow(1 - t, 1.7) * (0.7 + clouds[i] * 0.7);
+        const t = sat3((ly - WY0) / (WY1 - WY0), 0, 1);
+        const it = 1 - t;
+        const refl = it * it * Math.sqrt(it) * (0.7 + clouds[i] * 0.7);
         let gr = 22 + tint[id] * 5, gg = 34 + tint[id] * 6, gb = 46 + tint[id] * 8;
-        gr = lerp(gr, 118 + clouds[i] * 70, clamp(refl * 0.55, 0, 1));
-        gg = lerp(gg, 150 + clouds[i] * 60, clamp(refl * 0.55, 0, 1));
-        gb = lerp(gb, 178 + clouds[i] * 50, clamp(refl * 0.55, 0, 1));
+        gr = mix(gr, 118 + clouds[i] * 70, sat(refl * 0.55));
+        gg = mix(gg, 150 + clouds[i] * 60, sat(refl * 0.55));
+        gb = mix(gb, 178 + clouds[i] * 50, sat(refl * 0.55));
         gr *= dark[id]; gg *= dark[id]; gb *= dark[id];
         m = 1;
         /* Venetian blinds lowered from the top of the pane. */
         const bl = blind[id];
         if (bl > 0 && t < bl) {
           const slat = ((ly - WY0) * 90) % 1;
-          const s = 0.72 + 0.28 * smoothstep(0.35, 0.65, slat);
+          const s = 0.72 + 0.28 * ss(0.35, 0.65, slat);
           gr = 168 * s; gg = 160 * s; gb = 146 * s;
           m = 0;
         }
@@ -2248,7 +2301,7 @@ function genApartmentFacade(S, seed) {
     tint[i] = rng.range(-1, 1);
   }
   const stucco = fbmField(S, S, noise, { freq: 9, octaves: 4, gain: 0.55 });
-  const fine = fbmField(S, S, new NoiseSource(seed + 171), { freq: Math.max(70, S / 4), octaves: 2, value: true });
+  const fine = fbmField(S, S, new NoiseSource(seed + 171), { freq: Math.max(70, S / 4), octaves: 1, value: true });
   const streak = fbmField(S, S, new NoiseSource(seed + 172), { freqX: 26, freqY: 6, octaves: 3 });
   const sky = fbmField(S, S, new NoiseSource(seed + 173), { freqX: 4, freqY: 6, octaves: 3 });
 
@@ -2275,12 +2328,13 @@ function genApartmentFacade(S, seed) {
       const acBox = hasAC[id] && lx > 0.62 && lx < 0.84 && ly > 0.20 && ly < 0.33;
 
       if (inWin && !frame && !acBox) {
-        const t = clamp((ly - WY0) / (WY1 - WY0), 0, 1);
-        const refl = Math.pow(1 - t, 1.6) * (0.6 + sky[i] * 0.8);
+        const t = sat3((ly - WY0) / (WY1 - WY0), 0, 1);
+        const it = 1 - t;
+        const refl = it * Math.sqrt(it) * (0.6 + sky[i] * 0.8);
         let gr = 26 + tint[id] * 6, gg = 36 + tint[id] * 6, gb = 44 + tint[id] * 8;
-        gr = lerp(gr, 112 + sky[i] * 66, clamp(refl * 0.5, 0, 1));
-        gg = lerp(gg, 142 + sky[i] * 58, clamp(refl * 0.5, 0, 1));
-        gb = lerp(gb, 170 + sky[i] * 48, clamp(refl * 0.5, 0, 1));
+        gr = mix(gr, 112 + sky[i] * 66, sat(refl * 0.5));
+        gg = mix(gg, 142 + sky[i] * 58, sat(refl * 0.5));
+        gb = mix(gb, 170 + sky[i] * 48, sat(refl * 0.5));
         m = 1;
         if (curtain[id] > 0 && lx < WX0 + (WX1 - WX0) * curtain[id]) {
           /* Fabric curtain: soft vertical folds, still lets light through. */
@@ -2299,9 +2353,9 @@ function genApartmentFacade(S, seed) {
       } else {
         /* Stucco wall + floor slab bands. */
         let c = 176 + (stucco[i] - 0.5) * 34 + (fine[i] - 0.5) * 14;
-        const slab = 1 - smoothstep(0.0, 0.045, Math.min(ly, 1 - ly));
-        c = lerp(c, 196, slab * 0.7);
-        c -= smoothstep(0.5, 0.95, streak[i]) * 14 * (ly > 0.5 ? 1 : 0.3);
+        const slab = 1 - ss(0.0, 0.045, Math.min(ly, 1 - ly));
+        c = mix(c, 196, slab * 0.7);
+        c -= ss(0.5, 0.95, streak[i]) * 14 * (ly > 0.5 ? 1 : 0.3);
         r = c * 1.03; g = c * 0.98; b = c * 0.90;
       }
 
@@ -2356,7 +2410,7 @@ function genGroundFloorShops(S, seed) {
     awning.push(rng.chance(0.6) ? 1 : 0);
   }
   const wallN = fbmField(S, S, noise, { freq: 7, octaves: 4 });
-  const fine = fbmField(S, S, new NoiseSource(seed + 181), { freq: Math.max(64, S / 4), octaves: 2, value: true });
+  const fine = fbmField(S, S, new NoiseSource(seed + 181), { freq: Math.max(64, S / 4), octaves: 1, value: true });
   const interior = fbmField(S, S, new NoiseSource(seed + 182), { freq: 12, octaves: 3 });
 
   const canvas = createCanvas(S, S);
@@ -2381,7 +2435,7 @@ function genGroundFloorShops(S, seed) {
       } else if (v < SIGN1 && !pier) {
         /* Illuminated sign box: saturated panel, letters added later. */
         const hh = signHue[sh] / 360;
-        const t = smoothstep(SIGN0, SIGN1, v);
+        const t = ss(SIGN0, SIGN1, v);
         const l = 0.20 + (1 - t) * 0.10;
         const c = hslToRgbBytes(hh, 0.62, l);
         r = c[0] + (fine[i] - 0.5) * 10;
@@ -2392,7 +2446,7 @@ function genGroundFloorShops(S, seed) {
         if (awning[sh] && !pier) {
           /* Striped awning valance. */
           const stripe = ((lx * 9) % 1) < 0.5 ? 1 : 0;
-          const shade = 0.72 + smoothstep(GLASS0, SIGN1, v) * 0.4;
+          const shade = 0.72 + ss(GLASS0, SIGN1, v) * 0.4;
           r = (stripe ? 196 : 42) * shade;
           g = (stripe ? 190 : 52) * shade;
           b = (stripe ? 182 : 72) * shade;
@@ -2410,14 +2464,14 @@ function genGroundFloorShops(S, seed) {
           r = c; g = c * 1.02; b = c * 1.05;
         } else {
           /* Shop interior seen through glass: warm, uneven, emissive. */
-          const t = clamp((v - GLASS0) / (GLASS1 - GLASS0), 0, 1);
+          const t = sat3((v - GLASS0) / (GLASS1 - GLASS0), 0, 1);
           const glow = 0.45 + interior[i] * 0.8;
           r = (150 + interior[i] * 90) * glow * (1.1 - t * 0.35);
           g = (128 + interior[i] * 78) * glow * (1.1 - t * 0.35);
           b = (96 + interior[i] * 60) * glow * (1.1 - t * 0.35);
           /* Reflection of the street on the lower glass. */
-          const refl = smoothstep(0.35, 1.0, t) * 0.4;
-          r = lerp(r, 60, refl); g = lerp(g, 72, refl); b = lerp(b, 88, refl);
+          const refl = ss(0.35, 1.0, t) * 0.4;
+          r = mix(r, 60, refl); g = mix(g, 72, refl); b = mix(b, 88, refl);
           m = 1 - refl * 0.5;
           if (door) m *= 0.85;
         }
@@ -2774,7 +2828,7 @@ function genBillboard(index, S, seed) {
       const i = row + x;
       const p = i * 4;
       const dx = (x / W - 0.5) * 2;
-      const vig = 1 - smoothstep(0.75, 1.5, Math.sqrt(dx * dx + dy * dy)) * 0.45;
+      const vig = 1 - ss(0.75, 1.5, Math.sqrt(dx * dx + dy * dy)) * 0.45;
       const g = (0.9 + wear[i] * 0.2) * vig + (grain[i] - 0.5) * 0.08;
       px[p] *= g; px[p + 1] *= g; px[p + 2] *= g;
       px[p + 3] = 255;
@@ -2861,7 +2915,7 @@ function genGraffiti(index, S, seed) {
     if (a === 0) continue;
     a *= 0.55 + 0.6 * speck[i];
     a *= 0.72 + 0.5 * blotch[i];
-    px[p + 3] = clamp(a, 0, 1) * 255;
+    px[p + 3] = sat(a) * 255;
   }
   bleedAlpha(px, W, H, 3);
   ctx.putImageData(img, 0, 0);
@@ -2894,8 +2948,8 @@ function genSmoke(S, seed) {
       const i = row + x;
       const dx = (x - c) / c;
       const d = Math.sqrt(dx * dx + dy * dy);
-      const shape = 1 - smoothstep(0.15, 1.0, d + (puff[i] - 0.5) * 0.55);
-      const a = clamp(shape * (0.55 + detail[i] * 0.7), 0, 1);
+      const shape = 1 - ss(0.15, 1.0, d + (puff[i] - 0.5) * 0.55);
+      const a = sat(shape * (0.55 + detail[i] * 0.7));
       const lum = 176 + detail[i] * 60 + (1 - d) * 22;
       const p = i * 4;
       px[p] = lum; px[p + 1] = lum; px[p + 2] = lum * 1.02;
@@ -2925,12 +2979,12 @@ function genSpark(S) {
       const d = Math.sqrt(dx * dx + dy * dy);
       const core = Math.exp(-d * d * 5.5);
       const tail = Math.exp(-Math.abs(dx) * 2.2) * Math.exp(-dy * dy * 1.6) * 0.55;
-      const a = clamp(core + tail, 0, 1);
-      const heat = clamp(core * 1.6, 0, 1);
+      const a = sat(core + tail);
+      const heat = sat(core * 1.6);
       const p = (row + x) * 4;
       px[p] = 255;
-      px[p + 1] = lerp(150, 246, heat);
-      px[p + 2] = lerp(46, 210, heat * heat);
+      px[p + 1] = mix(150, 246, heat);
+      px[p + 2] = mix(46, 210, heat * heat);
       px[p + 3] = a * 255;
     }
   }
@@ -2958,13 +3012,16 @@ function genFlash(S) {
       const ang = Math.atan2(dy, dx);
       const halo = Math.exp(-d * d * 6.5);
       const core = Math.exp(-d * d * 60);
-      const spikes = Math.pow(Math.max(0, Math.cos(ang * 4)), 12) * Math.exp(-d * 3.4) * 0.55;
-      const ring = Math.exp(-Math.pow((d - 0.42) * 7.5, 2)) * 0.18;
-      const a = clamp(halo * 0.8 + core + spikes + ring, 0, 1);
+      const c4 = Math.max(0, Math.cos(ang * 4));
+      const c4b = c4 * c4; const c4d = c4b * c4b;
+      const spikes = c4d * c4d * c4b * c4b * Math.exp(-d * 3.4) * 0.55;
+      const rr = (d - 0.42) * 7.5;
+      const ring = Math.exp(-rr * rr) * 0.18;
+      const a = sat(halo * 0.8 + core + spikes + ring);
       const p = (row + x) * 4;
       px[p] = 255;
-      px[p + 1] = lerp(214, 255, clamp(core + spikes, 0, 1));
-      px[p + 2] = lerp(150, 246, clamp(core * 1.4, 0, 1));
+      px[p + 1] = mix(214, 255, sat(core + spikes));
+      px[p + 2] = mix(150, 246, sat(core * 1.4));
       px[p + 3] = a * 255;
     }
   }
@@ -2995,11 +3052,11 @@ function genBlood(S, seed) {
   const img = newImage(ctx, S, S);
   const px = img.data;
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
-    const a = clamp(field[i] * 1.35 - 0.12, 0, 1);
-    const thick = smoothstep(0.2, 0.9, field[i]);
-    px[p] = lerp(78, 148, thick);
-    px[p + 1] = lerp(6, 16, thick);
-    px[p + 2] = lerp(8, 18, thick);
+    const a = sat(field[i] * 1.35 - 0.12);
+    const thick = ss(0.2, 0.9, field[i]);
+    px[p] = mix(78, 148, thick);
+    px[p + 1] = mix(6, 16, thick);
+    px[p + 2] = mix(8, 18, thick);
     px[p + 3] = (a > 0.06 ? a : 0) * 255;
   }
   bleedAlpha(px, S, S, 2);
@@ -3061,7 +3118,7 @@ function genRaindrop(W, H) {
     const widthAt = 0.30 + along * 0.55;
     for (let x = 0; x < W; x++) {
       const dx = Math.abs(x - cx) / (W * 0.5 * widthAt);
-      const a = clamp((1 - smoothstep(0.35, 1.0, dx)) * Math.pow(along, 0.6), 0, 1);
+      const a = sat3((1 - ss(0.35, 1.0, dx)) * Math.pow(along, 0.6), 0, 1);
       const p = (y * W + x) * 4;
       px[p] = 196; px[p + 1] = 216; px[p + 2] = 236;
       px[p + 3] = a * 235;
@@ -3092,17 +3149,20 @@ function genMuzzle(S, seed) {
       const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
       const ang = Math.atan2(dy, dx);
       /* Petals: an angular noise ring so the flash is never symmetric. */
-      const petal = 0.42 + 0.30 * Math.pow(Math.abs(Math.cos(ang * 3 + 0.7)), 1.6)
+      const pc = Math.abs(Math.cos(ang * 3 + 0.7));
+      const petal = 0.42 + 0.30 * (pc * Math.sqrt(pc))
         + 0.16 * noise.perlin2(Math.cos(ang) * 3 + 8, Math.sin(ang) * 3 + 8, 64, 64);
-      const body = 1 - smoothstep(petal * 0.55, petal, d);
+      const body = 1 - ss(petal * 0.55, petal, d);
       const core = Math.exp(-d * d * 44);
-      const spike = Math.pow(Math.max(0, Math.cos(ang * 2)), 26) * Math.exp(-d * 2.2);
-      const a = clamp(body * 0.9 + core + spike * 0.7, 0, 1);
-      const heat = clamp(core * 1.5 + body * 0.5, 0, 1);
+      const c2 = Math.max(0, Math.cos(ang * 2));
+      const c2b = c2 * c2; const c2d = c2b * c2b; const c2h = c2d * c2d;
+      const spike = c2h * c2h * c2d * c2b * Math.exp(-d * 2.2);
+      const a = sat(body * 0.9 + core + spike * 0.7);
+      const heat = sat(core * 1.5 + body * 0.5);
       const p = (row + x) * 4;
       px[p] = 255;
-      px[p + 1] = lerp(176, 252, heat);
-      px[p + 2] = lerp(64, 226, heat * heat);
+      px[p + 1] = mix(176, 252, heat);
+      px[p + 2] = mix(64, 226, heat * heat);
       px[p + 3] = a * 255;
     }
   }
@@ -3133,13 +3193,15 @@ function genBulletHole(S, seed) {
       const d = Math.sqrt(dx * dx + dy * dy) + 1e-5;
       const ang = Math.atan2(dy, dx);
       const wob = 1 + 0.22 * noise.perlin2(Math.cos(ang) * 4 + 5, Math.sin(ang) * 4 + 5, 64, 64);
-      const hole = 1 - smoothstep(0.10 * wob, 0.16 * wob, d);
-      const rim = (1 - smoothstep(0.16 * wob, 0.30 * wob, d)) * (1 - hole);
+      const hole = 1 - ss(0.10 * wob, 0.16 * wob, d);
+      const rim = (1 - ss(0.16 * wob, 0.30 * wob, d)) * (1 - hole);
       /* Radial cracks. */
-      const cr = Math.pow(Math.abs(Math.sin(ang * 5.5 + dust[i] * 3.2)), 22) * (1 - smoothstep(0.16, 0.62, d));
-      const ring = (1 - smoothstep(0.30, 0.86, d)) * (0.20 + dust[i] * 0.5);
-      const a = clamp(hole + rim * 0.92 + cr * 0.8 + ring * 0.42, 0, 1);
-      const lum = lerp(150, 8, clamp(hole + rim * 0.8 + cr * 0.6, 0, 1));
+      const sa = Math.abs(Math.sin(ang * 5.5 + dust[i] * 3.2));
+      const sb = sa * sa; const sd = sb * sb; const sh = sd * sd;
+      const cr = sh * sh * sd * sb * (1 - ss(0.16, 0.62, d));
+      const ring = (1 - ss(0.30, 0.86, d)) * (0.20 + dust[i] * 0.5);
+      const a = sat(hole + rim * 0.92 + cr * 0.8 + ring * 0.42);
+      const lum = mix(150, 8, sat(hole + rim * 0.8 + cr * 0.6));
       const p = i * 4;
       px[p] = lum; px[p + 1] = lum * 0.98; px[p + 2] = lum * 0.95;
       px[p + 3] = a * 255;
@@ -3216,9 +3278,9 @@ function genCrackDecal(S, seed) {
   const grit = fbmField(S, S, noise, { freq: 12, octaves: 3 });
   for (let i = 0, p = 0; i < S * S; i++, p += 4) {
     const core = alpha[i];
-    const halo = clamp(spread[i] * 2.4 - core, 0, 1) * (0.5 + grit[i] * 0.7);
-    const a = clamp(core + halo * 0.55, 0, 1);
-    const lum = lerp(190, 14, core);
+    const halo = sat(spread[i] * 2.4 - core) * (0.5 + grit[i] * 0.7);
+    const a = sat(core + halo * 0.55);
+    const lum = mix(190, 14, core);
     px[p] = lum; px[p + 1] = lum * 0.99; px[p + 2] = lum * 0.97;
     px[p + 3] = a * 255;
   }
@@ -3280,7 +3342,7 @@ function genSkyStars(W, H, seed) {
       const i = row + x;
       const band = bandAt[x];
       const d = Math.abs(v - band);
-      const g = (1 - smoothstep(0.02, 0.26, d)) * (0.30 + cloud[i] * 0.85) * (0.4 + dust[i] * 0.9);
+      const g = (1 - ss(0.02, 0.26, d)) * (0.30 + cloud[i] * 0.85) * (0.4 + dust[i] * 0.9);
       bright[i] += g * 0.28;
     }
   }
@@ -3290,7 +3352,7 @@ function genSkyStars(W, H, seed) {
     const x = rng.next() * W;
     const y = rng.next() * H;
     const band = bandAt[Math.min(W - 1, x | 0)];
-    const near = 1 - smoothstep(0.02, 0.30, Math.abs(y / H - band));
+    const near = 1 - ss(0.02, 0.30, Math.abs(y / H - band));
     if (rng.next() > 0.35 + near * 0.6) continue;
     const b = rng.range(0.15, 0.75);
     splatStar(bright, W, H, x, y, rng.range(0.55, 1.1), b);
@@ -3319,13 +3381,13 @@ function genSkyStars(W, H, seed) {
   const img = newImage(ctx, W, H);
   const px = img.data;
   for (let i = 0, p = 0; i < W * H; i++, p += 4) {
-    const b = clamp(bright[i], 0, 1.6);
-    const wm = clamp(warm[i], 0, 1);
-    const r = clamp(b * 235 + wm * 40, 0, 255);
-    const g = clamp(b * 238 - wm * 10, 0, 255);
-    const bl = clamp(b * 255 - wm * 46 + 4, 0, 255);
+    const b = sat3(bright[i], 0, 1.6);
+    const wm = sat(warm[i]);
+    const r = sat3(b * 235 + wm * 40, 0, 255);
+    const g = sat3(b * 238 - wm * 10, 0, 255);
+    const bl = sat3(b * 255 - wm * 46 + 4, 0, 255);
     px[p] = r; px[p + 1] = g; px[p + 2] = bl;
-    px[p + 3] = clamp(b * 1.25, 0, 1) * 255;
+    px[p + 3] = sat(b * 1.25) * 255;
   }
   ctx.putImageData(img, 0, 0);
   return { canvas: canvas, pixels: px };
@@ -3411,7 +3473,7 @@ function genGradientRamp(W, H) {
       while (s < stops.length - 2 && t > stops[s + 1][0]) s++;
       const a = stops[s], b = stops[s + 1];
       const span = Math.max(1e-5, b[0] - a[0]);
-      const f = clamp((t - a[0]) / span, 0, 1);
+      const f = sat3((t - a[0]) / span, 0, 1);
       const cr = lerp(a[1], b[1], f);
       const cg = lerp(a[2], b[2], f);
       const cb = lerp(a[3], b[3], f);

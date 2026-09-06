@@ -75,8 +75,13 @@ const SNAP_DOWN = 0.18;
 /** Depenetration passes per sub-step. @type {number} */
 const DEPEN_PASSES = 4;
 
-/** Hard cap on mover sub-steps so an absurd delta cannot stall the frame. @type {number} */
-const MAX_SUBSTEPS = 48;
+/**
+ * Hard cap on mover sub-steps. A delta longer than `MAX_SUBSTEPS * radius * 0.5` is scaled down
+ * rather than sub-stepped coarsely, so motion is truncated instead of tunnelling. Teleports must
+ * assign the position directly instead of going through the mover.
+ * @type {number}
+ */
+const MAX_SUBSTEPS = 512;
 
 /** Broadphase padding around the mover's swept volume, in meters. @type {number} */
 const BROAD_MARGIN = 0.6;
@@ -1090,7 +1095,10 @@ export class CollisionWorld {
     const f = this._f;
     const o = i * BODY_STRIDE;
     const y0 = feetY + r;
-    if (y0 < f[o + B_MINY]) return Infinity;      // we are underneath it: that is a ceiling
+    // Descending only closes a gap when the capsule sits above the body's top. Beside it (a wall)
+    // the distance does not change with height, so the body must not block the fall - otherwise
+    // the mover sticks to walls instead of sliding down them.
+    if (y0 <= f[o + B_TOP]) return Infinity;
     const g = Math.sqrt(r * r - dh * dh);
     const d = y0 - (f[o + B_TOP] + g);
     return d > 0 ? d : 0;
@@ -1114,10 +1122,53 @@ export class CollisionWorld {
     const f = this._f;
     const o = i * BODY_STRIDE;
     const y1 = feetY + height - r;
-    if (y1 > f[o + B_TOP]) return Infinity;       // we are above it: that is a floor
+    // Mirror of `_descentLimit`: rising only closes a gap while the head is below the body.
+    if (y1 >= f[o + B_MINY]) return Infinity;
     const g = Math.sqrt(r * r - dh * dh);
     const d = (f[o + B_MINY] - g) - y1;
     return d > 0 ? d : 0;
+  }
+
+  /**
+   * Penetration recovery push for a capsule that has ended up inside a body.
+   *
+   * Identical to {@link CollisionWorld#_capsuleVsBody} except that a mover straddling the body's
+   * height range is never shoved downwards (that would drive it through the floor and wedge it
+   * permanently); it takes the cheaper of sliding out sideways or standing on top instead. A body
+   * that is purely overhead - a ceiling - still pushes down, which is correct.
+   *
+   * @param {number} i Slot index.
+   * @param {number} x Capsule X.
+   * @param {number} feetY Capsule base.
+   * @param {number} z Capsule Z.
+   * @param {number} r Capsule radius.
+   * @param {number} height Capsule height.
+   * @returns {number} Penetration depth, 0 when separated.
+   * @private
+   */
+  _escapePush(i, x, feetY, z, r, height) {
+    const depth = this._capsuleVsBody(i, x, feetY, z, r, height);
+    if (depth <= 0 || _ny > -0.2) return depth;
+    const f = this._f;
+    const o = i * BODY_STRIDE;
+    const y0 = feetY + r;
+    if (f[o + B_MINY] >= y0) return depth;      // purely overhead: pushing down is right
+    const horiz = this._circleVsBodyXZ(i, x, z, r);
+    const hnx = _nx;
+    const hnz = _nz;
+    this._closestXZ(i, x, z);
+    const dh = _cpd;
+    const g = dh >= r ? 0 : Math.sqrt(r * r - dh * dh);
+    const up = (f[o + B_TOP] + g) - y0;
+    if (horiz > 0 && (up <= 0 || horiz <= up)) {
+      _nx = hnx; _ny = 0; _nz = hnz;
+      return horiz;
+    }
+    if (up > 0) {
+      _nx = 0; _ny = 1; _nz = 0;
+      return up;
+    }
+    return depth;
   }
 
   /**
@@ -1309,9 +1360,18 @@ export class CollisionWorld {
     let dx = fin(delta[0], 0);
     let dy = fin(delta[1], 0);
     let dz = fin(delta[2], 0);
-    if (dx > 250) dx = 250; else if (dx < -250) dx = -250;
-    if (dy > 250) dy = 250; else if (dy < -250) dy = -250;
-    if (dz > 250) dz = 250; else if (dz < -250) dz = -250;
+    // Keep every sub-step at half the radius: scale an over-long delta down instead of stretching
+    // the sub-steps, so a single call can never tunnel through thin geometry.
+    const maxTravel = MAX_SUBSTEPS * r * 0.5;
+    const hlen0 = Math.sqrt(dx * dx + dz * dz);
+    const vlen0 = dy < 0 ? -dy : dy;
+    const longest0 = hlen0 > vlen0 ? hlen0 : vlen0;
+    if (longest0 > maxTravel) {
+      const k = maxTravel / longest0;
+      dx *= k;
+      dy *= k;
+      dz *= k;
+    }
 
     // ---- broadphase over the whole swept volume, once ------------------------------------
     const minx = (dx < 0 ? px + dx : px) - r - BROAD_MARGIN;
@@ -1337,7 +1397,7 @@ export class CollisionWorld {
       let by = 0;
       let bz = 0;
       for (let k = 0; k < nc; k++) {
-        const d = this._capsuleVsBody(cand[k], px, py, pz, r, h);
+        const d = this._escapePush(cand[k], px, py, pz, r, h);
         if (d > deep) { deep = d; bx = _nx; by = _ny; bz = _nz; }
       }
       if (deep <= 1e-4) break;
@@ -1492,7 +1552,7 @@ export class CollisionWorld {
       let by = 0;
       let bz = 0;
       for (let k = 0; k < nc; k++) {
-        const d = this._capsuleVsBody(cand[k], px, py, pz, r, h);
+        const d = this._escapePush(cand[k], px, py, pz, r, h);
         if (d > deep) { deep = d; bx = _nx; by = _ny; bz = _nz; }
       }
       if (deep <= 1e-4) break;

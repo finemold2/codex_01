@@ -58,6 +58,9 @@ const SPEED_TURN = 30 / 3.6;
 /** Spatial-hash cell size used for overlap queries during generation. */
 const HASH_CELL = 24;
 
+/** Full circle in radians (local copy so the import list stays minimal). */
+const TAU_LOCAL = Math.PI * 2;
+
 /* ------------------------------------------------------------------ *
  * Static tables (pure constants — no side effects at import time)
  * ------------------------------------------------------------------ */
@@ -2004,6 +2007,61 @@ function addWalkPair(ctx, pts, crossing, nodeId, edgeId) {
 }
 
 /**
+ * True when a point sits far enough from every carriageway to be a sidewalk.
+ * @param {object} ctx Generation context.
+ * @param {number} x World x.
+ * @param {number} z World z.
+ * @param {number} margin Required clearance from the kerb.
+ * @returns {boolean} True when the point is clear.
+ */
+function pointClearOfRoads(ctx, x, z, margin) {
+  ctx.roadGrid.query(x - margin - 1, z - margin - 1, x + margin + 1, z + margin + 1, _hits);
+  for (let i = 0; i < _hits.length; i++) {
+    const o = _hits[i];
+    if (obbOverlap(x, z, 0.05, 0.05, 0, o.x, o.z, o.hx, o.hz, o.rot, margin)) return false;
+  }
+  return true;
+}
+
+/**
+ * Moves every kerb corner off the carriageway. Corners produced by roads that
+ * meet at an odd angle (the boulevard, the waterfront bend) can land on the
+ * asphalt after clustering, so they are re-placed by a polar search around the
+ * intersection that keeps them as close to their original spot as possible.
+ * Corners of the regular grid are already clear and never move.
+ * @param {object} ctx Generation context.
+ * @returns {void}
+ */
+function resolveCorners(ctx) {
+  const margin = WALK_OFFSET * 0.85;
+  const STEPS = 48;
+  for (const [nodeId, list] of ctx.corners) {
+    const node = ctx.nodes[nodeId];
+    for (const c of list) {
+      if (pointClearOfRoads(ctx, c[0], c[1], margin)) continue;
+      const dx = c[0] - node.x;
+      const dz = c[1] - node.z;
+      const theta = Math.atan2(dz, dx);
+      const baseR = Math.max(6, Math.hypot(dx, dz));
+      let done = false;
+      for (let ring = 0; ring < 8 && !done; ring++) {
+        const r = baseR + ring * 2.5;
+        for (let k = 0; k < STEPS && !done; k++) {
+          const step = ((k + 1) >> 1) * (TAU_LOCAL / STEPS);
+          const ang = theta + ((k & 1) === 0 ? step : -step);
+          const px = node.x + Math.cos(ang) * r;
+          const pz = node.z + Math.sin(ang) * r;
+          if (!pointClearOfRoads(ctx, px, pz, margin)) continue;
+          c[0] = px;
+          c[1] = pz;
+          done = true;
+        }
+      }
+    }
+  }
+}
+
+/**
  * Builds sidewalk centre lines on both sides of every road plus the crossings
  * that link the kerb corners of each intersection, then wires `next`.
  * @param {object} ctx Generation context.
@@ -2018,6 +2076,7 @@ function buildWalks(ctx) {
   for (const e of ctx.edges) if (e.kind === 'street' || e.kind === 'avenue') order.push(e);
   for (const e of ctx.edges) if (e.kind !== 'street' && e.kind !== 'avenue') order.push(e);
 
+  const lines = [];
   for (const e of order) {
     const len = polyLength(e.pts);
     const cap = len * 0.45;
@@ -2031,12 +2090,19 @@ function buildWalks(ctx) {
         -_d1[1] * off, _d1[0] * off, WALK_OFFSET));
       const line = polyTrim(polyOffset(e.pts, off), trimA, trimB);
       if (!line) continue;
-      const c0 = snapCorner(ctx, e.a, line[0][0], line[0][1]);
-      const c1 = snapCorner(ctx, e.b, line[line.length - 1][0], line[line.length - 1][1]);
-      line[0] = [c0[0], c0[1]];
-      line[line.length - 1] = [c1[0], c1[1]];
-      addWalkPair(ctx, line, false, -1, e.id);
+      lines.push({
+        line,
+        c0: snapCorner(ctx, e.a, line[0][0], line[0][1]),
+        c1: snapCorner(ctx, e.b, line[line.length - 1][0], line[line.length - 1][1]),
+        edgeId: e.id
+      });
     }
+  }
+  resolveCorners(ctx);
+  for (const L of lines) {
+    L.line[0] = [L.c0[0], L.c0[1]];
+    L.line[L.line.length - 1] = [L.c1[0], L.c1[1]];
+    addWalkPair(ctx, L.line, false, -1, L.edgeId);
   }
 
   // Crossings: link kerb corners that are neighbours around the intersection.
@@ -2573,6 +2639,38 @@ function buildLandmarks(ctx) {
 }
 
 /**
+ * Nearest standable sidewalk point: like {@link walkAt} but never returns a
+ * position in the middle of a crosswalk.
+ * @param {object} city City data.
+ * @param {number} x Query x.
+ * @param {number} z Query z.
+ * @param {number[]} out Output `[x, z]`.
+ * @returns {number[]} `out`.
+ */
+function sidewalkPoint(city, x, z, out) {
+  const hit = walkAt(city, x, z);
+  if (!hit) {
+    out[0] = x;
+    out[1] = z;
+    return out;
+  }
+  if (!hit.walk.crossing) {
+    out[0] = hit.point[0];
+    out[1] = hit.point[1];
+    return out;
+  }
+  const pts = hit.walk.pts;
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  const da = (a[0] - x) * (a[0] - x) + (a[1] - z) * (a[1] - z);
+  const db = (b[0] - x) * (b[0] - x) + (b[1] - z) * (b[1] - z);
+  const p = da <= db ? a : b;
+  out[0] = p[0];
+  out[1] = p[1];
+  return out;
+}
+
+/**
  * Places the player, traffic, pedestrian, police and mission spawn points.
  * @param {object} ctx Generation context.
  * @param {object} city The assembled city (lanes/walks already final).
@@ -2633,17 +2731,15 @@ function buildSpawns(ctx, city) {
     ? ctx.lots[ctx.superblocks[ctx.sbPlaza].lotId] : null;
   const px = plazaLot ? plazaLot.x : 0;
   const pz = plazaLot ? plazaLot.z + (plazaLot.d * 0.5 + 12) : 0;
-  const near = walkAt(city, px, pz);
-  if (near) {
-    const dx = px - near.point[0];
-    const dz = pz - near.point[1];
+  sidewalkPoint(city, px, pz, _pp);
+  {
+    const dx = px - _pp[0];
+    const dz = pz - _pp[1];
     const l = Math.hypot(dx, dz) || 1;
     spawns.player = {
-      x: near.point[0], y: SIDEWALK_H, z: near.point[1],
+      x: _pp[0], y: SIDEWALK_H, z: _pp[1],
       yaw: yawFromDir(dx / l, dz / l)
     };
-  } else {
-    spawns.player = { x: px, y: SIDEWALK_H, z: pz, yaw: 0 };
   }
 
   // --- police ------------------------------------------------------------
@@ -2654,9 +2750,9 @@ function buildSpawns(ctx, city) {
   for (let i = 0; i < ring.length; i++) {
     const tx = sx + ring[i][0];
     const tz = sz + ring[i][1];
-    const hit = walkAt(city, tx, tz);
-    const x = hit ? hit.point[0] : tx;
-    const z = hit ? hit.point[1] : tz;
+    sidewalkPoint(city, tx, tz, _pp);
+    const x = _pp[0];
+    const z = _pp[1];
     const dx = sx - x;
     const dz = sz - z;
     const l = Math.hypot(dx, dz) || 1;
@@ -2671,13 +2767,8 @@ function buildSpawns(ctx, city) {
    * @returns {void}
    */
   const addMission = (name, x, z) => {
-    const hit = walkAt(city, x, z);
-    spawns.missionPoints.push({
-      x: hit ? hit.point[0] : x,
-      y: SIDEWALK_H,
-      z: hit ? hit.point[1] : z,
-      name
-    });
+    sidewalkPoint(city, x, z, _pp);
+    spawns.missionPoints.push({ x: _pp[0], y: SIDEWALK_H, z: _pp[1], name });
   };
   /**
    * @param {string} kind Landmark kind.

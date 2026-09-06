@@ -1416,3 +1416,561 @@ function buildRoadMarkings(bc) {
     }
   }
 }
+
+/* ------------------------------------------------------------ lot surfaces */
+
+/**
+ * Emits a convex polygon with a Newell normal and planar UVs.
+ * @param {MeshBuilder} mb Target builder.
+ * @param {number[][]} pts World-space points in CCW order seen from the front face.
+ * @param {number[]} color Vertex colour.
+ * @param {number} uvScale Tiles per metre.
+ * @returns {void}
+ */
+function pushPoly(mb, pts, color, uvScale) {
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    nx += (a[1] - b[1]) * (a[2] + b[2]);
+    ny += (a[2] - b[2]) * (a[0] + b[0]);
+    nz += (a[0] - b[0]) * (a[1] + b[1]);
+  }
+  const len = Math.hypot(nx, ny, nz) || 1;
+  nx /= len; ny /= len; nz /= len;
+  const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+  const base = mb.vcount;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    let u, v;
+    if (ay >= ax && ay >= az) { u = p[0]; v = p[2]; } else if (ax >= az) { u = p[2]; v = p[1]; } else { u = p[0]; v = p[1]; }
+    mb.vert(p[0], p[1], p[2], nx, ny, nz, u * uvScale, v * uvScale, color[0], color[1], color[2]);
+  }
+  for (let i = 2; i < pts.length; i++) mb.tri(base, base + i - 1, base + i);
+}
+
+/**
+ * Builds the raised pavement, kerb ring and interior surface of every city block, plus the
+ * collision slab that makes the sidewalk 15 cm higher than the road.
+ * @param {object} bc Build context.
+ * @returns {void}
+ */
+function buildLotSurfaces(bc) {
+  const lots = bc.city.lots || [];
+  const walkCol = [0.86, 0.86, 0.88];
+  const kerbCol = [0.74, 0.74, 0.76];
+  const grassCol = [0.42, 0.72, 0.34];
+  const asphaltCol = [0.9, 0.9, 0.92];
+  const plazaCol = [0.92, 0.9, 0.88];
+  const rb = bc.roadBox;
+
+  for (let i = 0; i < lots.length; i++) {
+    const l = lots[i];
+    if (l.kind === 'water' || l.surface === 'water' || l.surface === 'sand') continue;
+    const x0 = l.x0 !== undefined ? l.x0 : l.x - l.w * 0.5;
+    const z0 = l.z0 !== undefined ? l.z0 : l.z - l.d * 0.5;
+    const x1 = l.x1 !== undefined ? l.x1 : l.x + l.w * 0.5;
+    const z1 = l.z1 !== undefined ? l.z1 : l.z + l.d * 0.5;
+    // Fringe lots outside the road network keep the natural terrain.
+    if (x0 < rb[0] - 6 || z0 < rb[1] - 6 || x1 > rb[2] + 6 || z1 > rb[3] + 6) continue;
+    const w = x1 - x0, d = z1 - z0;
+    if (w < 4 || d < 4) continue;
+    bc.raised[i] = 1;
+
+    const cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
+    const kerb = bc.coarse.at(cx, cz, 'kerb');
+    const shade = 0.92 + hash2(Math.round(cx), Math.round(cz), bc.seed + 3) * 0.14;
+    const kc = [kerbCol[0] * shade, kerbCol[1] * shade, kerbCol[2] * shade];
+    // Kerb ring: four boxes so the vertical face reads as a real kerb from the road.
+    const kh = (SIDEWALK_H + 0.02) * 0.5;
+    kerb.addBox(cx, kh, z0 + KERB_W * 0.5, w * 0.5, kh, KERB_W * 0.5, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
+    kerb.addBox(cx, kh, z1 - KERB_W * 0.5, w * 0.5, kh, KERB_W * 0.5, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
+    kerb.addBox(x0 + KERB_W * 0.5, kh, cz, KERB_W * 0.5, kh, d * 0.5 - KERB_W, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
+    kerb.addBox(x1 - KERB_W * 0.5, kh, cz, KERB_W * 0.5, kh, d * 0.5 - KERB_W, 0, { color: kc, uScale: 0.5, faces: ALL_FACES & ~NY });
+
+    const ix0 = x0 + KERB_W, iz0 = z0 + KERB_W, ix1 = x1 - KERB_W, iz1 = z1 - KERB_W;
+    const walkW = Math.min(3.0 - KERB_W, Math.min(w, d) * 0.24);
+    const surf = l.surface || 'concrete';
+    const interiorKey = l.kind === 'park' ? (surf === 'grass' ? 'grass' : 'terrain')
+      : l.kind === 'parking' ? 'asphalt'
+        : l.kind === 'plaza' ? 'plaza' : null;
+    const uvWalk = 1 / 3.6;
+
+    if (!interiorKey) {
+      // Plain pavement over the whole block; buildings sit on top of it.
+      bc.coarse.at(cx, cz, 'sidewalk')
+        .addFlatQuad(ix0, iz0, ix1, iz1, SIDEWALK_H,
+          ix0 * uvWalk, iz0 * uvWalk, ix1 * uvWalk, iz1 * uvWalk, walkCol);
+    } else {
+      const jx0 = ix0 + walkW, jz0 = iz0 + walkW, jx1 = ix1 - walkW, jz1 = iz1 - walkW;
+      const sw = bc.coarse.at(cx, cz, 'sidewalk');
+      sw.addFlatQuad(ix0, iz0, ix1, jz0, SIDEWALK_H, ix0 * uvWalk, iz0 * uvWalk, ix1 * uvWalk, jz0 * uvWalk, walkCol);
+      sw.addFlatQuad(ix0, jz1, ix1, iz1, SIDEWALK_H, ix0 * uvWalk, jz1 * uvWalk, ix1 * uvWalk, iz1 * uvWalk, walkCol);
+      sw.addFlatQuad(ix0, jz0, jx0, jz1, SIDEWALK_H, ix0 * uvWalk, jz0 * uvWalk, jx0 * uvWalk, jz1 * uvWalk, walkCol);
+      sw.addFlatQuad(jx1, jz0, ix1, jz1, SIDEWALK_H, jx1 * uvWalk, jz0 * uvWalk, ix1 * uvWalk, jz1 * uvWalk, walkCol);
+      const col = interiorKey === 'grass' ? grassCol : interiorKey === 'asphalt' ? asphaltCol : plazaCol;
+      const uv = interiorKey === 'grass' ? 1 / 7 : interiorKey === 'asphalt' ? 1 / 9 : 1 / 3;
+      bc.coarse.at(cx, cz, interiorKey)
+        .addFlatQuad(jx0, jz0, jx1, jz1, SIDEWALK_H, jx0 * uv, jz0 * uv, jx1 * uv, jz1 * uv, col);
+      if (interiorKey === 'asphalt' && bc.markRects) {
+        // Parking bays: two rows of stalls with painted dividers.
+        const bay = 2.6;
+        const rows = Math.max(1, Math.floor((jz1 - jz0) / 5.4));
+        const mb = bc.coarse.at(cx, cz, 'mark');
+        for (let ry = 0; ry < rows; ry++) {
+          const zc = jz0 + (ry + 0.5) * ((jz1 - jz0) / rows);
+          const count = Math.floor((jx1 - jx0) / bay);
+          for (let s = 0; s < count; s++) {
+            const xc = jx0 + (s + 0.5) * bay;
+            mb.addOrientedQuad(xc, zc, MARK_Y + SIDEWALK_H, bay * 0.5, 2.4, 0, 1, bc.markRects.parking, [1, 1, 1]);
+          }
+        }
+      }
+    }
+
+    if (bc.collision) {
+      bc.bodies.push(bc.collision.addBox(cx, SIDEWALK_H * 0.5, cz, w * 0.5, SIDEWALK_H * 0.5, d * 0.5,
+        0, 'kerb', { lotId: l.id }));
+    }
+  }
+}
+
+/* -------------------------------------------------------------- buildings */
+
+/**
+ * Places a box expressed in a building's local frame.
+ * @param {MeshBuilder} mb Target builder.
+ * @param {object} b Building record.
+ * @param {number} lx Local x offset.
+ * @param {number} y World y centre.
+ * @param {number} lz Local z offset.
+ * @param {number} hx Half extent x.
+ * @param {number} hy Half extent y.
+ * @param {number} hz Half extent z.
+ * @param {object} opt Options forwarded to {@link MeshBuilder#addBox}.
+ * @returns {void}
+ */
+function localBox(mb, b, lx, y, lz, hx, hy, hz, opt) {
+  const rot = b.rot || 0;
+  const c = Math.cos(rot), s = Math.sin(rot);
+  mb.addBox(b.x + lx * c + lz * s, y, b.z - lx * s + lz * c, hx, hy, hz, rot, opt);
+}
+
+/**
+ * Transforms a local (x, z) offset of a building into world space.
+ * @param {object} b Building record.
+ * @param {number} lx Local x.
+ * @param {number} lz Local z.
+ * @param {number[]} out Destination `[x, z]`.
+ * @returns {number[]} out
+ */
+function localXZ(b, lx, lz, out) {
+  const rot = b.rot || 0;
+  const c = Math.cos(rot), s = Math.sin(rot);
+  out[0] = b.x + lx * c + lz * s;
+  out[1] = b.z - lx * s + lz * c;
+  return out;
+}
+
+/**
+ * Adds a hip (pitched) roof over a building's top storey.
+ * @param {object} bc Build context.
+ * @param {object} b Building record.
+ * @param {number} y0 Eaves height.
+ * @param {number} rise Ridge height above the eaves.
+ * @param {number} ov Overhang in metres.
+ * @param {number[]} color Roof colour.
+ * @returns {void}
+ */
+function addHipRoof(bc, b, y0, rise, ov, color) {
+  const mb = bc.chunks.at(b.x, b.z, 'roof');
+  const W = b.w * 0.5 + ov, D = b.d * 0.5 + ov;
+  const along = W >= D;
+  const ridge = along ? Math.max(0.4, W - D * 0.75) : Math.max(0.4, D - W * 0.75);
+  const p = [0, 0];
+  const P = (lx, ly, lz) => { localXZ(b, lx, lz, p); return [p[0], ly, p[1]]; };
+  const y1 = y0 + rise;
+  const c0 = P(-W, y0, -D), c1 = P(W, y0, -D), c2 = P(W, y0, D), c3 = P(-W, y0, D);
+  if (along) {
+    const r0 = P(-ridge, y1, 0), r1 = P(ridge, y1, 0);
+    pushPoly(mb, [c0, c1, r1, r0], color, 0.5);
+    pushPoly(mb, [c2, c3, r0, r1], color, 0.5);
+    pushPoly(mb, [c1, c2, r1], color, 0.5);
+    pushPoly(mb, [c3, c0, r0], color, 0.5);
+  } else {
+    const r0 = P(0, y1, -ridge), r1 = P(0, y1, ridge);
+    pushPoly(mb, [c1, c2, r1, r0], color, 0.5);
+    pushPoly(mb, [c3, c0, r0, r1], color, 0.5);
+    pushPoly(mb, [c0, c1, r0], color, 0.5);
+    pushPoly(mb, [c2, c3, r1], color, 0.5);
+  }
+  // Fascia board so the roof does not look paper thin from below.
+  localBox(mb, b, 0, y0 - 0.12, 0, W, 0.12, D, { color: [color[0] * 0.7, color[1] * 0.7, color[2] * 0.7], uScale: 0.6 });
+}
+
+/**
+ * Adds a north-light sawtooth roof over a warehouse.
+ * @param {object} bc Build context.
+ * @param {object} b Building record.
+ * @param {number} y0 Roof base height.
+ * @param {number[]} color Roof colour.
+ * @param {number[]} glassColor Glazing colour.
+ * @returns {void}
+ */
+function addSawtoothRoof(bc, b, y0, color, glassColor) {
+  const mb = bc.chunks.at(b.x, b.z, 'roof');
+  const gl = bc.chunks.at(b.x, b.z, 'facadeGlass');
+  const W = b.w * 0.5, D = b.d * 0.5;
+  const teeth = clamp(Math.round(b.w / 9), 2, 7);
+  const step = b.w / teeth;
+  const rise = clamp(b.w * 0.06, 1.2, 2.6);
+  const p = [0, 0];
+  const P = (lx, ly, lz) => { localXZ(b, lx, lz, p); return [p[0], ly, p[1]]; };
+  for (let k = 0; k < teeth; k++) {
+    const xa = -W + k * step, xb = xa + step;
+    // Sloped pane rising towards +x, then a vertical glazed face dropping back.
+    pushPoly(mb, [P(xa, y0, -D), P(xb, y0 + rise, -D), P(xb, y0 + rise, D), P(xa, y0, D)], color, 0.4);
+    pushPoly(gl, [P(xb, y0 + rise, -D), P(xb, y0, -D), P(xb, y0, D), P(xb, y0 + rise, D)], glassColor, 0.16);
+    pushPoly(mb, [P(xa, y0, -D), P(xa, y0, -D + 0.01), P(xb, y0 + rise, -D)], color, 0.4);
+  }
+}
+
+/**
+ * Adds roof clutter: stair bulkhead, AC units, water tank, vents, aerials and, on tall
+ * downtown blocks, a lit rooftop billboard.
+ * @param {object} bc Build context.
+ * @param {object} b Building record.
+ * @param {number} roofY Roof surface height.
+ * @param {number} hw Half width of the top tier.
+ * @param {number} hd Half depth of the top tier.
+ * @param {Rand} rng Deterministic random source.
+ * @param {number[]} wallCol Wall colour.
+ * @returns {void}
+ */
+function addRoofClutter(bc, b, roofY, hw, hd, rng, wallCol) {
+  const det = bc.chunks.at(b.x, b.z, 'detail');
+  const roof = bc.chunks.at(b.x, b.z, 'roof');
+  const ix = Math.max(0.6, hw - 1.6), iz = Math.max(0.6, hd - 1.6);
+  const grey = [0.62, 0.63, 0.65];
+  const dark = [0.34, 0.35, 0.37];
+
+  // Stair / lift bulkhead.
+  if (hw > 3 && hd > 3) {
+    const bw = clamp(hw * 0.34, 1.1, 3.2), bd = clamp(hd * 0.34, 1.1, 3.0);
+    const bx = rng.range(-ix + bw, ix - bw), bz = rng.range(-iz + bd, iz - bd);
+    const bh = rng.range(2.2, 3.4);
+    localBox(roof, b, bx, roofY + bh * 0.5, bz, bw, bh * 0.5, bd, {
+      color: [wallCol[0] * 0.85, wallCol[1] * 0.85, wallCol[2] * 0.85], uScale: 0.42
+    });
+    localBox(det, b, bx, roofY + bh + 0.06, bz, bw + 0.14, 0.07, bd + 0.14, { color: dark, uScale: 0.5 });
+  }
+
+  // Air conditioning units with fan cowls.
+  const acs = rng.int(1, hw > 8 ? 5 : 3);
+  for (let i = 0; i < acs; i++) {
+    const w = rng.range(0.7, 1.15), d = rng.range(0.55, 0.95), h = rng.range(0.55, 0.95);
+    const x = rng.range(-ix + w, ix - w), z = rng.range(-iz + d, iz - d);
+    localBox(det, b, x, roofY + h * 0.5, z, w, h * 0.5, d, { color: grey, uScale: 1.1 });
+    const p = localXZ(b, x, z, [0, 0]);
+    det.addGeometry(bc.proto.fan, trs(bc.m16, p[0], roofY + h + 0.05, p[1], b.rot || 0, 1, 1, 1), dark);
+    localBox(det, b, x, roofY + h * 0.55, z + d + 0.03, w * 0.8, h * 0.28, 0.03, { color: dark, uScale: 2 });
+  }
+
+  // Water tank on legs.
+  if (hw > 4 && hd > 4 && rng.chance(0.55)) {
+    const r = rng.range(1.0, 1.7);
+    const x = rng.range(-ix + r, ix - r), z = rng.range(-iz + r, iz - r);
+    const p = localXZ(b, x, z, [0, 0]);
+    const legH = 0.9, tankH = rng.range(1.8, 2.6);
+    for (let l = 0; l < 4; l++) {
+      const a = (l / 4) * Math.PI * 2 + 0.78;
+      localBox(det, b, x + Math.cos(a) * r * 0.72, roofY + legH * 0.5, z + Math.sin(a) * r * 0.72,
+        0.08, legH * 0.5, 0.08, { color: dark, uScale: 2 });
+    }
+    det.addGeometry(bc.proto.tank, trs(bc.m16, p[0], roofY + legH + tankH * 0.5, p[1], 0, r, tankH * 0.5, r),
+      [0.46, 0.4, 0.34]);
+    det.addGeometry(bc.proto.tankTop, trs(bc.m16, p[0], roofY + legH + tankH + 0.28, p[1], 0, r * 1.04, 1, r * 1.04),
+      [0.4, 0.35, 0.3]);
+  }
+
+  // Vent pipes.
+  const vents = rng.int(1, 4);
+  for (let i = 0; i < vents; i++) {
+    const x = rng.range(-ix, ix), z = rng.range(-iz, iz);
+    const h = rng.range(0.5, 1.3);
+    const p = localXZ(b, x, z, [0, 0]);
+    det.addGeometry(bc.proto.vent, trs(bc.m16, p[0], roofY + h * 0.5, p[1], 0, 1, h * 0.5, 1), grey);
+  }
+
+  // Aerial mast with cross arms.
+  if (b.h > 24 && rng.chance(0.5)) {
+    const x = rng.range(-ix, ix), z = rng.range(-iz, iz);
+    const h = rng.range(3.5, 9);
+    const p = localXZ(b, x, z, [0, 0]);
+    det.addGeometry(bc.proto.mast, trs(bc.m16, p[0], roofY + h * 0.5, p[1], 0, 1, h * 0.5, 1), dark);
+    for (let a = 0; a < 3; a++) {
+      const yy = roofY + h * (0.55 + a * 0.14);
+      localBox(det, b, x, yy, z, 0.62 - a * 0.14, 0.03, 0.03, { color: dark, uScale: 2 });
+    }
+    bc.lights.push({ x: p[0], y: roofY + h, z: p[1], r: 1.4, g: 0.12, b: 0.12, radius: 9, intensity: 1.2, night: true, blink: true });
+  }
+}
+
+/**
+ * Adds the emissive signage a building carries (shopfront strips, vertical blade signs and
+ * rooftop letters). Colours come straight from citygen and are HDR, so bloom picks them up.
+ * @param {object} bc Build context.
+ * @param {object} b Building record.
+ * @returns {void}
+ */
+function addBuildingSigns(bc, b) {
+  const signs = b.signs;
+  if (!signs || !signs.length) return;
+  const rot = b.rot || 0;
+  const c = Math.cos(rot), s = Math.sin(rot);
+  for (let i = 0; i < signs.length; i++) {
+    const sg = signs[i];
+    const w = Math.max(0.6, sg.w || 2.4);
+    const h = Math.max(0.4, sg.h || 1.0);
+    const lx = (sg.x !== undefined ? sg.x : b.x) - b.x;
+    const lz = (sg.z !== undefined ? sg.z : b.z) - b.z;
+    const wx = b.x + lx * c + lz * s;
+    const wz = b.z - lx * s + lz * c;
+    const y = (sg.y !== undefined ? sg.y : b.h * 0.5) + h * 0.5;
+    const alongX = Math.abs(sg.nx || 0) < 0.5;
+    const hx = alongX ? w * 0.5 : 0.13;
+    const hz = alongX ? 0.13 : w * 0.5;
+    const col = sg.color || [2.4, 1.6, 3.0];
+    const key = 'neon' + (Math.abs(b.id + i) % 3);
+    const mb = bc.chunks.at(wx, wz, key);
+    mb.addBox(wx, y, wz, hx, h * 0.5, hz, rot, { color: col, uv: 'fit', tileW: w, tileH: h });
+    // Dark mounting frame just behind the neon face.
+    bc.chunks.at(wx, wz, 'detail').addBox(
+      wx - (sg.nx || 0) * 0.1, y, wz - (sg.nz || 0) * 0.1,
+      hx * 1.04, h * 0.5 + 0.07, hz * 1.04, rot, { color: [0.12, 0.12, 0.14], uScale: 1.5 });
+    bc.lights.push({
+      x: wx + (sg.nx || 0) * 0.6, y, z: wz + (sg.nz || 0) * 0.6,
+      r: clamp(col[0] * 0.4, 0, 1.6), g: clamp(col[1] * 0.4, 0, 1.6), b: clamp(col[2] * 0.4, 0, 1.6),
+      radius: 7 + w, intensity: 0.9, night: true, neon: true
+    });
+    bc.signMaterials.add(key);
+  }
+}
+
+/**
+ * Adds apartment balconies on the two long faces, capped so a tall block never explodes the
+ * triangle budget.
+ * @param {object} bc Build context.
+ * @param {object} b Building record.
+ * @param {number} y0 First balcony floor height.
+ * @param {number} floors Number of storeys above `y0`.
+ * @param {number} floorH Storey height.
+ * @param {number[]} col Slab colour.
+ * @param {Rand} rng Random source.
+ * @returns {void}
+ */
+function addBalconies(bc, b, y0, floors, floorH, col, rng) {
+  const mb = bc.chunks.at(b.x, b.z, 'wall');
+  const det = bc.chunks.at(b.x, b.z, 'detail');
+  const hw = b.w * 0.5, hd = b.d * 0.5;
+  const wide = b.w >= b.d;
+  const span = wide ? hw : hd;
+  const perFloor = clamp(Math.floor(span / 2.6), 1, 3);
+  const maxFloors = Math.min(floors, Math.ceil(16 / (perFloor * 2)));
+  const bw = Math.min(1.6, span / (perFloor + 0.4));
+  const depth = 0.85;
+  const rail = [0.3, 0.32, 0.35];
+  for (let f = 0; f < maxFloors; f++) {
+    const y = y0 + f * floorH + 0.1;
+    for (let sideI = 0; sideI < 2; sideI++) {
+      const sgn = sideI === 0 ? 1 : -1;
+      for (let k = 0; k < perFloor; k++) {
+        const t = (k + 0.5) / perFloor * 2 - 1;
+        const along = t * (span - bw - 0.3);
+        const lx = wide ? along : sgn * (hw + depth * 0.5);
+        const lz = wide ? sgn * (hd + depth * 0.5) : along;
+        const ex = wide ? bw : depth * 0.5;
+        const ez = wide ? depth * 0.5 : bw;
+        localBox(mb, b, lx, y, lz, ex, 0.07, ez, { color: col, uScale: 0.8 });
+        // Railing: outer bar plus two returns.
+        const oy = y + 0.47;
+        if (wide) {
+          localBox(det, b, lx, oy, lz + sgn * (depth * 0.5 - 0.04), ex, 0.42, 0.035, { color: rail, uScale: 1.4 });
+          localBox(det, b, lx - ex, oy, lz, 0.035, 0.42, ez, { color: rail, uScale: 1.4 });
+          localBox(det, b, lx + ex, oy, lz, 0.035, 0.42, ez, { color: rail, uScale: 1.4 });
+        } else {
+          localBox(det, b, lx + sgn * (depth * 0.5 - 0.04), oy, lz, 0.035, 0.42, ez, { color: rail, uScale: 1.4 });
+          localBox(det, b, lx, oy, lz - ez, ex, 0.42, 0.035, { color: rail, uScale: 1.4 });
+          localBox(det, b, lx, oy, lz + ez, ex, 0.42, 0.035, { color: rail, uScale: 1.4 });
+        }
+      }
+    }
+    if (rng.chance(0.12)) break;
+  }
+}
+
+/**
+ * Builds one complete building: shopfront, facade tiers with setbacks, roof, clutter,
+ * balconies, signage and the matching collision boxes.
+ * @param {object} bc Build context.
+ * @param {object} b Building record.
+ * @returns {void}
+ */
+function buildBuilding(bc, b) {
+  const rng = new Rand((((bc.seed ^ 0x9e3779b9) >>> 0) + b.id * 2654435761) >>> 0);
+  const pal = b.palette || {};
+  const wallCol = pal.wall || [0.5, 0.5, 0.52];
+  const trimCol = pal.trim || [0.38, 0.38, 0.4];
+  const glassCol = pal.glass || [0.36, 0.46, 0.56];
+  const style = b.style || 'office';
+  const rot = b.rot || 0;
+  const hw = b.w * 0.5, hd = b.d * 0.5;
+  const H = Math.max(3, b.h);
+  const roofKind = b.roofKind || 'flat';
+  const floors = Math.max(1, b.floors || Math.round(H / FLOOR_H));
+  const floorH = H / floors;
+
+  const facadeKey = style === 'tower' ? 'facadeGlass'
+    : style === 'office' ? 'facadeOffice'
+      : style === 'apartment' ? 'facadeApt'
+        : style === 'shop' ? 'facadeApt'
+          : style === 'house' ? 'brick' : 'wall';
+  const facadeCol = (style === 'tower' || style === 'office')
+    ? [lerp(wallCol[0], glassCol[0], 0.55), lerp(wallCol[1], glassCol[1], 0.55), lerp(wallCol[2], glassCol[2], 0.55)]
+    : wallCol;
+  const commercial = style === 'shop' || style === 'office' || style === 'tower';
+  const groundH = commercial ? Math.min(SHOP_H, H * 0.5) : 0;
+
+  // --- ground floor -------------------------------------------------------
+  if (groundH > 1.2) {
+    const shop = bc.chunks.at(b.x, b.z, 'shop');
+    localBox(shop, b, 0, groundH * 0.5, 0, hw + 0.16, groundH * 0.5, hd + 0.16, {
+      color: [lerp(wallCol[0], 1, 0.15), lerp(wallCol[1], 1, 0.15), lerp(wallCol[2], 1, 0.15)],
+      faces: SIDE_FACES, uv: 'fit', tileW: 6.0, tileH: groundH
+    });
+    const det = bc.chunks.at(b.x, b.z, 'detail');
+    localBox(det, b, 0, groundH + 0.16, 0, hw + 0.52, 0.16, hd + 0.52, { color: trimCol, uScale: 0.7 });
+    // Awning strip on the street-facing side.
+    if (style === 'shop') {
+      const f = b.face === undefined ? 3 : b.face;
+      const ax = f === 0 ? hw + 0.7 : f === 2 ? -(hw + 0.7) : 0;
+      const az = f === 1 ? hd + 0.7 : f === 3 ? -(hd + 0.7) : 0;
+      const ex = (f === 0 || f === 2) ? 0.75 : hw * 0.7;
+      const ez = (f === 0 || f === 2) ? hd * 0.7 : 0.75;
+      localBox(det, b, ax, groundH - 0.55, az, ex, 0.07, ez, {
+        color: [0.55, 0.14, 0.16], uScale: 1.2
+      });
+    }
+  }
+
+  // --- facade tiers -------------------------------------------------------
+  const tiers = [];
+  const bodyTop = roofKind === 'hip' ? H - Math.min(H * 0.22, 2.6) : H;
+  if ((roofKind === 'setback' || b.hasSetback) && bodyTop - groundH > 22) {
+    const t0 = groundH, t3 = bodyTop;
+    const s1 = t0 + (t3 - t0) * 0.55, s2 = t0 + (t3 - t0) * 0.82;
+    tiers.push({ y0: t0, y1: s1, k: 1 });
+    tiers.push({ y0: s1, y1: s2, k: 0.83 });
+    tiers.push({ y0: s2, y1: t3, k: 0.66 });
+  } else {
+    tiers.push({ y0: groundH, y1: bodyTop, k: 1 });
+  }
+
+  const fac = bc.chunks.at(b.x, b.z, facadeKey);
+  const roofMb = bc.chunks.at(b.x, b.z, 'roof');
+  for (let t = 0; t < tiers.length; t++) {
+    const tr = tiers[t];
+    const th = tr.y1 - tr.y0;
+    if (th < 0.4) continue;
+    const kw = hw * tr.k, kd = hd * tr.k;
+    localBox(fac, b, 0, (tr.y0 + tr.y1) * 0.5, 0, kw, th * 0.5, kd, {
+      color: facadeCol, faces: SIDE_FACES, uv: 'fit',
+      tileW: FACADE_TILE_W, tileH: Math.max(3.2, FACADE_TILE_H)
+    });
+    // Corner pilasters give the silhouette some relief.
+    if (style !== 'house' && kw > 3 && kd > 3) {
+      const pw = 0.22;
+      for (let cnr = 0; cnr < 4; cnr++) {
+        const sx = cnr < 2 ? 1 : -1;
+        const sz = (cnr % 2 === 0) ? 1 : -1;
+        localBox(bc.chunks.at(b.x, b.z, 'wall'), b, sx * kw, (tr.y0 + tr.y1) * 0.5, sz * kd,
+          pw, th * 0.5, pw, { color: trimCol, uScale: 0.5 });
+      }
+    }
+    // Tier cap + parapet.
+    const capY = tr.y1;
+    localBox(roofMb, b, 0, capY + 0.09, 0, kw + 0.2, 0.09, kd + 0.2, { color: trimCol, uScale: 0.5 });
+    const ph = t === tiers.length - 1 ? 0.95 : 0.7;
+    const pt = 0.22;
+    localBox(roofMb, b, 0, capY + 0.18 + ph * 0.5, kd + 0.2 - pt, kw + 0.2, ph * 0.5, pt, { color: trimCol, uScale: 0.6 });
+    localBox(roofMb, b, 0, capY + 0.18 + ph * 0.5, -(kd + 0.2 - pt), kw + 0.2, ph * 0.5, pt, { color: trimCol, uScale: 0.6 });
+    localBox(roofMb, b, kw + 0.2 - pt, capY + 0.18 + ph * 0.5, 0, pt, ph * 0.5, kd + 0.2 - pt * 2, { color: trimCol, uScale: 0.6 });
+    localBox(roofMb, b, -(kw + 0.2 - pt), capY + 0.18 + ph * 0.5, 0, pt, ph * 0.5, kd + 0.2 - pt * 2, { color: trimCol, uScale: 0.6 });
+    // Roof deck.
+    const deckCol = [0.28, 0.28, 0.29];
+    localBox(roofMb, b, 0, capY + 0.22, 0, kw + 0.18, 0.04, kd + 0.18, { color: deckCol, uScale: 0.4, faces: PY });
+    if (bc.collision && t > 0) {
+      const p = localXZ(b, 0, 0, [0, 0]);
+      bc.bodies.push(bc.collision.addBox(p[0], (tr.y0 + tr.y1) * 0.5, p[1], kw, th * 0.5, kd, rot,
+        'building', { buildingId: b.id, tier: t }));
+    }
+  }
+
+  const top = tiers[tiers.length - 1];
+  const topHw = hw * top.k, topHd = hd * top.k;
+  const roofY = top.y1 + 0.26;
+
+  // --- roof treatment -----------------------------------------------------
+  if (roofKind === 'hip') {
+    addHipRoof(bc, b, bodyTop, Math.min(H * 0.22, 2.6) + 0.6, 0.45,
+      [trimCol[0] * 0.8 + 0.12, trimCol[1] * 0.72, trimCol[2] * 0.7]);
+  } else if (roofKind === 'sawtooth') {
+    addSawtoothRoof(bc, b, top.y1 + 0.3, [trimCol[0] * 0.9, trimCol[1] * 0.9, trimCol[2] * 0.92], glassCol);
+  } else if (roofKind === 'dome') {
+    const det = bc.chunks.at(b.x, b.z, 'detail');
+    const r = Math.min(topHw, topHd);
+    det.addGeometry(bc.proto.dome, trs(bc.m16, b.x, roofY, b.z, rot, topHw * 0.98, r * 0.62, topHd * 0.98),
+      [lerp(trimCol[0], 0.8, 0.3), lerp(trimCol[1], 0.82, 0.3), lerp(trimCol[2], 0.85, 0.3)]);
+  }
+  if (roofKind !== 'hip' && roofKind !== 'dome') {
+    addRoofClutter(bc, b, roofY, topHw, topHd, rng, wallCol);
+  }
+
+  // Rooftop billboard on tall commercial blocks.
+  if (H > 22 && (style === 'tower' || style === 'office' || style === 'warehouse') && rng.chance(0.22)) {
+    const key = 'billboard' + (b.id % 2);
+    const mb = bc.chunks.at(b.x, b.z, key);
+    const det = bc.chunks.at(b.x, b.z, 'detail');
+    const bw = Math.min(topHw * 1.6, 7.5);
+    const bh = bw * 0.42;
+    const y = roofY + 1.4 + bh * 0.5;
+    const face = topHw >= topHd ? 0 : 1;
+    const lx = face === 0 ? 0 : topHw * 0.2;
+    const lz = face === 0 ? topHd * 0.2 : 0;
+    const ex = face === 0 ? bw : 0.16;
+    const ez = face === 0 ? 0.16 : bw;
+    localBox(mb, b, lx, y, lz, ex, bh * 0.5, ez, { color: [1, 1, 1], uv: 'fit', tileW: bw * 2, tileH: bh });
+    localBox(det, b, lx - (face === 0 ? bw * 0.6 : 0), roofY + 0.7 + bh * 0.5, lz - (face === 0 ? 0 : bw * 0.6),
+      0.12, bh * 0.5 + 0.7, 0.12, { color: [0.2, 0.2, 0.22], uScale: 2 });
+    localBox(det, b, lx + (face === 0 ? bw * 0.6 : 0), roofY + 0.7 + bh * 0.5, lz + (face === 0 ? 0 : bw * 0.6),
+      0.12, bh * 0.5 + 0.7, 0.12, { color: [0.2, 0.2, 0.22], uScale: 2 });
+    const p = localXZ(b, lx, lz, [0, 0]);
+    bc.lights.push({ x: p[0], y: y + bh * 0.6, z: p[1], r: 0.9, g: 0.85, b: 0.7, radius: 12, intensity: 1.1, night: true });
+    bc.billboardMaterials.add(key);
+  }
+
+  // --- balconies ----------------------------------------------------------
+  if (style === 'apartment' && floors > 2) {
+    addBalconies(bc, b, groundH + floorH, floors - 1, floorH,
+      [trimCol[0] * 0.9, trimCol[1] * 0.9, trimCol[2] * 0.9], rng);
+  }
+
+  addBuildingSigns(bc, b);
+
+  // --- collision ----------------------------------------------------------
+  if (bc.collision) {
+    const bodyH = tiers[0].y1;
+    bc.bodies.push(bc.collision.addBox(b.x, bodyH * 0.5, b.z, hw + (groundH > 1.2 ? 0.16 : 0), bodyH * 0.5,
+      hd + (groundH > 1.2 ? 0.16 : 0), rot, 'building', { buildingId: b.id, name: b.name || null }));
+    bc.buildingBodies++;
+  }
+}

@@ -76,7 +76,7 @@ export const GLSL_BRDF = `
 const float PI = 3.141592653589793;
 const float INV_PI = 0.3183098861837907;
 
-/** GGX / Trowbridge-Reitz normal distribution. `a` is the perceptual roughness squared. */
+/** GGX / Trowbridge-Reitz normal distribution. 'a' is the perceptual roughness squared. */
 float D_GGX(float NoH, float a) {
   float a2 = a * a;
   float d = (NoH * a2 - NoH) * NoH + 1.0;
@@ -348,7 +348,7 @@ const vec2 POISSON[12] = vec2[12](
   vec2(-0.4512, -0.1123), vec2(0.0231, 0.6812), vec2(-0.9123, -0.2312)
 );
 
-/** Percentage-closer filtering of one cascade. `texel` is 1/shadowResolution. */
+/** Percentage-closer filtering of one cascade. 'texel' is 1/shadowResolution. */
 float pcfShadow(sampler2D map, vec3 coord, float texel) {
 #if SHADOW_PCF == 0
   float d = texture(map, coord.xy).r;
@@ -377,7 +377,7 @@ float pcfShadow(sampler2D map, vec3 coord, float texel) {
 #endif
 }
 
-/** Projects into cascade `ci` (with normal-offset bias) and filters it. 1 = fully lit. */
+/** Projects into cascade 'ci' (with normal-offset bias) and filters it. 1 = fully lit. */
 float shadowFromCascade(int ci, vec3 worldPos, vec3 N, float NoL) {
   float texelWorld = uCascadeTexel[ci];
   float slope = clamp(1.0 - NoL, 0.0, 1.0);
@@ -444,7 +444,7 @@ mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
 /**
  * Deterministic night-time window lighting. The world position is quantised to a window-sized
  * cell, hashed, and a subset of the cells is lit with a warm (occasionally TV-blue) colour that
- * drifts slowly over time. `mask` comes from the albedo texture alpha channel.
+ * drifts slowly over time. 'mask' comes from the albedo texture alpha channel.
  */
 vec3 windowGlow(vec3 worldPos, float mask, float amount) {
   if (amount <= 0.0 || mask <= 0.001) return vec3(0.0);

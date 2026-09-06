@@ -737,10 +737,6 @@ export class Renderer {
     this.time = 0;
     /** @type {number} */
     this._frameId = 0;
-    /** @type {number} */
-    this._fpsAccum = 0;
-    /** @type {number} */
-    this._fpsFrames = 0;
 
     // ---- lighting environment ----------------------------------------------------------
     /** @type {{direction: Float32Array, color: Float32Array, intensity: number,
@@ -1733,13 +1729,14 @@ export class Renderer {
     this._lightUsed = 0;
     this.stats.frameMs = nowMs() - t0;
     this.stats.batches = this._staticGroups.size + this._instanced.length;
-    this._fpsAccum += dt;
-    this._fpsFrames++;
-    if (this._fpsAccum >= 0.5) {
-      this.stats.fps = this._fpsFrames / this._fpsAccum;
-      this._fpsAccum = 0;
-      this._fpsFrames = 0;
+    // Exponential moving average with a ~0.5 s time constant: stable to read, never zero.
+    if (dt > 1e-5) {
+      const instant = 1 / dt;
+      this.stats.fps = this.stats.fps > 0
+        ? this.stats.fps + (instant - this.stats.fps) * Math.min(1, dt * 2)
+        : instant;
     }
+
   }
 
   /**

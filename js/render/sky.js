@@ -42,9 +42,9 @@ const BETA_R = [5.8e-3, 13.5e-3, 33.1e-3];
 /** Base Mie scattering coefficient per km at sea level (turbidity 1). */
 const BETA_M_BASE = 4.0e-3;
 /** Desaturated Rayleigh coefficients used by the isotropic multiple-scattering term. */
-const BETA_MS = [0.0099, 0.0149, 0.0277];
-/** Softening applied to the optical depth inside the multiple-scattering term. */
-const MS_SOFT = 0.28;
+const BETA_MS = [0.0072, 0.0152, 0.0310];
+/** Softening applied to the sun-path optical depth inside the multiple-scattering term. */
+const MS_SOFT = 0.40;
 /** Mie extinction is a little larger than scattering (single scattering albedo ~0.9). */
 const MIE_ALBEDO = 0.9;
 /** Sample distribution steepness for the view-ray integral (higher = more samples near the eye). */
@@ -219,8 +219,8 @@ const float HM = 1.2;
 const vec3 BETA_R = vec3(5.8e-3, 13.5e-3, 33.1e-3);
 // Desaturated Rayleigh coefficients driving the isotropic multiple-scattering term: real
 // skies keep plenty of blue at low sun because light bounces more than once.
-const vec3 BETA_MS = vec3(0.0099, 0.0149, 0.0277);
-const float MS_SOFT = 0.28;
+const vec3 BETA_MS = vec3(0.0072, 0.0152, 0.0310);
+const float MS_SOFT = 0.40;
 const float STEP_K = 6.0;
 const float CLOUD_ALT_A = 1500.0;
 const float CLOUD_ALT_B = 5400.0;
@@ -309,11 +309,15 @@ vec3 atmosphere(vec3 ro, vec3 rd, out vec3 viewT, out float tGround) {
 
     float sR, sM;
     lightOpticalDepth(p, uSunDir, sR, sM);
-    vec3 tau = BETA_R * (odR + sR) + betaMe * (odM + sM);
-    vec3 T = exp(-min(tau, 60.0));
+    vec3 tauView = BETA_R * odR + betaMe * odM;
+    vec3 tauSun = BETA_R * sR + betaMe * sM;
+    vec3 T = exp(-min(tauView + tauSun, 60.0));
     sumR += T * dR;
     sumM += T * dM;
-    sumMS += exp(-min(tau * MS_SOFT, 60.0)) * (dR + dM);
+    // Multiple scattering: the eye still sees through the full column, but light reaching
+    // the sample has effectively taken a shorter path, which is what keeps a low sun from
+    // draining every last photon out of the blue channel.
+    sumMS += exp(-min(tauView + tauSun * MS_SOFT, 60.0)) * (dR + dM);
   }
 
   viewT = exp(-min(BETA_R * odR + betaMe * odM, 60.0));
@@ -677,8 +681,8 @@ export class Sky {
       windZ: 0.35,
       turbidity: 1.0,
       mieG: 0.76,
-      sunIrradiance: 13.0,
-      multiScatter: 0.35,
+      sunIrradiance: 8.0,
+      multiScatter: 0.25,
       sunAngularRadius: 0.0125,
       moonAngularRadius: 0.026,
       moonElongation: 118.0,
@@ -1149,18 +1153,21 @@ export class Sky {
       const cosZ = (px * sun[0] + py * sun[1] + pz * sun[2]) / pr;
       const sR = HR * Math.exp(-alt / HR) * chapman(pr / HR, cosZ);
       const sM = HM * Math.exp(-alt / HM) * chapman(pr / HM, cosZ);
-      const tau0 = Math.min(BETA_R[0] * (odR + sR) + betaMe * (odM + sM), 60.0);
-      const tau1 = Math.min(BETA_R[1] * (odR + sR) + betaMe * (odM + sM), 60.0);
-      const tau2 = Math.min(BETA_R[2] * (odR + sR) + betaMe * (odM + sM), 60.0);
-      const t0 = Math.exp(-tau0);
-      const t1 = Math.exp(-tau1);
-      const t2 = Math.exp(-tau2);
+      const tv0 = BETA_R[0] * odR + betaMe * odM;
+      const tv1 = BETA_R[1] * odR + betaMe * odM;
+      const tv2 = BETA_R[2] * odR + betaMe * odM;
+      const ts0 = BETA_R[0] * sR + betaMe * sM;
+      const ts1 = BETA_R[1] * sR + betaMe * sM;
+      const ts2 = BETA_R[2] * sR + betaMe * sM;
+      const t0 = Math.exp(-Math.min(tv0 + ts0, 60.0));
+      const t1 = Math.exp(-Math.min(tv1 + ts1, 60.0));
+      const t2 = Math.exp(-Math.min(tv2 + ts2, 60.0));
       sumR0 += t0 * dR; sumR1 += t1 * dR; sumR2 += t2 * dR;
       sumM0 += t0 * dM; sumM1 += t1 * dM; sumM2 += t2 * dM;
       const dms = dR + dM;
-      sumS0 += Math.exp(-tau0 * MS_SOFT) * dms;
-      sumS1 += Math.exp(-tau1 * MS_SOFT) * dms;
-      sumS2 += Math.exp(-tau2 * MS_SOFT) * dms;
+      sumS0 += Math.exp(-Math.min(tv0 + ts0 * MS_SOFT, 60.0)) * dms;
+      sumS1 += Math.exp(-Math.min(tv1 + ts1 * MS_SOFT, 60.0)) * dms;
+      sumS2 += Math.exp(-Math.min(tv2 + ts2 * MS_SOFT, 60.0)) * dms;
     }
 
     const I = this.params.sunIrradiance;
