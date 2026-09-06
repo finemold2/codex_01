@@ -218,24 +218,41 @@
     ];
   }
 
+  function randomTankId() {
+    return TANK_TYPES[Math.floor(Math.random() * TANK_TYPES.length)].id;
+  }
+
+  /** 사람이 직접 고를 수 있는 슬롯 — 전원 AI(관전)일 때만 모든 슬롯이 대상 */
+  function selectableSlots() {
+    const humans = setup.slots.map((s, i) => (s.type === 'human' ? i : -1)).filter((i) => i >= 0);
+    return humans.length ? humans : setup.slots.map((_, i) => i);
+  }
+
   function renderPilots() {
     const strip = $('#pilotStrip');
+    const sel = selectableSlots();
     strip.innerHTML = '';
     setup.slots.forEach((s, i) => {
+      const pickable = sel.indexOf(i) >= 0;
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = 'pilot' + (i === activePilot ? ' is-active' : '');
+      b.className = 'pilot' + (i === activePilot ? ' is-active' : '') + (pickable ? '' : ' is-locked');
+      b.title = pickable ? '이 참가자의 전차를 고릅니다' : 'AI 전차는 무작위로 배정됩니다';
       const tt = tankType(s.tank);
       b.innerHTML =
         `<span class="dot" style="background:${PLAYER_COLORS[i]}"></span>` +
         `<span><span class="p-name">${esc(s.name)}</span><br><span class="p-tank">${esc(tt.name)}</span></span>` +
-        `<span class="p-kind">${s.type === 'ai' ? 'AI' : '사람'}</span>`;
-      b.addEventListener('click', () => {
-        activePilot = i;
-        detailId = s.tank;
-        renderPilots(); renderGrid(); renderDetail();
-        if (typeof Sfx !== 'undefined' && Sfx.click) Sfx.click();
-      });
+        `<span class="p-kind">${s.type === 'ai' ? '무작위' : '선택'}</span>`;
+      if (pickable) {
+        b.addEventListener('click', () => {
+          activePilot = i;
+          detailId = s.tank;
+          renderPilots(); renderGrid(); renderDetail();
+          if (typeof Sfx !== 'undefined' && Sfx.click) Sfx.click();
+        });
+      } else {
+        b.disabled = true;
+      }
       strip.appendChild(b);
     });
   }
@@ -352,9 +369,13 @@
     setup.slots[activePilot].tank = id;
     detailId = id;
     if (typeof Sfx !== 'undefined' && Sfx.select) Sfx.select();
+    // 사람이 여러 명일 때만 다음 사람으로 넘어갑니다 (AI 슬롯은 건너뜁니다)
     if (advance) {
-      const next = (activePilot + 1) % setup.count;
-      activePilot = next;
+      const sel = selectableSlots();
+      if (sel.length > 1) {
+        const k = sel.indexOf(activePilot);
+        activePilot = sel[(k + 1) % sel.length];
+      }
     }
     renderPilots(); renderGrid(); renderDetail();
   }
@@ -363,15 +384,19 @@
     const err = validate();
     if (err) { const e = $('#menuError'); e.textContent = err; e.hidden = false; return; }
     $('#menuError').hidden = true;
-    activePilot = 0;
-    detailId = setup.slots[0].tank;
+    // AI 전차는 자동으로 무작위 배정 — 사람은 자기 전차만 고릅니다
+    const sel = selectableSlots();
+    setup.slots.forEach((s, i) => { if (sel.indexOf(i) < 0) s.tank = randomTankId(); });
+    activePilot = sel[0];
+    detailId = setup.slots[activePilot].tank;
     showScreen('garage');
     renderPilots(); renderFilter(); renderGrid(); renderDetail(); animateDetail();
   }
 
+  /** AI 전차만 다시 뽑습니다 (사람이 고른 전차는 유지) */
   function randomizeAll() {
-    for (const s of setup.slots) s.tank = TANK_TYPES[Math.floor(Math.random() * TANK_TYPES.length)].id;
-    detailId = setup.slots[activePilot].tank;
+    const sel = selectableSlots();
+    setup.slots.forEach((s, i) => { if (sel.indexOf(i) < 0) s.tank = randomTankId(); });
     if (typeof Sfx !== 'undefined' && Sfx.select) Sfx.select();
     renderPilots(); renderGrid(); renderDetail();
   }
@@ -651,7 +676,9 @@
       else if (e.key === 'ArrowUp') ni = Math.max(0, idx - cols);
       else if (e.key === 'Enter') { pickTank(detailId, true); e.preventDefault(); return; }
       else if (e.key === 'Tab') {
-        activePilot = (activePilot + (e.shiftKey ? setup.count - 1 : 1)) % setup.count;
+        const sel = selectableSlots();
+        const k = sel.indexOf(activePilot);
+        activePilot = sel[(k + (e.shiftKey ? sel.length - 1 : 1)) % sel.length];
         detailId = setup.slots[activePilot].tank;
         renderPilots(); renderGrid(); renderDetail();
         e.preventDefault(); return;

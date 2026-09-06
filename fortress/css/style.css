@@ -208,6 +208,9 @@ kbd {
 }
 .pilot:hover { background: var(--panel-3); }
 .pilot.is-active { border-color: var(--brass); background: #2a2113; box-shadow: 0 0 0 1px rgba(240,166,60,.35) inset; }
+.pilot.is-locked { opacity: .55; cursor: default; }
+.pilot.is-locked:hover { background: var(--panel-2); }
+.pilot.is-locked .p-kind { color: var(--muted); border-style: dashed; }
 .pilot .p-name { font-size: 12.5px; font-weight: 700; }
 .pilot .p-tank { font-size: 11px; color: var(--muted); }
 .pilot .p-kind { font-size: 9.5px; letter-spacing: .5px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
