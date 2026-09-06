@@ -10,7 +10,7 @@
  *   4. sky.render(camera)                 fullscreen, depth LEQUAL, depth write off
  *   5. opaque pass                        static batches, instanced batches, dynamic submits
  *   6. transparent pass                   sorted back-to-front, depth write off
- *   7. particles.render(camera)           reads the depth texture for soft particles
+ *   7. particles.render(camera)           reads a blitted copy of the scene depth (soft particles)
  *   8. postfx.render(hdrColor, depth, camera, dt, params) into the default framebuffer
  *
  * `Sky`, `PostFX` and `ParticleSystem` all render into whatever framebuffer is bound and must
@@ -19,7 +19,7 @@
  * @module render/renderer
  */
 
-import { GpuMesh, RenderTarget, Shader, drawFullscreen } from '../core/gl.js';
+import { GpuMesh, RenderTarget, Shader, Texture2D, drawFullscreen } from '../core/gl.js';
 import { clamp, DEG2RAD, mat3, mat4, vec3 } from '../core/math.js';
 import {
   BLIT_FRAGMENT_SOURCE,
@@ -62,6 +62,19 @@ const _identity = mat4.identity(mat4.create());
 const _identity3 = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 const _white = new Float32Array([1, 1, 1, 1]);
 const _frustumCorners = new Float32Array(24);
+/** Un-normalized frustum planes, reused by `Camera._extractFrustum` (called every frame). */
+const _planeScratch = new Float32Array(24);
+
+/**
+ * Nearest-first light comparator. Hoisted to module scope so sorting the per-frame light
+ * list never allocates a closure.
+ * @param {LightRecord} a Left record.
+ * @param {LightRecord} b Right record.
+ * @returns {number} Comparator result.
+ */
+function compareLights(a, b) {
+  return a.sortKey - b.sortKey;
+}
 
 /** Highest triangle count merged into a single static batch chunk. */
 const MAX_CHUNK_TRIANGLES = 200000;
@@ -260,14 +273,14 @@ export class Camera {
     const r1x = m[1], r1y = m[5], r1z = m[9], r1w = m[13];
     const r2x = m[2], r2y = m[6], r2z = m[10], r2w = m[14];
     const r3x = m[3], r3y = m[7], r3z = m[11], r3w = m[15];
-    const planes = [
-      r3x + r0x, r3y + r0y, r3z + r0z, r3w + r0w,
-      r3x - r0x, r3y - r0y, r3z - r0z, r3w - r0w,
-      r3x + r1x, r3y + r1y, r3z + r1z, r3w + r1w,
-      r3x - r1x, r3y - r1y, r3z - r1z, r3w - r1w,
-      r3x + r2x, r3y + r2y, r3z + r2z, r3w + r2w,
-      r3x - r2x, r3y - r2y, r3z - r2z, r3w - r2w
-    ];
+    // Module-scope scratch: this runs once per camera per frame, so it must not allocate.
+    const planes = _planeScratch;
+    planes[0] = r3x + r0x; planes[1] = r3y + r0y; planes[2] = r3z + r0z; planes[3] = r3w + r0w;
+    planes[4] = r3x - r0x; planes[5] = r3y - r0y; planes[6] = r3z - r0z; planes[7] = r3w - r0w;
+    planes[8] = r3x + r1x; planes[9] = r3y + r1y; planes[10] = r3z + r1z; planes[11] = r3w + r1w;
+    planes[12] = r3x - r1x; planes[13] = r3y - r1y; planes[14] = r3z - r1z; planes[15] = r3w - r1w;
+    planes[16] = r3x + r2x; planes[17] = r3y + r2y; planes[18] = r3z + r2z; planes[19] = r3w + r2w;
+    planes[20] = r3x - r2x; planes[21] = r3y - r2y; planes[22] = r3z - r2z; planes[23] = r3w - r2w;
     for (let i = 0; i < 6; i++) {
       const o = i * 4;
       const a = planes[o];
@@ -562,6 +575,14 @@ export class InstancedBatch {
     }
     /** @type {boolean} */
     this.dirty = true;
+    /** @type {boolean} True when the whole live range must be re-uploaded. */
+    this._dirtyAll = true;
+    /** @type {number} Lowest instance index written since the last upload. */
+    this._dirtyLo = 0;
+    /** @type {number} Highest instance index written since the last upload (-1 = none). */
+    this._dirtyHi = -1;
+    /** @type {number} Instances the GPU buffer is known to hold, counted from 0. */
+    this._uploaded = 0;
     /** @type {Float32Array} World bounding sphere centre. */
     this.center = vec3.create();
     /** @type {number} */
@@ -576,9 +597,29 @@ export class InstancedBatch {
    * @returns {InstancedBatch} this, for chaining.
    */
   setCount(n) {
-    this.count = clamp(n | 0, 0, this.capacity);
+    const c = clamp(n | 0, 0, this.capacity);
+    // Instances the GPU has never seen must be uploaded even if nobody wrote them this frame.
+    if (c > this._uploaded) this._markDirty(this._uploaded, c - 1);
+    this.count = c;
     this.dirty = true;
     return this;
+  }
+
+  /**
+   * Widens the pending upload range.
+   * @param {number} lo First dirty instance index.
+   * @param {number} hi Last dirty instance index.
+   * @returns {void}
+   * @private
+   */
+  _markDirty(lo, hi) {
+    if (this._dirtyHi < 0) {
+      this._dirtyLo = lo;
+      this._dirtyHi = hi;
+      return;
+    }
+    if (lo < this._dirtyLo) this._dirtyLo = lo;
+    if (hi > this._dirtyHi) this._dirtyHi = hi;
   }
 
   /**
@@ -605,6 +646,7 @@ export class InstancedBatch {
       d[o + 19] = 1;
     }
     if (i >= this.count) this.count = i + 1;
+    this._markDirty(i, i);
     this.dirty = true;
     return this;
   }
@@ -619,6 +661,7 @@ export class InstancedBatch {
     const n = clamp(count === undefined ? (float32Array.length / 20) | 0 : count | 0, 0, this.capacity);
     this.data.set(fitArray(float32Array, n * 20));
     this.count = n;
+    this._dirtyAll = true;
     this.dirty = true;
     return this;
   }
@@ -631,7 +674,36 @@ export class InstancedBatch {
   upload() {
     if (!this.dirty || this.disposed) return this;
     this.dirty = false;
-    this.mesh.setInstanceData(this.data, this.count);
+    const mesh = this.mesh;
+    const n = this.count;
+    // Only the instances that actually changed are sent: rewriting the whole live range every
+    // frame is the difference between a few kilobytes and megabytes for large prop batches.
+    const canRange = !this._dirtyAll && !!mesh.instanceBuffer &&
+      mesh.instanceCapacity >= n && mesh.floatsPerInstance === 20;
+    if (!canRange) {
+      mesh.setInstanceData(this.data, n);
+      this._uploaded = n;
+    } else {
+      let lo = this._dirtyLo;
+      let hi = Math.min(this._dirtyHi, n - 1);
+      if (n > this._uploaded) {
+        // `data` is pre-filled with identity + white, so widening to cover the newly exposed
+        // tail is always safe.
+        if (this._uploaded < lo) lo = this._uploaded;
+        if (n - 1 > hi) hi = n - 1;
+      }
+      if (hi >= lo) {
+        const gl = mesh.gl;
+        gl.bindBuffer(gl.ARRAY_BUFFER, mesh.instanceBuffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER, lo * 80, this.data, lo * 20, (hi - lo + 1) * 20);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      }
+      mesh.instanceCount = n;
+      if (n > this._uploaded) this._uploaded = n;
+    }
+    this._dirtyAll = false;
+    this._dirtyLo = 0;
+    this._dirtyHi = -1;
     this._computeBounds();
     return this;
   }
@@ -829,8 +901,19 @@ export class Renderer {
     // ---- render state cache ---------------------------------------------------------------
     this._state = { blend: -1, depthWrite: -1, depthTest: -1, cull: -1, program: null, material: null };
 
+    /** @type {number} Authored bloom strength, preserved while the preset disables bloom. */
+    this.bloomStrength = this.postParams.bloomStrength;
+
     /** @type {RenderTarget|null} HDR scene target (rgba16f colour + depth texture). */
     this.hdr = null;
+    /** @type {RenderTarget|null} Sampleable copy of the HDR depth, for soft particles. */
+    this._depthCopy = null;
+    /** @type {boolean} Cleared when the driver refuses the depth blit. */
+    this._depthCopyOk = true;
+    /** @type {boolean} */
+    this._depthCopyChecked = false;
+    /** @type {Texture2D|null} 1x1 white, bound to `uAoTex` when SSAO has no AO buffer yet. */
+    this._whiteTex = null;
     /** @type {RenderTarget[]} Depth-only cascade targets. */
     this.shadowTargets = [];
 
@@ -892,6 +975,12 @@ export class Renderer {
 
     /** @type {Object} Fallback material for `submit` calls without one. */
     this.defaultMaterial = createMaterial({ name: 'default' });
+
+    try {
+      this._whiteTex = Texture2D.solid(gl, 255, 255, 255, 255);
+    } catch (err) {
+      this._whiteTex = null;
+    }
 
     this.setQuality(options.quality || 'high');
     this.resize(this.width, this.height);
@@ -965,12 +1054,16 @@ export class Renderer {
     q.maxPointLights = clamp(q.maxPointLights | 0, 0, Math.max(4, budget));
 
     this.quality = q;
+    // The SSAO permutation follows the quality preset ONLY. Deriving it from
+    // `postfx.aoTexture` (which appears after the first post pass) used to flip the define on
+    // the first rendered frame and throw away everything `precompile()` had built. When the AO
+    // buffer is missing the shader samples a 1x1 white texture instead, which is a no-op.
     this._shaderCtx = {
       cascades: q.cascades,
       pcf: q.pcf,
       pointLights: Math.max(1, q.maxPointLights),
       maxDrawLights: MAX_DRAW_LIGHTS,
-      ssao: false
+      ssao: !!q.ssao
     };
 
     this._resizeLightArrays(this._shaderCtx.pointLights);
@@ -989,7 +1082,9 @@ export class Renderer {
     // Re-create the HDR target at the new render scale.
     this.resize(this.width, this.height);
     if (this.particles && this.particles.setBudget) this.particles.setBudget(q.particleBudget);
-    this.postParams.bloomStrength = q.bloom ? this.postParams.bloomStrength || 0.55 : 0;
+    // Keep the authored strength so a preset without bloom does not erase the user's setting.
+    if (this.bloomStrength === undefined) this.bloomStrength = 0.55;
+    this.postParams.bloomStrength = q.bloom ? this.bloomStrength : 0;
     this.postParams.ssao = q.ssao ? 1 : 0;
     return q;
   }
@@ -1023,6 +1118,7 @@ export class Renderer {
     } else {
       this.hdr.resize(this.renderWidth, this.renderHeight);
     }
+    if (this._depthCopy) this._depthCopy.resize(this.renderWidth, this.renderHeight);
     if (this.postfx && this.postfx.resize) this.postfx.resize(w, h);
   }
 
@@ -1689,14 +1785,6 @@ export class Renderer {
     this._sunRadiance[1] = this.sun.color[1] * this.sun.intensity;
     this._sunRadiance[2] = this.sun.color[2] * this.sun.intensity;
 
-    // SSAO permutation follows the post FX module: it only exists when postfx publishes an
-    // AO texture (optional hook). Changing it invalidates the program cache, so it is sticky.
-    const wantSsao = !!(this.quality.ssao && this.postfx && this.postfx.aoTexture);
-    if (wantSsao !== this._shaderCtx.ssao) {
-      this._shaderCtx.ssao = wantSsao;
-      this._disposeShaderCache();
-    }
-
     this._camera = camera;
     camera.update(this.width / Math.max(1, this.height));
 
@@ -1730,8 +1818,11 @@ export class Renderer {
     // 6. transparent
     this._drawList(this._transparent);
 
-    // 7. particles
+    // 7. particles — hand them a readable copy of the scene depth first, because the real
+    //    depth texture is still attached to the bound framebuffer (sampling it is a feedback
+    //    loop, which is exactly what "reads the depth texture for soft particles" needs).
     if (this.particles && this.particles.render) {
+      this._publishSceneDepth(camera);
       this.particles.render(camera);
       this._resetState();
     }
@@ -1747,15 +1838,106 @@ export class Renderer {
     this.postParams.wetness = this.wet[0];
     this.postParams.rain = this.wet[1];
     this.postParams.ssao = this.quality.ssao ? 1 : 0;
-    this.postParams.bloomStrength = this.quality.bloom ? this.postParams.bloomStrength : 0;
+    if (this.quality.bloom) {
+      // Remember whatever the caller last authored so a bloom-less preset cannot erase it.
+      if (this.postParams.bloomStrength > 0) this.bloomStrength = this.postParams.bloomStrength;
+    } else {
+      this.postParams.bloomStrength = 0;
+    }
     if (this.postfx && this.postfx.render) {
       this.postfx.render(this.hdr.color(0), this.hdr.depthTex, camera, step, this.postParams);
     } else {
       this._blitFallback();
     }
-    this._resetState();
+    this._restoreBaselineState();
 
     this._endFrame(t0, step);
+  }
+
+  /**
+   * Copies the HDR depth buffer into a private target and hands it to the particle system, so
+   * soft particles can sample scene depth without forming a framebuffer feedback loop with the
+   * still-attached depth texture. Leaves the HDR target bound and the viewport untouched.
+   * @param {Camera} camera Camera of the current frame (supplies the depth planes).
+   * @returns {void}
+   * @private
+   */
+  _publishSceneDepth(camera) {
+    const particles = this.particles;
+    if (!particles || typeof particles.setDepthTexture !== 'function') return;
+    const gl = this.gl;
+    const hdr = this.hdr;
+    const wanted = this._depthCopyOk && particles.softParticles !== false &&
+      (particles.count === undefined || (particles.count | 0) > 0) &&
+      !!hdr && !!hdr.depthTex;
+    if (!wanted) return;
+
+    const w = this.renderWidth;
+    const h = this.renderHeight;
+    if (!this._depthCopy) {
+      try {
+        this._depthCopy = new RenderTarget(gl, w, h, {
+          colorCount: 0, depth: true, depthTexture: true, filter: 'nearest', wrap: 'clamp'
+        });
+      } catch (err) {
+        this._depthCopyOk = false;
+        console.warn('[renderer] scene depth copy unavailable, soft particles disabled:', err);
+        return;
+      }
+    } else if (this._depthCopy.width !== w || this._depthCopy.height !== h) {
+      this._depthCopy.resize(w, h);
+    }
+
+    // Creating/resizing the target above leaves FRAMEBUFFER unbound, so re-establish the
+    // read source explicitly instead of trusting the current binding.
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, hdr.framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._depthCopy.framebuffer);
+    gl.depthMask(true);
+    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, hdr.framebuffer);
+    gl.viewport(0, 0, w, h);
+
+    if (!this._depthCopyChecked) {
+      // One-time validation only: getError() flushes the pipeline, so it must not run per frame.
+      this._depthCopyChecked = true;
+      const err = gl.getError();
+      if (err !== gl.NO_ERROR) {
+        let guard = 0;
+        while (gl.getError() !== gl.NO_ERROR && guard++ < 16) { /* drain */ }
+        this._depthCopyOk = false;
+        this._depthCopy.dispose();
+        this._depthCopy = null;
+        console.warn('[renderer] scene depth blit rejected (GL error 0x' + err.toString(16) +
+          '); soft particles fall back to the driver default.');
+        return;
+      }
+    }
+    particles.setDepthTexture(this._depthCopy.depthTex, camera.near, camera.far);
+  }
+
+  /**
+   * Puts the pipeline back into the baseline state `core/gl.js` establishes at context
+   * creation, so code that draws after `render()` (HUD overlays, screenshots, other
+   * subsystems) never inherits a half-configured pipeline.
+   * @returns {void}
+   * @private
+   */
+  _restoreBaselineState() {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(gl.CCW);
+    gl.disable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(null);
+    gl.useProgram(null);
+    this._resetState();
   }
 
   /**
@@ -1805,7 +1987,11 @@ export class Renderer {
       // Bigger lights survive culling further away.
       l.sortKey = Math.sqrt(dx * dx + dy * dy + dz * dz) - l.radius;
     }
-    if (lights.length > max) lights.sort((a, b) => a.sortKey - b.sortKey);
+    // Always sort: `_selectLights` takes the first lights that reach a draw and therefore
+    // relies on nearest-first order. Sorting only when the array overflows made the selection
+    // depend on submission order, so a bright nearby light could be dropped in favour of
+    // whatever happened to be submitted first, and lights popped as that order changed.
+    if (lights.length > 1) lights.sort(compareLights);
     const n = Math.min(lights.length, max);
     this._activeLights = n;
     this.stats.lights = n;
@@ -1881,9 +2067,13 @@ export class Renderer {
     casters.length = 0;
 
     const shadowsOn = this.shadowsEnabled && this.quality.cascades > 0;
+    // Set when the pooled draw-item budget runs out. The lists must still be sorted afterwards,
+    // otherwise the transparent pass would render in arbitrary order on the frame it happens.
+    let exhausted = false;
 
     // --- static batches -------------------------------------------------------------------
     for (const group of this._staticGroups.values()) {
+      if (exhausted) break;
       if (group.dirty) this._rebuildStaticGroup(group);
       const mat = group.material;
       const casts = shadowsOn && mat.castShadow && (mat.blend === 'opaque' || mat.alphaTest > 0);
@@ -1895,7 +2085,7 @@ export class Renderer {
           continue;
         }
         const item = this._acquireItem();
-        if (!item) return;
+        if (!item) { exhausted = true; break; }
         item.mesh = chunk.mesh;
         item.material = mat;
         item.instanced = false;
@@ -1913,7 +2103,7 @@ export class Renderer {
     }
 
     // --- instanced batches ----------------------------------------------------------------
-    for (let b = 0; b < this._instanced.length; b++) {
+    for (let b = 0; b < this._instanced.length && !exhausted; b++) {
       const batch = this._instanced[b];
       if (batch.disposed || !batch.visible || batch.count === 0) continue;
       if (batch.dirty) batch.upload();
@@ -1925,7 +2115,7 @@ export class Renderer {
         continue;
       }
       const item = this._acquireItem();
-      if (!item) return;
+      if (!item) { exhausted = true; break; }
       item.mesh = batch.mesh;
       item.material = mat;
       item.instanced = true;
@@ -2251,8 +2441,12 @@ export class Renderer {
       shader.setVec4Array('uLightDir[0]', this._lightDirView);
     }
 
-    if (this._shaderCtx.ssao && this.postfx && this.postfx.aoTexture) {
-      shader.setTexture('uAoTex', this.postfx.aoTexture, TEXTURE_UNITS.AO);
+    if (this._shaderCtx.ssao) {
+      // The AO buffer only exists once post FX has run its first SSAO pass; until then (and
+      // whenever post FX is unavailable) a 1x1 white texture keeps the ambient term intact
+      // instead of leaving an unbound sampler, which reads black and kills all ambient light.
+      const ao = (this.postfx && this.postfx.aoTexture) || this._whiteTex;
+      if (ao) shader.setTexture('uAoTex', ao, TEXTURE_UNITS.AO);
     }
   }
 
@@ -2379,6 +2573,10 @@ export class Renderer {
     this.shadowTargets.length = 0;
     if (this.hdr) this.hdr.dispose();
     this.hdr = null;
+    if (this._depthCopy) this._depthCopy.dispose();
+    this._depthCopy = null;
+    if (this._whiteTex) this._whiteTex.dispose();
+    this._whiteTex = null;
     if (this.particles && this.particles.dispose) this.particles.dispose();
     if (this.postfx && this.postfx.dispose) this.postfx.dispose();
     if (this.sky && this.sky.dispose) this.sky.dispose();

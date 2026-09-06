@@ -191,6 +191,10 @@ export function createMaterial(desc = {}) {
     // Renderer-owned bookkeeping.
     _anisoStamp: -1,
 
+    // True once `reflectance` holds the normalized 0..1 parameter, so re-applying the raw-F0
+    // heuristic on a clone or a self-patch cannot convert the same value twice.
+    _reflectanceNormalized: false,
+
     // Preallocated uniform payloads (never reallocated).
     _baseColor: new Float32Array(4),
     _params: new Float32Array(4),
@@ -205,8 +209,11 @@ export function createMaterial(desc = {}) {
   copyN(mat.uvOffset, desc.uvOffset, [0, 0], 2);
 
   // `reflectance` is accepted both as the Filament 0..1 parameter and as a raw F0 (e.g. 0.04).
-  if (mat.reflectance < 0.2) mat.reflectance = Math.sqrt(mat.reflectance / 0.16);
+  if (!desc._reflectanceNormalized && mat.reflectance < 0.2) {
+    mat.reflectance = Math.sqrt(Math.max(0, mat.reflectance) / 0.16);
+  }
   mat.reflectance = Math.max(0, Math.min(1, mat.reflectance));
+  mat._reflectanceNormalized = true;
 
   return refreshMaterial(mat);
 }
@@ -246,6 +253,8 @@ export function updateMaterial(mat, patch) {
  */
 export function cloneMaterial(mat, patch) {
   const copy = createMaterial({
+    // The source value is already normalized; re-running the raw-F0 heuristic would change it.
+    _reflectanceNormalized: true,
     name: mat.name + '#copy',
     albedo: mat.albedo,
     roughness: mat.roughness,

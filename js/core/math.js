@@ -1175,6 +1175,26 @@ quat.mul = quat.multiply;
 /* ------------------------------------------------------------------------- */
 
 /**
+ * Singularity threshold for a 3x3 determinant.
+ *
+ * A determinant scales with the *cube* of the matrix magnitude, so testing it against the
+ * plain (linear) `EPS` wrongly rejects perfectly invertible matrices built from small scales:
+ * a uniform scale of 0.005 has a determinant of 1.25e-7, well below 1e-6. Scaling the
+ * tolerance by the largest column length cubed keeps the test dimensionally consistent, so
+ * unit-scale matrices behave exactly as they did before and tiny props still invert correctly.
+ *
+ * @param {number} s0 Squared length of column 0.
+ * @param {number} s1 Squared length of column 1.
+ * @param {number} s2 Squared length of column 2.
+ * @returns {number} Absolute tolerance the determinant must exceed to be considered invertible.
+ */
+function detEpsilon3(s0, s1, s2) {
+  let s = s0 > s1 ? s0 : s1;
+  if (s2 > s) s = s2;
+  return EPS * s * Math.sqrt(s);
+}
+
+/**
  * Column-major 3x3 matrix helpers on `Float32Array(9)`.
  * Index layout: `m[column * 3 + row]`.
  * @namespace mat3
@@ -1230,7 +1250,12 @@ export const mat3 = {
     const b11 = -a22 * a10 + a12 * a20;
     const b21 = a21 * a10 - a11 * a20;
     let det = a00 * b01 + a01 * b11 + a02 * b21;
-    if (det > -EPS && det < EPS) {
+    const tol = detEpsilon3(
+      a00 * a00 + a01 * a01 + a02 * a02,
+      a10 * a10 + a11 * a11 + a12 * a12,
+      a20 * a20 + a21 * a21 + a22 * a22
+    );
+    if (!(det > tol || det < -tol)) {
       // Singular (degenerate scale): fall back to the plain rotation block.
       out[0] = a00; out[1] = a01; out[2] = a02;
       out[3] = a10; out[4] = a11; out[5] = a12;
@@ -1285,7 +1310,12 @@ export const mat3 = {
     const b11 = -a22 * a10 + a12 * a20;
     const b21 = a21 * a10 - a11 * a20;
     let det = a00 * b01 + a01 * b11 + a02 * b21;
-    if (det > -EPS && det < EPS) return mat3.identity(out);
+    const tol = detEpsilon3(
+      a00 * a00 + a01 * a01 + a02 * a02,
+      a10 * a10 + a11 * a11 + a12 * a12,
+      a20 * a20 + a21 * a21 + a22 * a22
+    );
+    if (!(det > tol || det < -tol)) return mat3.identity(out);
     det = 1 / det;
     out[0] = b01 * det;
     out[1] = (-a22 * a01 + a02 * a21) * det;

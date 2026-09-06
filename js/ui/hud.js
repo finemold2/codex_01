@@ -922,7 +922,8 @@ export class HUD {
     }));
     this._off.push(g.on('wantedChanged', (lvl) => {
       const n = typeof lvl === 'number' ? lvl : (g.police ? num(g.police.wanted, 0) : 0);
-      if (n > 0) this.notify(`수배 레벨 ${n}`, 'wanted', 2.2);
+      // Only announce escalations; `_updateWanted()` still owns the star display.
+      if (n > 0 && n > this._lastWanted) this.notify(`수배 레벨 ${n}`, 'wanted', 2.2);
     }));
   }
 
@@ -1451,7 +1452,8 @@ export class HUD {
    * @returns {void}
    */
   _updateDebug(dt) {
-    if (dt > 0) this._fps = lerp(this._fps, 1 / Math.max(dt, 1e-4), 0.08);
+    // A zero/way-too-small dt (paused tab, injected frame) must not spike the average.
+    if (dt > 0.0008) this._fps = lerp(this._fps, 1 / dt, 0.08);
     const on = !!(this._settings && this._settings.showFps);
     if (!on) return;
     this._debugTimer -= dt;

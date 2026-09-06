@@ -234,6 +234,7 @@ const WALK_PASS = {
 };
 CLIP_SPECS.walk = {
   loop: true, duration: 1, gait: true,
+  legs: { stride: 1.30, stance: 0.58, lift: 0.13, heelRise: 0.10, frontFrac: 0.44, toeOff: 0.42, heelStrike: 0.20 },
   keys: [
     [0.0, WALK_CONTACT],
     [0.25, WALK_PASS],
@@ -262,6 +263,7 @@ const RUN_FLIGHT = {
 };
 CLIP_SPECS.run = {
   loop: true, duration: 1, gait: true,
+  legs: { stride: 2.45, stance: 0.36, lift: 0.26, heelRise: 0.085, frontFrac: 0.46, toeOff: 0.50, heelStrike: 0.10, flightArc: 0.045 },
   keys: [
     [0.0, RUN_CONTACT],
     [0.25, RUN_FLIGHT],
@@ -290,6 +292,7 @@ const SPRINT_FLIGHT = {
 };
 CLIP_SPECS.sprint = {
   loop: true, duration: 1, gait: true,
+  legs: { stride: 3.30, stance: 0.28, lift: 0.34, heelRise: 0.08, frontFrac: 0.47, toeOff: 0.55, heelStrike: 0.05, flightArc: 0.065 },
   keys: [
     [0.0, SPRINT_CONTACT],
     [0.25, SPRINT_FLIGHT],
@@ -351,6 +354,7 @@ const CROUCHWALK_PASS = {
 };
 CLIP_SPECS.crouchWalk = {
   loop: true, duration: 1, gait: true,
+  legs: { stride: 1.00, stance: 0.62, lift: 0.09, heelRise: 0.05, frontFrac: 0.45, toeOff: 0.30, heelStrike: 0.12, hipFixed: 0.665 },
   keys: [
     [0.0, CROUCHWALK_CONTACT],
     [0.25, CROUCHWALK_PASS],
@@ -508,6 +512,7 @@ const AIMWALK_PASS = {
 };
 CLIP_SPECS.aimWalk = {
   loop: true, duration: 1, gait: true,
+  legs: { stride: 1.15, stance: 0.60, lift: 0.10, heelRise: 0.08, frontFrac: 0.45, toeOff: 0.35, heelStrike: 0.16 },
   keys: [
     [0.0, AIMWALK_CONTACT],
     [0.25, AIMWALK_PASS],
@@ -817,6 +822,174 @@ CLIP_SPECS.exit = {
  *   times:Float32Array, poses:Float32Array, rootPitch:number, rootLift:number}} Clip
  */
 
+/* --- gait baking ---------------------------------------------------------- */
+
+/** Segment lengths of the rig's legs (metres) and the height of the hip joint at rest. */
+const THIGH_LEN = 0.45;
+const SHIN_LEN = 0.38;
+const LEG_REACH = THIGH_LEN + SHIN_LEN;
+const REST_HIP_Y = 0.98 - 0.07;
+/** Ankle height when the shoe sole rests on the ground. */
+const ANKLE_GROUND = 0.085;
+/** Keys generated per baked gait cycle (plus the duplicated wrap key). */
+const GAIT_KEYS = 16;
+
+/** Reused output record for {@link gaitFootPath} (build time only). */
+const _foot = { z: 0, y: 0, stance: 0, pitch: 0 };
+
+/**
+ * Evaluates one leg's ankle trajectory for a normalised leg phase, where 0 is heel strike.
+ * The stance segment is a straight backward slide so the planted foot is world-stationary;
+ * the swing segment is a smooth arc that lifts and reaches forward again.
+ * @param {number} u Leg phase in [0, 1).
+ * @param {Object} cfg Gait configuration (`CLIP_SPECS.<state>.legs`).
+ * @param {number} zFront Ankle Z at heel strike (negative = ahead of the hip).
+ * @param {number} zBack Ankle Z at toe-off (positive = behind the hip).
+ * @returns {Object} `_foot` with `z`, `y`, `stance` (0..1) and `pitch` (world foot pitch).
+ */
+function gaitFootPath(u, cfg, zFront, zBack) {
+  const f = cfg.stance;
+  if (u < f) {
+    const t = u / f;
+    _foot.z = zFront + (zBack - zFront) * t;
+    _foot.y = ANKLE_GROUND + cfg.heelRise * smoothstep(0.55, 1, t);
+    _foot.stance = 1 - smoothstep(0.9, 1, t);
+    _foot.pitch = cfg.heelStrike * (1 - smoothstep(0, 0.2, t)) - cfg.toeOff * smoothstep(0.55, 1, t);
+  } else {
+    const t = (u - f) / (1 - f);
+    const e = t * t * (3 - 2 * t);
+    _foot.z = zBack + (zFront - zBack) * e;
+    _foot.y = ANKLE_GROUND + Math.sin(Math.PI * t) * cfg.lift + cfg.heelRise * (1 - smoothstep(0, 0.3, t));
+    _foot.stance = 0;
+    _foot.pitch = -cfg.toeOff * (1 - smoothstep(0, 0.35, t)) + cfg.heelStrike * smoothstep(0.55, 1, t);
+  }
+  return _foot;
+}
+
+/**
+ * Two-bone analytic IK in the sagittal plane. Writes `[thighPitch, kneeFlexion]` into `out`.
+ * @param {number} dz Ankle Z relative to the hip (negative = ahead).
+ * @param {number} dy Ankle Y relative to the hip (negative = below).
+ * @param {number[]} out Two-element output array.
+ * @returns {number[]} out
+ */
+function legIK(dz, dy, out) {
+  let d = Math.hypot(dz, dy);
+  const maxD = LEG_REACH * 0.995;
+  let z = dz;
+  let y = dy;
+  if (d > maxD) { const k = maxD / d; z *= k; y *= k; d = maxD; }
+  if (d < 0.08) { const k = 0.08 / Math.max(d, 1e-5); z *= k; y *= k; d = 0.08; }
+  const theta = Math.atan2(-z, -y);
+  const cosA = clamp((THIGH_LEN * THIGH_LEN + d * d - SHIN_LEN * SHIN_LEN) / (2 * THIGH_LEN * d), -1, 1);
+  const cosK = clamp((THIGH_LEN * THIGH_LEN + SHIN_LEN * SHIN_LEN - d * d) / (2 * THIGH_LEN * SHIN_LEN), -1, 1);
+  out[0] = theta + Math.acos(cosA);
+  out[1] = -(Math.PI - Math.acos(cosK));
+  return out;
+}
+
+/**
+ * Replaces a gait clip's leg channels and pelvis height with an IK solution built from a
+ * foot trajectory. The hand-authored torso and arm keys are resampled onto the denser key
+ * grid, so the upper body keeps its authored timing while the legs stop skating: during
+ * stance the ankle slides backward at exactly the cycle speed, and the hip height is derived
+ * from how far the stance leg can actually reach.
+ * @param {Clip} clip Compiled clip, mutated in place.
+ * @param {Object} cfg Gait configuration.
+ * @returns {Clip} clip
+ */
+function bakeGait(clip, cfg) {
+  const n = GAIT_KEYS;
+  const travel = cfg.stride * cfg.stance;
+  const zFront = -travel * cfg.frontFrac;
+  const zBack = travel * (1 - cfg.frontFrac);
+  const reach = LEG_REACH * 0.985;
+
+  const legZ = new Float64Array(n * 2);
+  const legY = new Float64Array(n * 2);
+  const legP = new Float64Array(n * 2);
+  const legS = new Float64Array(n * 2);
+  const hip = new Float64Array(n);
+  const known = new Uint8Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const phase = i / n;
+    let best = Infinity;
+    for (let leg = 0; leg < 2; leg++) {
+      let u = phase + (leg === 1 ? 0.5 : 0);
+      u -= Math.floor(u);
+      const fp = gaitFootPath(u, cfg, zFront, zBack);
+      const k = i * 2 + leg;
+      legZ[k] = fp.z; legY[k] = fp.y; legP[k] = fp.pitch; legS[k] = fp.stance;
+      if (fp.stance > 0.001) {
+        const h = reach * reach - fp.z * fp.z;
+        if (h > 0) {
+          const cand = fp.y + Math.sqrt(h);
+          if (cand < best) best = cand;
+        }
+      }
+    }
+    if (cfg.hipFixed) { hip[i] = cfg.hipFixed; known[i] = 1; }
+    else if (best < Infinity) { hip[i] = best; known[i] = 1; }
+    else { hip[i] = 0; known[i] = 0; }
+  }
+
+  // Flight phases have no stance leg: bridge them with an arc between the neighbouring
+  // supported samples so running keeps its ballistic rise.
+  for (let i = 0; i < n; i++) {
+    if (known[i]) continue;
+    let back = 0;
+    let fwd = 0;
+    while (back < n && !known[(i - back - 1 + n * 2) % n]) back++;
+    while (fwd < n && !known[(i + fwd + 1) % n]) fwd++;
+    const a = hip[(i - back - 1 + n * 2) % n];
+    const b = hip[(i + fwd + 1) % n];
+    const span = back + fwd + 2;
+    const t = (back + 1) / span;
+    const arc = (cfg.flightArc || 0) * Math.sin(Math.PI * t);
+    hip[i] = a + (b - a) * t + arc;
+  }
+  // One pass of light smoothing removes the kink where support swaps legs.
+  const hipSmooth = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    hipSmooth[i] = hip[(i - 1 + n) % n] * 0.25 + hip[i] * 0.5 + hip[(i + 1) % n] * 0.25;
+  }
+
+  const times = new Float32Array(n + 1);
+  const poses = new Float32Array((n + 1) * POSE_LEN);
+  const tmp = new Float32Array(POSE_LEN);
+  const ik = [0, 0];
+  const legBones = [
+    [BONE_INDEX.thighL, BONE_INDEX.shinL, BONE_INDEX.footL],
+    [BONE_INDEX.thighR, BONE_INDEX.shinR, BONE_INDEX.footR]
+  ];
+  const legRoll = [-0.045, 0.045];
+  for (let i = 0; i <= n; i++) {
+    const idx = i % n;
+    const t = i / n;
+    times[i] = t * clip.duration;
+    sampleClip(clip, t * clip.duration, tmp);
+    const hy = hipSmooth[idx];
+    tmp[POSE_ROOT + 1] = hy - REST_HIP_Y;
+    for (let leg = 0; leg < 2; leg++) {
+      const k = idx * 2 + leg;
+      legIK(legZ[k], legY[k] - hy, ik);
+      const b = legBones[leg];
+      tmp[b[0] * POSE_STRIDE] = ik[0];
+      tmp[b[0] * POSE_STRIDE + 2] = legRoll[leg];
+      tmp[b[1] * POSE_STRIDE] = ik[1];
+      tmp[b[1] * POSE_STRIDE + 2] = -legRoll[leg] * 0.45;
+      tmp[b[2] * POSE_STRIDE] = legP[k] - ik[0] - ik[1];
+      tmp[b[2] * POSE_STRIDE + 2] = 0;
+    }
+    poses.set(tmp, i * POSE_LEN);
+  }
+  clip.times = times;
+  clip.poses = poses;
+  clip.keyCount = n + 1;
+  return clip;
+}
+
 /**
  * Compiles the hand-authored descriptions into typed arrays. Runs once at module load.
  * @param {Object<string, Object>} specs Raw clip descriptions.
@@ -845,6 +1018,7 @@ function compileClips(specs) {
       rootPitch: (spec.rootPitch || 0) * D2R,
       rootLift: spec.rootLift || 0
     };
+    if (spec.legs) bakeGait(out[name], spec.legs);
   }
   return out;
 }
@@ -867,10 +1041,16 @@ const BLEND_TIME = {
 const GAIT_STATES = { walk: 1, run: 1, sprint: 1, crouchWalk: 1, aimWalk: 1 };
 
 /** Metres of ground covered by one full two-step cycle, per gait. */
-const STRIDE_WALK = 1.44;
-const STRIDE_RUN = 2.62;
-const STRIDE_SPRINT = 3.45;
-const STRIDE_CROUCH = 1.05;
+const STRIDE_WALK = CLIP_SPECS.walk.legs.stride;
+const STRIDE_RUN = CLIP_SPECS.run.legs.stride;
+const STRIDE_SPRINT = CLIP_SPECS.sprint.legs.stride;
+const STRIDE_CROUCH = CLIP_SPECS.crouchWalk.legs.stride;
+const STRIDE_AIM = CLIP_SPECS.aimWalk.legs.stride;
+/** Baked stride per gait state. @type {Object<string, number>} */
+const STRIDE_BY_STATE = {
+  walk: STRIDE_WALK, run: STRIDE_RUN, sprint: STRIDE_SPRINT,
+  crouchWalk: STRIDE_CROUCH, aimWalk: STRIDE_AIM
+};
 
 /* -------------------------------------------------------------------------- */
 /* Mesh construction                                                           */
@@ -1066,7 +1246,7 @@ const C_SHADE = [0.82, 0.82, 0.84];
  */
 function buildPartGeometries() {
   const g = Object.create(null);
-  const SEG = 12;
+  const SEG = 14;
 
   /* --- head ------------------------------------------------------------- */
   const skull = ringStack([
@@ -1808,6 +1988,8 @@ export class Character {
     this._pose = new Float32Array(POSE_LEN);
     this._poseA = new Float32Array(POSE_LEN);
     this._poseB = new Float32Array(POSE_LEN);
+    /** Blended keyframe pose before the procedural layers; the cross-fade source. */
+    this._poseRaw = new Float32Array(POSE_LEN);
     this._snap = new Float32Array(POSE_LEN);
 
     // ---- state machine ---------------------------------------------------------------
@@ -1953,7 +2135,7 @@ export class Character {
     if (this._blend < 1) {
       // A fade is already running: freeze the current output so the new fade starts from
       // exactly what is on screen. Guarantees continuity under rapid state churn.
-      this._snap.set(this._pose);
+      this._snap.set(this._poseRaw);
       this._useSnap = true;
       this._prevClip = null;
     } else {
@@ -2062,10 +2244,11 @@ export class Character {
         const pc = this._prevClip;
         src = sampleClip(pc, pc.gait ? this._gaitPhase * pc.duration : this._prevTime, this._poseA);
       }
-      blendPose(this._pose, src, this._poseB, smoothstep(0, 1, this._blend));
+      blendPose(this._poseRaw, src, this._poseB, smoothstep(0, 1, this._blend));
     } else {
-      this._pose.set(this._poseB);
+      this._poseRaw.set(this._poseB);
     }
+    this._pose.set(this._poseRaw);
 
     if (this._ragActive) this._updateRagdoll(adt);
     else this._applyProcedural(adt, c);
@@ -2101,7 +2284,9 @@ export class Character {
     if (mb > 0.001) {
       const tp = this._gaitPhase * Math.PI * 2;
       const s1 = Math.sin(tp);
-      pose[POSE_ROOT + 1] += -0.014 * (0.5 - 0.5 * Math.cos(tp * 2)) * mb;
+      // Baked gaits already derive the hip height from the stance leg's reach, so only the
+      // non-baked states get a synthetic vertical bob.
+      if (!this._clip.gait) pose[POSE_ROOT + 1] += -0.014 * (0.5 - 0.5 * Math.cos(tp * 2)) * mb;
       pose[POSE_ROOT] += 0.011 * s1 * mb;
       pose[BONE_INDEX.chest * POSE_STRIDE + 1] += -0.09 * s1 * mb;
       pose[BONE_INDEX.pelvis * POSE_STRIDE + 1] += 0.05 * s1 * mb;
@@ -2430,16 +2615,19 @@ const AUTO_RETURN = {
 };
 
 /**
- * Ground distance covered by one full gait cycle. Interpolating between the walk, run and
- * sprint strides keeps the cadence continuous as the character accelerates, which is what
- * stops the feet from skating.
+ * Ground distance covered by one full gait cycle.
+ *
+ * Each gait clip's legs are baked for one specific stride, and the runtime phase rate is
+ * `speed / stride`, so returning the clip's own stride makes the planted foot world-stationary
+ * at *any* speed. Blending strides between gaits would desynchronise the baked trajectory and
+ * bring the skating straight back.
  * @param {string} state Current state name.
- * @param {number} speed Smoothed ground speed in m/s.
+ * @param {number} speed Smoothed ground speed in m/s (used only for non-gait states).
  * @returns {number} Stride length in metres.
  */
 function strideFor(state, speed) {
-  if (state === 'crouchWalk') return STRIDE_CROUCH;
-  if (state === 'aimWalk') return STRIDE_WALK * 0.88;
+  const s = STRIDE_BY_STATE[state];
+  if (s !== undefined) return s;
   if (speed <= 2.6) return STRIDE_WALK;
   if (speed >= 6.6) return STRIDE_SPRINT;
   if (speed <= 5.2) return lerp(STRIDE_WALK, STRIDE_RUN, (speed - 2.6) / 2.6);

@@ -1933,6 +1933,32 @@ function addBalconies(bc, b, y0, floors, floorH, col, rng) {
   }
 }
 
+
+/**
+ * Converts a citygen district palette entry into a physically sensible PBR albedo.
+ *
+ * citygen ships palettes as dark "mood" colours (mean luminance ~0.15, downtown as low as 0.05).
+ * They are consumed here as albedo and then multiplied by the facade texture (~0.24 linear), which
+ * lands real surfaces around 0.04 - far below the 0.25-0.6 of concrete, stucco or brick, so every
+ * building renders black. Rescale into `lo..hi` while preserving hue and the relative brightness
+ * ordering, so districts stay visually distinct.
+ *
+ * @param {number[]|undefined} c Source colour, linear RGB.
+ * @param {number} lo Darkest albedo to map onto.
+ * @param {number} hi Brightest albedo to map onto.
+ * @param {number[]} fallback Colour to use when `c` is missing.
+ * @returns {number[]} Rescaled linear RGB.
+ */
+function paletteToAlbedo(c, lo, hi, fallback) {
+  if (!c || c.length < 3) return fallback.slice();
+  const m = Math.max(c[0], c[1], c[2]);
+  if (!(m > 1e-4)) return fallback.slice();
+  // citygen's palettes span roughly 0.04..0.24; map that onto lo..hi.
+  const t = clamp((m - 0.04) / 0.20, 0, 1);
+  const k = (lo + (hi - lo) * t) / m;
+  return [clamp(c[0] * k, 0, 1), clamp(c[1] * k, 0, 1), clamp(c[2] * k, 0, 1)];
+}
+
 /**
  * Builds one complete building: shopfront, facade tiers with setbacks, roof, clutter,
  * balconies, signage and the matching collision boxes.
@@ -1943,9 +1969,11 @@ function addBalconies(bc, b, y0, floors, floorH, col, rng) {
 function buildBuilding(bc, b) {
   const rng = new Rand((((bc.seed ^ 0x9e3779b9) >>> 0) + b.id * 2654435761) >>> 0);
   const pal = b.palette || {};
-  const wallCol = pal.wall || [0.5, 0.5, 0.52];
-  const trimCol = pal.trim || [0.38, 0.38, 0.4];
-  const glassCol = pal.glass || [0.36, 0.46, 0.56];
+  const wallCol = paletteToAlbedo(pal.wall, 0.30, 0.86, [0.5, 0.5, 0.52]);
+  const trimCol = paletteToAlbedo(pal.trim, 0.28, 0.80, [0.38, 0.38, 0.4]);
+  // The glass facade texture is already dark (0.035 linear), so the palette acts as a TINT here
+  // rather than an absolute albedo - otherwise curtain-wall towers multiply out to near black.
+  const glassCol = paletteToAlbedo(pal.glass, 0.62, 1.0, [0.62, 0.72, 0.82]);
   const style = b.style || 'office';
   const rot = b.rot || 0;
   const hw = b.w * 0.5, hd = b.d * 0.5;

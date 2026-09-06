@@ -149,6 +149,7 @@ ul { list-style: none; }
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
+/* main.js drives the fill by setting `style.width`; nothing here animates a layout property. */
 #load-fill {
   position: absolute;
   inset: 0 auto 0 0;
@@ -156,7 +157,23 @@ ul { list-style: none; }
   border-radius: 99px;
   background: linear-gradient(90deg, var(--cyan), #7af9ff 55%, var(--magenta));
   box-shadow: 0 0 16px rgba(0, 229, 255, 0.65);
-  transition: width 0.28s ease;
+}
+
+/* A travelling highlight keeps the bar alive between progress steps (transform only). */
+.load-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 30%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.42), transparent);
+  transform: translateX(-100%);
+  animation: loadShine 1.6s ease-in-out infinite;
+}
+
+@keyframes loadShine {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(360%); }
 }
 
 #load-status {
@@ -1517,7 +1534,7 @@ ul { list-style: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .menu-bg .orb, .menu-bg .grid, .hud-radio.on .eq i { animation: none; }
+  .menu-bg .orb, .menu-bg .grid, .hud-radio.on .eq i, .load-bar::after { animation: none; }
   .hud-wanted.searching .star.on { animation: none; opacity: 1; }
   .btn, .toast, .hud-mission, .hud-veh { transition-duration: 0.01ms; }
 }

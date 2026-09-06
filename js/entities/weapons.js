@@ -1690,14 +1690,16 @@ export class WeaponSystem {
 
   /**
    * Hands an animation state to the player character, tolerating rigs that do not know it.
+   * `equip` / `throw` fall back to the closest state every rig implements.
    * @param {string|null} name State name, or null to release the override.
    * @private
    */
   _setCharacterState(name) {
     const p = this.game && this.game.player;
     if (!p || !p.character || typeof p.character.setState !== 'function') return;
+    const mapped = name === 'equip' ? 'reload' : name === 'throw' ? 'shoot' : name;
     try {
-      if (name) p.character.setState(name, { weapon: this.current });
+      if (mapped) p.character.setState(mapped, { weapon: this.current });
       else p.character.setState(p.aiming ? 'aim' : 'idle');
     } catch (err) {
       /* the rig does not implement this state — the base locomotion state stays */

@@ -896,10 +896,16 @@ export class ParticleSystem {
     /** @type {RenderTarget|null} Private depth copy used when direct sampling feeds back. */
     this._depthCopy = null;
 
-    /** @type {Object} Per-frame statistics. */
+    /**
+     * Per-frame statistics. `spawned` and `recycled` are cumulative counters; everything else
+     * describes the frame that was last updated. `depthMode` mirrors the soft-particle
+     * verdict: 0 = sampling the supplied depth directly, 1 = sampling a private copy of it,
+     * 2 = soft particles off.
+     * @type {Object}
+     */
     this.stats = {
       alive: 0, alpha: 0, additive: 0, drawCalls: 0,
-      spawned: 0, recycled: 0, killed: 0, lights: 0, simMs: 0, updateMs: 0
+      spawned: 0, recycled: 0, killed: 0, lights: 0, depthMode: 0, simMs: 0, updateMs: 0
     };
 
     /** @type {number} Monotonic spawn counter used to find the oldest particle. */
@@ -1137,6 +1143,8 @@ export class ParticleSystem {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     this._drawAlpha = 0;
     this._drawAdditive = 0;
+    // The rain population is a fraction of the pool, so it has to follow the new budget.
+    this.rain(this.rainIntensity);
   }
 
   /**
@@ -1851,13 +1859,15 @@ export class ParticleSystem {
           P.lightRadius = 26 * power;
           P.lightPower = 14 * power;
         } else if (i === 1) {
+          // Shock ring: it has to read as an expanding rim in the first few frames, not as a
+          // donut hanging in the air, so it is short lived and fades as it grows.
           P.sprite = SPR_RING;
-          P.size = 1.2 * power;
-          P.sizeEnd = 11 * power;
-          P.life = 0.4;
-          P.r = 2.6; P.g = 1.9; P.b = 1.2;
-          P.r2 = 0.9; P.g2 = 0.5; P.b2 = 0.2;
-          P.a = 0.75; P.a2 = 0;
+          P.size = 0.9 * power;
+          P.sizeEnd = 6.5 * power;
+          P.life = 0.26;
+          P.r = 2.2; P.g = 1.5; P.b = 0.9;
+          P.r2 = 0.7; P.g2 = 0.35; P.b2 = 0.12;
+          P.a = 0.5; P.a2 = 0;
           P.emissive = 1;
           P.additive = 1;
         } else if (t < 0.42) {
@@ -2476,6 +2486,7 @@ export class ParticleSystem {
     const depth = this._resolveDepth();
     const soft = !!depth;
     const probe = soft && this._softProbe;
+    this.stats.depthMode = soft ? this._depthMode : 2;
     const shader = soft ? this._shaderSoft : this._shaderPlain;
     shader.use();
 
@@ -2602,25 +2613,37 @@ export class ParticleSystem {
     const gl = this.gl;
     const w = Math.max(1, source.width | 0);
     const h = Math.max(1, source.height | 0);
-    if (!this._depthCopy) {
+    // Capture the caller's framebuffer FIRST: creating or resizing a RenderTarget rebinds and
+    // then clears the FRAMEBUFFER binding, which would silently make the blit read the
+    // default framebuffer (and fail on the depth/stencil format mismatch).
+    const bound = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+    // The copy has to match the source format exactly or the blit is rejected.
+    const stencil = source.internalFormat === gl.DEPTH24_STENCIL8 ||
+      source.internalFormat === gl.DEPTH32F_STENCIL8;
+    if (!this._depthCopy || this._depthCopy.stencil !== stencil) {
+      if (this._depthCopy) this._depthCopy.dispose();
+      this._depthCopy = null;
       try {
         this._depthCopy = new RenderTarget(gl, w, h, {
-          colorCount: 0, depth: true, depthTexture: true, filter: 'nearest', wrap: 'clamp'
+          colorCount: 0, depth: true, depthTexture: true, stencil: stencil, wrap: 'clamp'
         });
       } catch (err) {
         this._depthMode = 2;
+        this._softProbe = false;
+        this.softParticles = false;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
         if (typeof console !== 'undefined') console.warn('[particles] depth copy unavailable:', err);
         return null;
       }
     } else if (this._depthCopy.width !== w || this._depthCopy.height !== h) {
       this._depthCopy.resize(w, h);
     }
-    const bound = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
     // Some drivers mask blitted depth with DEPTH_WRITEMASK; render() sets it back to false.
     gl.depthMask(true);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, bound);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._depthCopy.framebuffer);
-    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h,
+      stencil ? (gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT) : gl.DEPTH_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, bound);
     return this._depthCopy.depthTex;
   }
