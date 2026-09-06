@@ -17,7 +17,7 @@
  */
 
 import {
-  vec3, mat4, clamp, lerp, damp, wrapAngle, moveTowards, Rand
+  vec3, mat4, clamp, lerp, damp, wrapAngle, moveTowards, Rand, TAU
 } from '../core/math.js';
 import {
   box, roundedBox, cylinder, torus, mergeGeometries, computeBounds, geometryTriangleCount
@@ -68,10 +68,22 @@ const FIRE_DAMAGE = 0.85;
 const WORLD_RESTITUTION = 0.24;
 /** Restitution used for vehicle-vs-vehicle impacts. */
 const CAR_RESTITUTION = 0.32;
+/** How much of a glancing car-vs-car impulse turns into yaw. Arcade-tamed. */
+const CAR_SPIN = 0.22;
 /** Impact speed (m/s) below which a contact does no damage at all. */
 const DAMAGE_FLOOR = 2.6;
 /** Radians of visual body pitch/roll allowed. */
 const MAX_BODY_TILT = 0.075;
+/**
+ * Collision tags a vehicle must never be pushed out of. `CollisionWorld.queryAABB` reports
+ * non-solid bodies as well (water volumes, mission triggers, zones), and characters register
+ * their own bodies; only real world geometry may act as a wall.
+ * @type {Object<string, number>}
+ */
+const NON_BLOCKING_TAG = {
+  trigger: 1, sensor: 1, zone: 1, water: 1, marker: 1,
+  ped: 1, player: 1, vehicle: 1, pickup: 1
+};
 
 /* ------------------------------------------------------------------ *
  * Colour tables (linear space)
@@ -1560,6 +1572,17 @@ function tyreCurve(slip, peak) {
 }
 
 /**
+ * True when an audio handle is a real, running voice. `audio/sfx.js` hands back a frozen silent
+ * stub (`alive === false`) whenever the AudioContext is not running yet; caching one of those
+ * would leave the vehicle mute for the rest of the session.
+ * @param {*} h Handle returned by an SFX factory.
+ * @returns {boolean} Whether the handle is worth keeping.
+ */
+function isLiveHandle(h) {
+  return !!h && h.alive !== false;
+}
+
+/**
  * Reads a finite number or falls back.
  * @param {*} v Candidate.
  * @param {number} d Fallback.
@@ -1678,6 +1701,8 @@ export class Vehicle {
     this.game = o.game || null;
 
     const t = this.type;
+    /** @type {number} Monotonic spawn id; decides which half of a pair resolves a contact. */
+    this._vid = _spawnSeq;
     const seed = fin(o.seed, ((_spawnSeq++) * 2654435761) >>> 0);
     /** @type {Rand} Deterministic per-vehicle randomness. */
     this.rng = new Rand(seed || 1);
@@ -1704,10 +1729,16 @@ export class Vehicle {
     this.forwardSpeed = 0;
     /** @type {number} Lateral speed along the car's right axis, m/s. */
     this.lateralSpeed = 0;
-    /** @type {number} Speed in km/h (always positive). See `forwardSpeed` for m/s. */
+    /**
+     * Unsigned planar speed in **metres per second**, matching the project-wide unit rule and
+     * `player.speed`. `ui/hud.js` converts it for the speedometer, so it must never be km/h.
+     * @type {number}
+     */
     this.speed = 0;
-    /** @type {number} Unsigned speed in m/s. */
+    /** @type {number} Unsigned speed in m/s (alias of `speed`). */
     this.speedMs = 0;
+    /** @type {number} Unsigned speed in km/h, for UI that wants it pre-converted. */
+    this.speedKmh = 0;
     /** @type {number} Engine speed in rpm. */
     this.rpm = t.idleRpm;
     /** @type {number} Current gear: -1 reverse, 0 neutral, 1..5 forward. */
@@ -1800,6 +1831,7 @@ export class Vehicle {
     this._skidAccum = 0;
     this._sirenPhase = this.rng.next() * 4;
     this._engineVoice = null;
+    this._voiceRetry = 0;
     this._screech = null;
     this._screechLevel = 0;
     this._sirenHandle = null;
@@ -1875,12 +1907,48 @@ export class Vehicle {
     this.pitch = 0;
     this.roll = 0;
     this.forwardSpeed = 0;
+    this.lateralSpeed = 0;
     this.speed = 0;
     this.speedMs = 0;
+    this.speedKmh = 0;
     this.gear = 1;
     this.rpm = this.type.idleRpm;
+    this.steer = 0;
+    this.steerAngle = 0;
+    this.drifting = false;
+    this.driftAmount = 0;
+    this._accelLong = 0;
+    this._accelLat = 0;
+    this._shiftTimer = 0;
     this._settled = false;
     this._groundValid = false;
+    // Traffic pools damaged-but-not-destroyed cars and restores `health` from the outside.
+    // Without clearing the destruction bookkeeping here a recycled car keeps burning and its
+    // old fuse detonates it seconds after it respawns at full health.
+    this._fuse = -1;
+    this._burning = false;
+    this._smoking = false;
+    this._impactCooldown = 0;
+    this._lastCrashSpeed = 0;
+    this._screechLevel = 0;
+    this._skidAccum = 0;
+    this._smokeAccum = 0;
+    this._exhaustAccum = 0;
+    this._safeX = x;
+    this._safeY = y;
+    this._safeZ = z;
+    this._safeYaw = yaw;
+    this._prevX = x;
+    this._prevY = y;
+    this._prevZ = z;
+    for (let i = 0; i < 4; i++) {
+      const w = this.wheels[i];
+      w.spin = 0;
+      w.spinRate = 0;
+      w.skid = 0;
+      w.slip = 0;
+      w.locked = false;
+    }
   }
 
   /**
@@ -1930,6 +1998,7 @@ export class Vehicle {
     }
 
     this._collideWorld(collision);
+    this._collideVehicles();
     this._postStep(d);
   }
 
@@ -2330,8 +2399,8 @@ export class Vehicle {
       }
       if (w.locked && !w.front) omega = 0;
       w.spinRate = omega;
-      w.spin += omega * h;
-      if (w.spin > 1e6 || w.spin < -1e6) w.spin = 0;
+      // Wrap into one turn so the angle never loses float precision and never pops.
+      w.spin = (w.spin + omega * h) % TAU;
       w.steerAngle = w.front ? sigma : 0;
     }
 
@@ -2475,7 +2544,10 @@ export class Vehicle {
 
     for (let i = 0; i < _bodies.length; i++) {
       const b = _bodies[i];
-      if (!b || b.tag === 'trigger' || b.userData === this) continue;
+      // `queryAABB` deliberately reports non-solid bodies too (see world/collision.js), while
+      // `sweepSphere` filters them out. Without the same filter here the sea volume that covers
+      // a waterfront lot reads as a huge box and catapults any car that reaches the shore.
+      if (!b || b.solid === false || NON_BLOCKING_TAG[b.tag] === 1 || b.userData === this) continue;
       const bodyTop = b.cy + b.hy;
       const bodyBottom = b.cy - b.hy;
       // Anything we drive over (kerbs, ramps) or duck under is the suspension's problem.
@@ -2639,32 +2711,95 @@ export class Vehicle {
   }
 
   /**
-   * Elastic impulse against another vehicle. Callers (traffic, police, game) detect the
-   * overlap and hand both vehicles to this method.
+   * Resolves this vehicle against every other vehicle in `game.vehicles`.
+   *
+   * `game.js` explicitly leaves vehicle-vs-vehicle contact to this module (it only installs a
+   * no-op `collideWith` when a build does not ship one), so without this pass cars drive
+   * straight through each other. Each pair is handled exactly once per frame by the vehicle
+   * with the lower spawn id, and the broad phase is a squared-distance test against the two
+   * bounding radii, so a full city block of traffic costs a few hundred subtractions.
+   * @returns {void}
+   * @private
+   */
+  _collideVehicles() {
+    const g = this.game;
+    const list = g ? g.vehicles : null;
+    if (!Array.isArray(list) || list.length < 2) return;
+    const bra = this.type.boundRadius;
+    const px = this.position[0];
+    const pz = this.position[2];
+    for (let i = 0; i < list.length; i++) {
+      const o = list[i];
+      if (o === this || !o || !o.type || !o.position) continue;
+      // One resolution per pair: the lower spawn id owns it.
+      if (!(this._vid < o._vid)) continue;
+      if (o.visible === false) continue;
+      const dx = o.position[0] - px;
+      const dz = o.position[2] - pz;
+      const reach = bra + o.type.boundRadius;
+      if (dx * dx + dz * dz > reach * reach) continue;
+      this.collideWith(o);
+    }
+  }
+
+  /**
+   * Elastic impulse against another vehicle, resolved as an exact 2D separating-axis test
+   * between the two yaw-oriented body boxes. Bounding circles would keep a bus two metres
+   * clear of the next lane, so the minimum translation axis is used instead: cars can sit
+   * bumper to bumper and side by side, and a glancing blow spins both of them.
    * @param {Vehicle} other The other vehicle.
    * @returns {boolean} True when the pair actually overlapped and was resolved.
    */
   collideWith(other) {
-    if (!other || other === this) return false;
+    if (!other || other === this || !other.type || !other.position || !other.velocity) {
+      return false;
+    }
     const ta = this.type;
     const tb = other.type;
-    let dx = other.position[0] - this.position[0];
-    let dz = other.position[2] - this.position[2];
     const dy = other.position[1] - this.position[1];
     if (Math.abs(dy) > (ta.height + tb.height) * 0.6) return false;
-    const ra = ta.boundRadius * 0.78;
-    const rb = tb.boundRadius * 0.78;
-    const minDist = ra + rb;
-    let dist = Math.hypot(dx, dz);
-    if (dist > minDist) return false;
-    if (dist < 1e-4) {
-      dx = Math.cos(this.yaw + 1.2);
-      dz = -Math.sin(this.yaw + 1.2);
-      dist = 1;
+    const dx = other.position[0] - this.position[0];
+    const dz = other.position[2] - this.position[2];
+    const broad = ta.boundRadius + tb.boundRadius;
+    if (dx * dx + dz * dz > broad * broad) return false;
+
+    // --- exact overlap: SAT between two yaw-oriented boxes -----------------------------------
+    const sa = Math.sin(this.yaw);
+    const ca = Math.cos(this.yaw);
+    const sb = Math.sin(other.yaw);
+    const cb = Math.cos(other.yaw);
+    const aXx = ca; const aXz = -sa;   // this: right axis
+    const aZx = sa; const aZz = ca;    // this: rearward axis
+    const bXx = cb; const bXz = -sb;
+    const bZx = sb; const bZz = cb;
+    const haw = ta.width * 0.5; const hal = ta.length * 0.5;
+    const hbw = tb.width * 0.5; const hbl = tb.length * 0.5;
+    const axes = _satAxes;
+    axes[0] = aXx; axes[1] = aXz;
+    axes[2] = aZx; axes[3] = aZz;
+    axes[4] = bXx; axes[5] = bXz;
+    axes[6] = bZx; axes[7] = bZz;
+    let depth = Infinity;
+    let nx = 0;
+    let nz = 0;
+    for (let k = 0; k < 4; k++) {
+      const ux = axes[k * 2];
+      const uz = axes[k * 2 + 1];
+      const ra = haw * Math.abs(aXx * ux + aXz * uz) + hal * Math.abs(aZx * ux + aZz * uz);
+      const rb = hbw * Math.abs(bXx * ux + bXz * uz) + hbl * Math.abs(bZx * ux + bZz * uz);
+      const d = dx * ux + dz * uz;
+      const overlap = ra + rb - Math.abs(d);
+      if (overlap <= 0) return false;
+      if (overlap < depth) {
+        depth = overlap;
+        // The normal points from this vehicle towards the other one.
+        const sign = d < 0 ? -1 : 1;
+        nx = ux * sign;
+        nz = uz * sign;
+      }
     }
-    const nx = dx / dist;
-    const nz = dz / dist;
-    const overlap = minDist - dist;
+    if (!(depth > 1e-4) || !Number.isFinite(depth)) return false;
+    if (depth > 3) depth = 3;
 
     const ma = ta.mass;
     const mb = tb.mass;
@@ -2672,8 +2807,8 @@ export class Vehicle {
     const invB = 1 / mb;
     const invSum = invA + invB;
 
-    // Positional correction proportional to inverse mass.
-    const push = overlap * 0.55;
+    // Positional correction split by inverse mass: the lighter car gives way.
+    const push = depth * 0.55;
     this.position[0] -= nx * push * (invA / invSum);
     this.position[2] -= nz * push * (invA / invSum);
     other.position[0] += nx * push * (invB / invSum);
@@ -2691,24 +2826,43 @@ export class Vehicle {
     other.velocity[0] += nx * j * invB;
     other.velocity[2] += nz * j * invB;
 
-    // Glancing blows spin both cars.
-    const armA = (this.position[0] - other.position[0]) * nz -
-      (this.position[2] - other.position[2]) * nx;
-    this.yawRate = clamp(this.yawRate - armA * j / ta.yawInertia * 0.5,
-      -MAX_YAW_RATE, MAX_YAW_RATE);
-    other.yawRate = clamp(other.yawRate + armA * j / tb.yawInertia * 0.5,
-      -MAX_YAW_RATE, MAX_YAW_RATE);
+    // Glancing blows spin both cars: the lever arm is the offset between the two centres
+    // measured across the contact normal (zero for a square-on shunt, largest for a sideswipe).
+    const arm = (dx * nz - dz * nx) * 0.5 * j * CAR_SPIN;
+    this.yawRate = clamp(this.yawRate + arm / ta.yawInertia, -MAX_YAW_RATE, MAX_YAW_RATE);
+    other.yawRate = clamp(other.yawRate + arm / tb.yawInertia, -MAX_YAW_RATE, MAX_YAW_RATE);
+
+    // Both bodies just had their world velocity changed; refresh the body-frame speeds the
+    // camera, the HUD and the AI read before the next sub-step recomputes them.
+    this._syncBodySpeeds();
+    other._syncBodySpeeds();
 
     if (impact > DAMAGE_FLOOR) {
-      _pt[0] = this.position[0] + nx * ra;
+      _pt[0] = this.position[0] + nx * (haw + hal) * 0.5;
       _pt[1] = this.position[1] + ta.height * 0.15;
-      _pt[2] = this.position[2] + nz * ra;
+      _pt[2] = this.position[2] + nz * (haw + hal) * 0.5;
       this._impactEffects(impact, _pt, -nx, -nz);
       const base = Math.pow(impact - DAMAGE_FLOOR, 1.4) * 2.6;
       this.applyDamage(base * (mb / ma) * 0.9, _pt, null);
       other.applyDamage(base * (ma / mb) * 0.9, _pt, null);
     }
     return true;
+  }
+
+  /**
+   * Recomputes `forwardSpeed` / `lateralSpeed` / `speed` from the world velocity after an
+   * external impulse.
+   * @returns {void}
+   * @private
+   */
+  _syncBodySpeeds() {
+    const s = Math.sin(this.yaw);
+    const c = Math.cos(this.yaw);
+    this.forwardSpeed = this.velocity[0] * -s + this.velocity[2] * -c;
+    this.lateralSpeed = this.velocity[0] * c + this.velocity[2] * -s;
+    this.speedMs = Math.hypot(this.velocity[0], this.velocity[2]);
+    this.speed = this.speedMs;
+    this.speedKmh = this.speedMs * 3.6;
   }
 
   /**
@@ -2780,9 +2934,21 @@ export class Vehicle {
   _postStep(dt) {
     const t = this.type;
     this.speedMs = Math.hypot(this.velocity[0], this.velocity[2]);
-    this.speed = this.speedMs * 3.6;
+    this.speed = this.speedMs;
+    this.speedKmh = this.speedMs * 3.6;
     this._distanceDriven += this.speedMs * dt;
     if (this.occupants.length > 0) this.occupants[0] = this.driver;
+
+    // Keep the fire/smoke bookkeeping in step with the health an owner may have restored from
+    // the outside (traffic recycles pooled cars by writing `health` directly).
+    if (!this.isDestroyed) {
+      const dmgFrac = this.damage;
+      this._smoking = dmgFrac >= SMOKE_DAMAGE;
+      if (dmgFrac < FIRE_DAMAGE) {
+        this._burning = false;
+        if (this._fuse > 0) this._fuse = -1;
+      }
+    }
 
     // --- visual suspension, pitch and roll -------------------------------------------------------
     const staticLoad = t.mass * GRAVITY * 0.25;
@@ -2940,17 +3106,28 @@ export class Vehicle {
     const g = this.game;
     const sfx = g && g.sfx ? g.sfx : null;
     if (!sfx) return;
+    this._voiceRetry = Math.max(0, this._voiceRetry - dt);
     const wantEngine = !this.isDestroyed && this.engineOn &&
       (this.isPlayer || this._viewDist < 58);
     const dropEngine = this.isDestroyed || !this.engineOn ||
       (!this.isPlayer && this._viewDist > 78);
 
-    if (wantEngine && !this._engineVoice && typeof sfx.createEngine === 'function') {
+    if (wantEngine && !this._engineVoice && this._voiceRetry <= 0 &&
+      typeof sfx.createEngine === 'function') {
       const ext = g.ext || (g.ext = {});
       const budget = this.isPlayer ? 999 : 10;
       if ((ext.vehicleVoices || 0) < budget) {
-        ext.vehicleVoices = (ext.vehicleVoices || 0) + 1;
-        this._engineVoice = sfx.createEngine(this);
+        // Claim a slot only once a live voice actually exists. A silent stub (the AudioContext
+        // has not been resumed yet) or a null return must not hold the slot for the rest of the
+        // session, and must not be cached either or the car stays mute once audio comes up.
+        const voice = sfx.createEngine(this);
+        if (isLiveHandle(voice)) {
+          this._engineVoice = voice;
+          ext.vehicleVoices = (ext.vehicleVoices || 0) + 1;
+        } else {
+          if (voice && typeof voice.stop === 'function') voice.stop();
+          this._voiceRetry = 0.75;
+        }
       }
     } else if (dropEngine && this._engineVoice) {
       this._stopEngineVoice();
@@ -2974,7 +3151,8 @@ export class Vehicle {
     this._screechLevel = damp(this._screechLevel, screech, 9, dt);
     if (this._screechLevel > 0.06 && this._viewDist < 70) {
       if (!this._screech && typeof sfx.tireScreech === 'function') {
-        this._screech = sfx.tireScreech(this.position, this._screechLevel);
+        const s = sfx.tireScreech(this.position, this._screechLevel);
+        this._screech = isLiveHandle(s) ? s : null;
       }
       if (this._screech) {
         if (this._screech.setIntensity) this._screech.setIntensity(this._screechLevel);
@@ -2987,7 +3165,8 @@ export class Vehicle {
     // --- siren -----------------------------------------------------------------------------------
     if (this.lights.siren && !this._sirenHandle && typeof sfx.siren === 'function' &&
       this._viewDist < 220) {
-      this._sirenHandle = sfx.siren(this.position);
+      const h = sfx.siren(this.position);
+      this._sirenHandle = isLiveHandle(h) ? h : null;
     } else if ((!this.lights.siren || this._viewDist > 260) && this._sirenHandle) {
       this._stopSiren();
     }
@@ -3249,7 +3428,10 @@ export class Vehicle {
       _m2[13] = ay - len;
       _m2[14] = az;
       mat4.rotateY(_m2, _m2, this.yaw - w.steerAngle);
-      mat4.rotateX(_m2, _m2, w.spin);
+      // `spin` is the angular velocity about the wheel's +X (right) axis integrated over time.
+      // A rotation of +theta about +X sweeps the contact patch toward -Z, which is the way the
+      // car itself travels, so the angle has to be negated or the wheels roll backwards.
+      mat4.rotateX(_m2, _m2, -w.spin);
       mat4.scale(_m2, _m2, t.wheelWidth, t.wheelRadius, t.wheelRadius);
       _sopt.tint = _tint2;
       _sopt.emissiveBoost = 1;

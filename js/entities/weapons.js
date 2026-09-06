@@ -1769,7 +1769,14 @@ export class WeaponSystem {
     const f = this._flash;
     if (f.t > 0 && typeof renderer.submitLight === 'function') {
       const k = clamp(f.t / MUZZLE_LIGHT_TIME, 0, 1) * f.power;
-      renderer.submitLight(f.x, f.y, f.z, 1, 0.82, 0.45, 7.5, 6 * k);
+      // The shooter stands ~0.5 m from this light, so it reaches them at nearly full strength.
+      // At the original 6.0/7.5 m the player blew out to flat white on every shot - clearly wrong
+      // in daylight. Scale with how dark the scene is so the flash still reads at night, where a
+      // muzzle flash genuinely is the brightest thing around.
+      const night = this.game && this.game.renderer && this.game.renderer.sky
+        ? (this.game.renderer.sky.nightFactor || 0) : 0;
+      const intensity = (2.2 + 3.4 * night) * k;
+      renderer.submitLight(f.x, f.y, f.z, 1, 0.82, 0.45, 5.5 + 2 * night, intensity);
     }
     let lights = 0;
     const tracers = this._tracers;

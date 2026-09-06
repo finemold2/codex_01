@@ -240,6 +240,16 @@ export default async function run({ canvas }) {
     if (mode.includes('turn')) game.camera.yaw += Math.PI;
     if (mode.includes('nomark')) game.missions.submit = () => {};
     if (mode.includes('night')) game.time.hours = 22.5;
+    if (mode.includes('shoot')) {
+      // Aim and fire so the muzzle flash, tracer, shell and impact particles are all live.
+      game.player.aiming = true;
+      game.setCameraMode('aim');
+      for (let i = 0; i < 24; i++) {
+        game.weapons.tryFire(game.camera.position, game.camera.forward, true, 1);
+        game.update(1 / 60);
+      }
+      game.weapons.tryFire(game.camera.position, game.camera.forward, true, 1);
+    }
     if (mode.includes('dusk')) game.time.hours = 18.3;
     if (mode.includes('nopick')) game._submitPickups = () => {};
     if (mode.includes('move')) {
