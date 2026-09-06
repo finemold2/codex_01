@@ -1351,6 +1351,9 @@ export class TrafficManager {
       const dz = v.position[2] - pz;
       const d2 = dx * dx + dz * dz;
       const period = d2 > 12100 ? LOD2_STEP : d2 > 2025 ? LOD1_STEP : 0;
+      // `_drive` can recycle its own car (stuck / idle watchdogs), which splices it out of
+      // this list. Step the index back so the car that slid into slot `i` still gets a tick.
+      const before = this.vehicles.length;
       if (period > 0) {
         ai.accum += step;
         if (ai.accum < period) continue;
@@ -1359,6 +1362,7 @@ export class TrafficManager {
       } else {
         this._drive(v, ai, step);
       }
+      if (this.vehicles.length < before) i -= before - this.vehicles.length;
     }
   }
 

@@ -13,6 +13,21 @@ python3 -m http.server 8000
 
 ---
 
+## 📸 스크린샷
+
+| | |
+|---|---|
+| ![메인 메뉴](docs/screenshots/01-menu.jpg) | ![거리](docs/screenshots/02-street.jpg) |
+| 메인 메뉴 | 3인칭 도보 · HUD(라디오·미니맵·무기·수배) |
+| ![운전](docs/screenshots/03-driving.jpg) | ![야간](docs/screenshots/04-night.jpg) |
+| 차량 추적 시점 · 속도계 | 야간 · 창문 조명과 달빛 |
+| ![지도](docs/screenshots/05-map.jpg) | ![도시 전경](docs/screenshots/06-aerial.jpg) |
+| 전체 지도(구역·랜드마크·미션 마커) | 도시 전경 |
+
+> 모두 헤드리스 크로미움(SwiftShader 소프트웨어 렌더링)에서 촬영한 실제 화면입니다.
+> 하드웨어 GPU에서는 더 부드럽게 동작합니다.
+
+
 ## 🎮 조작
 
 | 키 | 동작 | 키 | 동작 |

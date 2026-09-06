@@ -92,7 +92,7 @@ export default async function run({ canvas }) {
     for (let i = 0; i < 60 * 120; i++) {
       // teleport the player far away every 200 frames so nobody can see him
       if (i % 200 === 0) {
-        const s = game.city.spawns.missionPoints[(i / 200 + 5) % game.city.spawns.missionPoints.length];
+        const s = game.city.spawns.peds[(i / 200 * 37 + 11) % game.city.spawns.peds.length];
         game.player.reset(s.x, game.worldToGround(s.x, s.z) + 0.1, s.z, 0);
       }
       step();

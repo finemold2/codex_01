@@ -883,13 +883,20 @@ export class PoliceSystem {
     }
     // Starvation: cars are being dispatched but none of them can actually get to the suspect,
     // because the lane route in is blocked or loops. Without this the response is infinite
-    // cars circling two blocks away and a wanted level nobody ever comes to collect.
-    if (closest < 3600) this._starveTimer = 0;
+    // cars circling two blocks away and a wanted level nobody ever comes to collect. It only
+    // counts while the police can actually see the suspect - during a search they are not
+    // supposed to be converging on him at all.
+    if (closest < 3600 || !this.playerVisible) this._starveTimer = 0;
     else this._starveTimer += step;
     if (this._dispatchTimer <= 0 && pursuing < plan.cars) {
       this._dispatchTimer = DISPATCH_INTERVAL;
       const armored = plan.armored > 0 && pursuing >= plan.cars - plan.armored;
-      this._dispatchCar(px, pz, armored, this._starveTimer > 18);
+      // While searching, units are sent to the last place the suspect was seen. Dispatching
+      // them around his *actual* position handed them a free sighting the moment they spawned,
+      // which re-armed the search timer for ever: the heat could never be lost by hiding.
+      const sx = this.searching && this.lastKnown.valid ? this.lastKnown.x : px;
+      const sz = this.searching && this.lastKnown.valid ? this.lastKnown.z : pz;
+      this._dispatchCar(sx, sz, armored, this._starveTimer > 18);
     }
 
     // --- roadblocks --------------------------------------------------------------------
@@ -1133,14 +1140,18 @@ export class PoliceSystem {
         this._updateRoadblock(unit, dt, player, px, pz);
         continue;
       }
+      // Keep the label honest: a unit dispatched to investigate a single-star report is an
+      // active pursuit once the heat rises (and back again if it falls).
+      unit.state = this.wanted >= 2 ? 'pursue' : 'investigate';
 
       // Deploy cops when the player is on foot nearby, or at high heat.
       // The crew also gets out when the car has stopped making headway: if the cruiser cannot
       // route any closer, officers on foot are the only thing that will ever reach the
       // suspect, and "the police simply never turn up" is the worst failure this system has.
+      const stranded = unit.noProgress > 6 || this._starveTimer > 14;
       const wantDeploy = player && !player.vehicle && !player.dead
         && (d2 < DEPLOY_RANGE * DEPLOY_RANGE || (this.wanted >= 4 && d2 < 3600)
-          || (unit.noProgress > 6 && d2 < 4900));
+          || (stranded && d2 < 6400));
       if (wantDeploy && unit.cops.length === 0 && this.cops.length < plan.cops) {
         unit.deployTimer += dt;
         // Officers get out as soon as the cruiser is down to walking pace. Waiting for a dead
