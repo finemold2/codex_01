@@ -138,14 +138,27 @@ const AI = (() => {
 
   /**
    * 상자 하나가 지금 나에게 얼마나 값어치가 있는지.
-   * smart=false 면 내용물을 모르는 셈 치고 대충 값을 매깁니다 (쉬움 난이도).
+   *
+   * AI 도 사람과 똑같이 **내용물은 모릅니다.** 겉에서 알 수 있는 것은 등급(발광 색)뿐이고,
+   * 나머지는 "지금 보급이 얼마나 아쉬운가"로 판단합니다.
+   * 화물 투시기·상시 레이더로 우리 팀이 상자를 투시했다면 그때는 속을 보고 값을 매깁니다.
+   * smart=false (쉬움)는 등급도 제대로 못 읽고 어림짐작합니다.
    */
   function crateValue(game, me, c, smart) {
     if (!smart) return 40 + Math.random() * 26;
     const def = typeof itemDef === 'function' && c.item ? itemDef(c.item.id) : null;
     if (!def) return 42;
     const hurt = 1 - me.hp / me.maxHp;
-    let v = (CRATE_BASE[def.rarity] || 40) * (0.75 + (c.item.roll || 1) * 0.3);
+    const scanned = game.crateScan && game.crateScan[me.team];
+    let v = CRATE_BASE[def.rarity] || 40;
+
+    if (!scanned) {
+      // 속을 모를 때 — 보급이 아쉬울수록 아무 상자나 값이 오릅니다
+      return v * (0.72 + hurt * 0.55 + ammoStarve(me) * 0.32);
+    }
+
+    // 투시했으면 실제 내용물로 값을 매깁니다
+    v *= 0.75 + (c.item.roll || 1) * 0.3;
     switch (def.cat) {
       case 'heal':     v *= 0.28 + hurt * 2.2; break;                      // 멀쩡하면 굳이
       case 'defense':  v *= 0.62 + hurt * 1.05; break;
@@ -153,6 +166,7 @@ const AI = (() => {
       case 'support':  v *= hurtAlly(game, me) ? 1.0 : 0.42; break;
       case 'mobility': v *= me.fuel < me.type.fuel * 0.5 ? 0.8 : 0.45; break;
       case 'eco':      v *= 0.38; break;
+      case 'intel':    v *= 0.35; break;                                   // AI 에겐 쓸모가 적습니다
       case 'tactic':   v *= 0.95; break;
       default:         break;                                             // offense 는 그대로
     }
@@ -160,12 +174,16 @@ const AI = (() => {
     return v;
   }
 
-  /** 지금 쓸 만한 사용형 아이템 고르기 → 인덱스 (없으면 -1) */
-  function pickItem(game, me, difficulty) {
+  /**
+   * 지금 쓸 만한 사용형 아이템 고르기 → 인덱스 (없으면 -1).
+   * extraBar 를 주면 그만큼 더 확실할 때만 씁니다 (한 턴에 두 번째로 쓸 때).
+   * 아군이든 적군이든 AI 전차는 모두 이 판단을 거칩니다.
+   */
+  function pickItem(game, me, difficulty, extraBar) {
     const d = DIFF[difficulty] || DIFF.normal;
     if (!me.items || !me.items.length) return -1;
     if (Math.random() > d.itemChance) return -1;
-    if (!d.itemSmart) return Math.floor(Math.random() * me.items.length);
+    if (!d.itemSmart) return extraBar ? -1 : Math.floor(Math.random() * me.items.length);
 
     const hurt = 1 - me.hp / me.maxHp;
     const near = nearestEnemyDist(game, me);
@@ -207,15 +225,19 @@ const AI = (() => {
         // 지원
         case 'medevac': case 'resupply': case 'command': s = ally ? 70 : 18; break;
         case 'airdrop':    s = 40; break;
+        // 정찰 — AI 는 이미 전장을 다 읽으므로 한 턴을 쓸 값어치가 적습니다
+        case 'cargo_scan': s = 16; break;
+        case 'recon':      s = 14; break;
+        case 'wiretap':    s = 10; break;
         case 'shuffle':    s = hurt > 0.55 ? 48 : 16; break;
         case 'restore':    s = 20; break;
         default:
-          s = def.cat === 'heal' ? 25 + hurt * 80 : def.cat === 'eco' ? 22 : 45;
+          s = def.cat === 'heal' ? 25 + hurt * 80 : def.cat === 'eco' ? 22 : def.cat === 'intel' ? 14 : 45;
       }
       s += (Math.random() * 2 - 1) * 12;
       if (s > bs) { bs = s; bi = i; }
     }
-    return bs >= d.itemBar ? bi : -1;
+    return bs >= d.itemBar + (extraBar || 0) ? bi : -1;
   }
 
   /** 사격 해 탐색 */

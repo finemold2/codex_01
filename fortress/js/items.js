@@ -29,7 +29,7 @@ const QUALITY = [
 
 const ITEM_CATS = {
   ammo: '탄약', heal: '보급', offense: '공격', defense: '방어',
-  mobility: '기동', tactic: '전술', support: '지원', eco: '경제',
+  mobility: '기동', tactic: '전술', support: '지원', eco: '경제', intel: '정보',
 };
 
 const ITEMS = {};
@@ -634,6 +634,68 @@ defActive({
   id: 'dome', name: '보호 돔', icon: '⛺', cat: 'defense', rarity: 'epic', price: 400, base: 2, uses: 1,
   desc: (v) => `${v}턴 동안 내가 받는 폭발 피해가 70% 줄어듭니다.`,
   apply(game, t, v) { t.buffs.dome = v + 1; return `보호 돔 ${v}턴`; },
+});
+
+/* ══════════════ 10. 정보 (정찰 계열) ══════════════
+ * 전장에 떨어진 상자도, 상대가 가진 장비도 처음에는 알 수 없습니다.
+ * 이 갈래를 써야 비로소 보입니다.
+ */
+
+/** 정찰 대상 — cloak 을 두른 전차는 잡히지 않습니다 */
+function revealTank(game, t) {
+  if (!t || t.buffs.cloak) return false;
+  t.revealed = true;
+  return true;
+}
+
+defActive({
+  id: 'recon', name: '정찰 드론', icon: '🛰', cat: 'intel', rarity: 'rare', price: 235, base: 1, uses: 1,
+  desc: () => '모든 적의 장착 효과와 소지 아이템을 이번 판이 끝날 때까지 볼 수 있습니다.',
+  apply(game, t) {
+    let n = 0;
+    for (const e of game.tanks) if (e.alive && e.team !== t.team && revealTank(game, e)) n++;
+    if (t.isAI) game.ui.banner('🛰 적이 우리 장비를 정찰했습니다', 1500);
+    return n ? `적 ${n}대 정찰` : '잡히는 적 없음';
+  },
+});
+defActive({
+  id: 'wiretap', name: '전파 탐지기', icon: '📻', cat: 'intel', rarity: 'common', price: 110, base: 2, usesFrom: true,
+  desc: (v) => `가장 가까운 적 하나의 장비를 들여다봅니다. (${v}회)`,
+  apply(game, t) {
+    let best = null, bd = Infinity;
+    for (const e of game.tanks) {
+      if (!e.alive || e.team === t.team || e.revealed) continue;
+      const d = Math.abs(e.x - t.x);
+      if (d < bd) { bd = d; best = e; }
+    }
+    if (!best) return '새로 잡히는 적 없음';
+    return revealTank(game, best) ? `${best.name} 정찰` : `${best.name} — 차폐됨`;
+  },
+});
+defActive({
+  id: 'cargo_scan', name: '화물 투시기', icon: '🔍', cat: 'intel', rarity: 'rare', price: 210, base: 1, uses: 1,
+  desc: () => '전장에 떨어진 보급 상자의 내용물이 이번 판 내내 보입니다.',
+  apply(game, t) {
+    game.crateScan = game.crateScan || {};
+    game.crateScan[t.team] = true;
+    return `상자 투시 (${game.crates.length}개)`;
+  },
+});
+defItem({
+  id: 'radar', name: '상시 레이더', icon: '📡', kind: 'buff', cat: 'intel', rarity: 'epic', price: 380, base: 1,
+  desc: () => '판이 시작될 때부터 모든 적의 장비가 보입니다. 상자 내용물도 함께 보입니다.',
+  apply(game, t) {
+    t.buffs.radar = 1;
+    game.crateScan = game.crateScan || {};
+    game.crateScan[t.team] = true;
+    for (const e of game.tanks) if (e.alive && e.team !== t.team) revealTank(game, e);
+    return '전장 상시 감시';
+  },
+});
+defItem({
+  id: 'cloak', name: '전자 차폐', icon: '🕶', kind: 'buff', cat: 'intel', rarity: 'rare', price: 225, base: 1,
+  desc: () => '내 장비가 적의 정찰에 잡히지 않습니다. 이미 들킨 상태도 다시 감춥니다.',
+  apply(game, t) { t.buffs.cloak = 1; t.revealed = false; return '전파 차폐'; },
 });
 
 /* ══════════════ 인스턴스 (굴림) ══════════════ */

@@ -64,24 +64,20 @@ class Game {
       }
     }
 
-    // 영구 장착 모듈 → 출전 장비 순으로 적용
-    const me = this.tanks.find((t) => !t.isAI);
-    if (me) {
-      if (cfg.modules && cfg.modules.length) for (const inst of cfg.modules) this.grantItem(me, inst, true);
-      if (cfg.loadout && cfg.loadout.length) for (const inst of cfg.loadout) this.grantItem(me, inst, true);
-    }
-
     this.turnIdx = -1;
     this.round = 1;
     this.wind = 0;
     this.windHold = 0;        // 몇 라운드 더 이 바람이 유지되는지
     this.windChanged = false; // 이번 턴 안내에 '바람이 바뀌었습니다' 를 붙일지
+    this.windKind = 'both';   // 무엇이 바뀌었는지 — 'dir' 방향만 / 'speed' 세기만 / 'both' 둘 다
     this.projectiles = [];
     this.pending = [];        // 지연 폭발 (연쇄탄 등)
     this.burns = [];          // 네이팜 불바다
     this.floaters = [];
     this.crates = [];         // 보급 상자
     this.hoverCrate = null;   // 마우스가 올라간 상자
+    this.hoverTank = null;    // 마우스가 올라간 전차
+    this.crateScan = {};      // 팀별 상자 투시 여부 — 화물 투시기 / 상시 레이더
     this.mines = [];          // 매설된 지뢰
     this.planes = [];         // 보급기 / 폭격기
     this.bonusCredits = 0;    // 전리품 상자로 얻은 크레딧
@@ -98,6 +94,14 @@ class Game {
     this.acc = 0;
     this.last = performance.now();
     this.stats = { shots: 0, totalDamage: 0 };
+
+    // 영구 장착 모듈 → 출전 장비 순으로 적용
+    // (상자 투시·정찰 같은 전장 상태를 건드리므로 반드시 상태 초기화 뒤에 옵니다)
+    const me = this.tanks.find((t) => !t.isAI);
+    if (me) {
+      if (cfg.modules && cfg.modules.length) for (const inst of cfg.modules) this.grantItem(me, inst, true);
+      if (cfg.loadout && cfg.loadout.length) for (const inst of cfg.loadout) this.grantItem(me, inst, true);
+    }
 
     this.rollWind(true);   // 첫 바람은 조용히 정합니다
     this.nextTurn();
@@ -140,17 +144,59 @@ class Game {
 
   setState(s) { this.state = s; this.stateT = 0; }
 
+  /* ── 정보 공개 범위 ──
+   * 상자 내용물도, 적의 장비도 처음에는 보이지 않습니다.
+   * 정찰 계열 아이템을 써야 열립니다.
+   */
+
+  /** 화면을 보는 쪽의 팀 — 사람이 없으면(관전) 지금 턴을 잡은 전차 기준 */
+  viewTeam() {
+    const me = this.tanks.find((t) => !t.isAI && t.alive) || this.tanks.find((t) => !t.isAI);
+    if (me) return me.team;
+    return this.cur ? this.cur.team : -1;
+  }
+
+  /** 상자 속을 볼 수 있는지 (화물 투시기 · 상시 레이더) */
+  crateScanned() { return !!this.crateScan[this.viewTeam()]; }
+
+  /** 그 전차의 장착 효과·소지품을 볼 수 있는지 — 우리 팀이거나 정찰당한 적 */
+  canSeeKit(t) { return !!t && (t.team === this.viewTeam() || !!t.revealed); }
+
   /**
    * 바람은 매 턴이 아니라 몇 라운드에 한 번씩만 바뀝니다.
    * 한 번 불면 3~5 라운드 동안 그대로라, 그동안은 조준값을 그대로 써먹을 수 있습니다.
    */
   rollWind(silent) {
     const prev = this.wind;
-    let w = prev, tries = 0;
-    do {
-      w = Math.round(clamp(prev * 0.25 + (Math.random() * 2 - 1) * 9.5, -10, 10) * 10) / 10;
-    } while (Math.abs(w - prev) < 1.5 && ++tries < 8);   // 바뀌었으면 티가 나게
+    const mag = Math.abs(prev), sign = prev >= 0 ? 1 : -1;
+    const q = (v) => Math.round(clamp(v, -10, 10) * 10) / 10;
+    let w, kind, tries = 0;
+
+    if (silent || mag < 0.6) {
+      // 판을 열 때 / 무풍에서 시작할 때는 그냥 새로 뽑습니다
+      w = q((Math.random() * 2 - 1) * 9.5);
+      kind = 'both';
+    } else {
+      const r = Math.random();
+      if (r < 0.30) {
+        // 방향만 바뀝니다 — 세기는 그대로
+        w = q(-prev);
+        kind = 'dir';
+      } else if (r < 0.62) {
+        // 세기만 바뀝니다 — 방향은 그대로
+        let m;
+        do { m = 1 + Math.random() * 9; } while (Math.abs(m - mag) < 2 && ++tries < 8);
+        w = q(sign * m);
+        kind = 'speed';
+      } else {
+        // 둘 다 바뀝니다
+        do { w = q((Math.random() * 2 - 1) * 9.8); } while ((Math.abs(w - prev) < 2.5 || Math.sign(w) === sign) && ++tries < 10);
+        kind = 'both';
+      }
+    }
+
     this.wind = w;
+    this.windKind = kind;
     this.windHold = 3 + Math.floor(Math.random() * 3);   // 3~5 라운드 유지
     if (HAS_FX && FX.setWind) FX.setWind(this.wind);
     if (HAS_GFX && Gfx.setWind) Gfx.setWind(this.wind);
@@ -239,8 +285,9 @@ class Game {
     this.turnLeft = TURN_SECONDS;
     this.ai = t.isAI ? { phase: 'wait', t: 0, plan: null, moved: 0 } : null;
     this.setState('intro');
+    const windNote = { dir: '방향', speed: '세기' }[this.windKind] || '방향과 세기';
     this.ui.banner(
-      `${t.name} 턴${t.isAI ? '' : ' — 당신 차례!'}${this.windChanged ? '  ·  🌬 바람이 바뀌었습니다' : ''}`,
+      `${t.name} 턴${t.isAI ? '' : ' — 당신 차례!'}${this.windChanged ? `  ·  🌬 바람 ${windNote}가 바뀌었습니다` : ''}`,
       this.windChanged ? 1700 : 1000,
     );
     this.windChanged = false;
@@ -967,19 +1014,20 @@ class Game {
     ai.t += dt;
     switch (ai.phase) {
       case 'wait':
-        // 주운 아이템을 가끔 사용합니다
+        // 주운 아이템을 상황 보고 씁니다 (한 턴에 최대 두 개 — 두 번째는 더 확실할 때만)
         if (!ai.usedItem && t.items.length && ai.t > 0.2) {
           ai.usedItem = true;
-          const idx = AI.pickItem(this, t, this.difficulty);
-          const slot = idx >= 0 ? t.items[idx] : null;
-          const def = slot && itemDef(slot.id);
-          if (def && def.apply) {
+          for (let k = 0; k < 2 && t.items.length; k++) {
+            const idx = AI.pickItem(this, t, this.difficulty, k === 0 ? 0 : 28);
+            if (idx < 0) break;
+            const slot = t.items[idx];
+            const def = slot && itemDef(slot.id);
+            if (!def || !def.apply) break;
             const label = def.apply(this, t, itemValue(slot));
-            if (label != null) {
-              slot.uses--;
-              if (slot.uses <= 0) t.items.splice(idx, 1);
-              this.floaters.push({ x: t.x, y: t.y - 80, text: `${def.icon} ${label}`, t: 0, color: RARITY[def.rarity].color });
-            }
+            if (label == null) break;
+            slot.uses--;
+            if (slot.uses <= 0) t.items.splice(idx, 1);
+            this.floaters.push({ x: t.x, y: t.y - 80 - k * 20, text: `${def.icon} ${label}`, t: 0, color: RARITY[def.rarity].color });
           }
         }
         if (ai.t > 0.45) {
@@ -1356,10 +1404,15 @@ class Game {
         c.fillStyle = rg;
         c.beginPath(); c.arc(cr.x, y, 30, 0, Math.PI * 2); c.fill();
       }
-      if (def) {
-        c.font = '12px system-ui, sans-serif';
-        c.textAlign = 'center';
+      // 내용물은 주워 봐야 압니다 — 투시했을 때만 아이콘이 보입니다
+      c.font = '12px system-ui, sans-serif';
+      c.textAlign = 'center';
+      if (def && this.crateScanned()) {
         c.fillText(def.icon, cr.x, y + 4);
+      } else {
+        c.fillStyle = 'rgba(255,255,255,0.72)';
+        c.font = 'bold 12px system-ui, sans-serif';
+        c.fillText('?', cr.x, y + 4);
       }
       // 마우스를 올린 상자는 테두리로 짚어 줍니다
       if (cr === this.hoverCrate) {
@@ -1559,6 +1612,26 @@ class Game {
       c.strokeText(`${TEAM_LABELS[t.team]}팀`, t.x, by - 18);
       c.fillStyle = t.color;
       c.fillText(`${TEAM_LABELS[t.team]}팀`, t.x, by - 18);
+    }
+
+    // 정찰 상태 표시 — 들킨 적에게는 👁, 차폐 중이면 🕶
+    if (t.alive && t.team !== this.viewTeam()) {
+      const mark = t.buffs.cloak ? '🕶' : t.revealed ? '👁' : '';
+      if (mark) {
+        c.font = '11px system-ui, sans-serif';
+        c.fillText(mark, bx + bw + 9, by + 5);
+      }
+    }
+
+    // 마우스를 올린 전차는 테두리로 짚어 줍니다
+    if (t === this.hoverTank && t.alive) {
+      c.strokeStyle = t.color;
+      c.lineWidth = 1.6;
+      c.setLineDash([5, 4]);
+      c.lineDashOffset = -this.time * 18;
+      const r = 26 * s;
+      c.beginPath(); c.ellipse(t.x, t.y - 12 * s, r, r * 0.85, 0, 0, Math.PI * 2); c.stroke();
+      c.setLineDash([]);
     }
 
     if (t === this.cur && t.alive && this.state !== 'over') {

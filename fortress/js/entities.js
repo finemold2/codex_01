@@ -103,6 +103,7 @@ class Tank {
     this.oiled = 0;         // 유막 — 이동력 절반
     this.acid = 0;          // 산성비 — 매 턴 피해
     this.pickups = 0;       // 주운 보급 상자 수
+    this.revealed = false;  // 정찰당해 장비가 상대에게 공개된 상태
   }
 
   /** 아이템으로 늘어난 최대 체력·이동력을 반영 */

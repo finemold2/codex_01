@@ -713,7 +713,53 @@
   }
   window.addEventListener('resize', fitCanvas);
 
-  /* 전장 위 보급 상자에 마우스를 올리면 내용물을 보여 줍니다 */
+  /** 상자 툴팁 — 투시하지 않았으면 등급까지만 보입니다 */
+  function crateTipHtml(cr) {
+    const def = cr.item && itemDef(cr.item.id);
+    if (!def) return null;
+    const r = RARITY[def.rarity];
+    if (game && game.crateScanned()) return itemTipHtml(cr.item, { scanned: true });
+    return {
+      accent: r.color,
+      html:
+        `<div class="tip-head"><span class="tip-ico">📦</span><span class="tip-name">보급 상자</span></div>` +
+        `<div class="tip-tags"><span class="tag" style="background:${r.color}">${r.label}</span></div>` +
+        `<div class="tip-desc">겉으로는 등급만 짐작할 수 있습니다. 무엇이 들었는지는 <b>주워야</b> 알 수 있습니다.</div>` +
+        `<div class="tip-meta">🔍 화물 투시기 · 📡 상시 레이더로 미리 볼 수 있습니다</div>`,
+    };
+  }
+
+  /** 전차 툴팁 — 우리 팀이거나 정찰한 적만 장비가 보입니다 */
+  function tankTipHtml(t) {
+    const seen = game && game.canSeeKit(t);
+    const rows = [];
+    rows.push(`<div class="tip-head"><span class="tip-ico">${t.alive ? '🚜' : '💀'}</span><span class="tip-name">${esc(t.name)}</span></div>`);
+    const tags = [`<span class="tag tag--cat">${esc(t.type.name)}</span>`];
+    if (game && game.teamMode) tags.push(`<span class="tag" style="background:${t.color}">${TEAM_LABELS[t.team]}팀</span>`);
+    if (t.isAI) tags.push('<span class="tag tag--dur">AI</span>');
+    if (t.buffs.cloak) tags.push('<span class="tag tag--perm">🕶 차폐</span>');
+    else if (t.revealed && t.team !== game.viewTeam()) tags.push('<span class="tag tag--dur">👁 정찰됨</span>');
+    rows.push(`<div class="tip-tags">${tags.join('')}</div>`);
+    rows.push(`<div class="tip-desc">체력 <b>${Math.max(0, Math.round(t.hp))} / ${t.maxHp}</b> · 이동력 <b>${Math.round(t.fuel)}</b></div>`);
+
+    if (!seen) {
+      rows.push('<div class="tip-desc">장비 <b>미상</b> — 정찰해야 무엇을 달고 있는지 보입니다.</div>');
+      rows.push('<div class="tip-meta">🛰 정찰 드론 · 📻 전파 탐지기 · 📡 상시 레이더</div>');
+    } else {
+      const chips = buffChips(t).map((b) => `${b.icon} ${esc(b.text)}`);
+      rows.push(`<div class="tip-desc">장착 효과: ${chips.length ? chips.join(' · ') : '<b>없음</b>'}</div>`);
+      const items = t.items.map((s) => {
+        const d = itemDef(s.id);
+        return d ? `${d.icon} ${esc(itemName(s))} ×${s.uses}` : '';
+      }).filter(Boolean);
+      rows.push(`<div class="tip-desc">소지 아이템: ${items.length ? items.join(' · ') : '<b>없음</b>'}</div>`);
+      const ammo = t.weapons.map((id) => `${WEAPONS[id].icon}${t.ammo[id] === Infinity ? '∞' : t.ammo[id]}`).join(' ');
+      rows.push(`<div class="tip-meta">탄약 ${ammo}</div>`);
+    }
+    return { accent: t.color, html: rows.join('') };
+  }
+
+  /* 전장 위 상자·전차에 마우스를 올리면 설명을 보여 줍니다 */
   (() => {
     const cv = $('#canvas');
     if (!cv) return;
@@ -724,31 +770,40 @@
       if (!r.width || !r.height) return null;
       return { x: (ev.clientX - r.left) * (cv.width / r.width), y: (ev.clientY - r.top) * (cv.height / r.height) };
     }
-    function crateAt(p) {
-      if (!game || !game.crates) return null;
+    function pickAt(p) {
+      if (!game) return null;
       let best = null, bd = 26;
       for (const c of game.crates) {
         const d = Math.hypot(c.x - p.x, c.y - p.y);
-        if (d < bd) { bd = d; best = c; }
+        if (d < bd) { bd = d; best = { kind: 'crate', obj: c }; }
       }
-      return best;
+      if (best) return best;
+      for (const t of game.tanks) {
+        const s = t.type.size;
+        if (Math.abs(t.x - p.x) < 26 * s && p.y > t.y - 42 * s && p.y < t.y + 12 * s) return { kind: 'tank', obj: t };
+      }
+      return null;
     }
 
     cv.addEventListener('mousemove', (ev) => {
       const p = worldAt(ev);
-      const c = p ? crateAt(p) : null;
-      if (c !== hover) {
-        hover = c;
-        if (game) game.hoverCrate = c;
-        const b = c && c.item ? itemTipHtml(c.item) : null;
+      const hit = p ? pickAt(p) : null;
+      const obj = hit ? hit.obj : null;
+      if (obj !== hover) {
+        hover = obj;
+        if (game) {
+          game.hoverCrate = hit && hit.kind === 'crate' ? obj : null;
+          game.hoverTank = hit && hit.kind === 'tank' ? obj : null;
+        }
+        const b = !hit ? null : hit.kind === 'crate' ? crateTipHtml(obj) : tankTipHtml(obj);
         if (b) tipShow(b.html, b.accent, ev); else tipHide();
-      } else if (c) {
+      } else if (obj) {
         tipMove(ev);
       }
     });
     cv.addEventListener('mouseleave', () => {
       hover = null;
-      if (game) game.hoverCrate = null;
+      if (game) { game.hoverCrate = null; game.hoverTank = null; }
       tipHide();
     });
   })();
@@ -895,6 +950,28 @@
     ['insurance', '📜', () => '전투 보험', '져도 크레딧을 상당 부분 지킵니다.'],
   ];
 
+  /** 전차에 걸린 효과를 칩 목록으로 — HUD 와 전차 툴팁이 같이 씁니다 */
+  function buffChips(t) {
+    if (!t) return [];
+    const out = [];
+    const add = (icon, text, color, note) => out.push({ icon, text, color: color || '#e9ecf4', note });
+    for (const [key, icon, fmt, note] of BUFF_CHIPS) {
+      const v = t.buffs[key];
+      if (v) add(icon, fmt(v), '#e9ecf4', note);
+    }
+    if ((t.buffs.armor || 1) !== 1) add('🛡', `방어 ${Math.round((1 - t.buffs.armor) * 100)}%`, '#7fd8ff', '받는 피해가 이만큼 조정됩니다.');
+    if ((t.buffs.damage || 1) !== 1) add('🔺', `화력 +${Math.round((t.buffs.damage - 1) * 100)}%`, '#ffcc2e', '주는 피해가 늘어납니다.');
+    if ((t.buffs.radius || 1) !== 1) add('💥', `반경 +${Math.round((t.buffs.radius - 1) * 100)}%`, '#ff9a5a', '모든 폭발 반경이 커집니다.');
+    if ((t.buffs.power || 1) !== 1) add('🧨', `사거리 +${Math.round((t.buffs.power - 1) * 100)}%`, '#ffcc2e', '포구 초속이 올라 더 멀리 날아갑니다.');
+    if (t.buffs.wind != null && t.buffs.wind < 1) add('🧭', `바람 저항 ${Math.round((1 - t.buffs.wind) * 100)}%`, '#9fe8ff', '바람이 탄도에 주는 영향이 줄어듭니다.');
+    if (t.buffs.radar) add('📡', '상시 레이더', '#7fd8ff', '적의 장비와 상자 속이 계속 보입니다.');
+    if (t.buffs.cloak) add('🕶', '전자 차폐', '#c07bff', '적의 정찰에 내 장비가 잡히지 않습니다.');
+    if (t.acid > 0) add('🌧', `산성비 ${t.acid}턴`, '#a8e05f', '매 턴 시작마다 피해를 입습니다.');
+    if (t.oiled > 0) add('🛢', `유막 ${t.oiled}턴`, '#c9a227', '이동력이 절반으로 떨어집니다.');
+    if (t.frozen > 0) add('❄', `빙결 ${t.frozen}턴`, '#9fe8ff', '이동이 거의 묶입니다.');
+    return out;
+  }
+
   function renderBuffs() {
     const bar = $('#buffBar');
     bar.innerHTML = '';
@@ -912,18 +989,7 @@
       }));
       bar.appendChild(d);
     };
-    for (const [key, icon, fmt, note] of BUFF_CHIPS) {
-      const v = t.buffs[key];
-      if (v) add(icon, fmt(v), '#e9ecf4', note);
-    }
-    if ((t.buffs.armor || 1) !== 1) add('🛡', `방어 ${Math.round((1 - t.buffs.armor) * 100)}%`, '#7fd8ff', '받는 피해가 이만큼 조정됩니다.');
-    if ((t.buffs.damage || 1) !== 1) add('🔺', `화력 +${Math.round((t.buffs.damage - 1) * 100)}%`, '#ffcc2e', '주는 피해가 늘어납니다.');
-    if ((t.buffs.radius || 1) !== 1) add('💥', `반경 +${Math.round((t.buffs.radius - 1) * 100)}%`, '#ff9a5a', '모든 폭발 반경이 커집니다.');
-    if ((t.buffs.power || 1) !== 1) add('🧨', `사거리 +${Math.round((t.buffs.power - 1) * 100)}%`, '#ffcc2e', '포구 초속이 올라 더 멀리 날아갑니다.');
-    if ((t.buffs.wind != null && t.buffs.wind < 1)) add('🧭', `바람 저항 ${Math.round((1 - t.buffs.wind) * 100)}%`, '#9fe8ff', '바람이 탄도에 주는 영향이 줄어듭니다.');
-    if (t.acid > 0) add('🌧', `산성비 ${t.acid}턴`, '#a8e05f', '매 턴 시작마다 피해를 입습니다.');
-    if (t.oiled > 0) add('🛢', `유막 ${t.oiled}턴`, '#c9a227', '이동력이 절반으로 떨어집니다.');
-    if (t.frozen > 0) add('❄', `빙결 ${t.frozen}턴`, '#9fe8ff', '이동이 거의 묶입니다.');
+    for (const b of buffChips(t)) add(b.icon, b.text, b.color, b.note);
   }
 
   function renderRoster() {
