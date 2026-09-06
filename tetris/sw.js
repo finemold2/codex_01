@@ -1,5 +1,5 @@
 /* sw.js — 테트리스 앱 셸 오프라인 캐시 */
-var CACHE = 'tetris-v2';
+var CACHE = 'tetris-v3';
 var ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,7 @@ var ASSETS = [
   './js/input.js',
   './js/audio.js',
   './js/music.js',
+  './js/missions.js',
   './js/app.js'
 ];
 

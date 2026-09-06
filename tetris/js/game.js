@@ -35,6 +35,10 @@
   var SPRINT_LINES = 40;
   var ULTRA_MS = 120000;
 
+  var FEVER_MS = 12000;                  // 피버 지속 시간
+  var FEVER_GAIN = [0, 14, 30, 48, 70];  // 라인 수별 게이지 증가
+  var SLOW_FACTOR = 2.5;                 // 슬로우 아이템: 중력 간격 배수
+
   function Game(opts) {
     opts = opts || {};
     this.rng = opts.random || Math.random;
@@ -49,6 +53,7 @@
   Game.LOCK_DELAY = LOCK_DELAY;
   Game.SPRINT_LINES = SPRINT_LINES;
   Game.ULTRA_MS = ULTRA_MS;
+  Game.FEVER_MS = FEVER_MS;
 
   var P = Game.prototype;
 
@@ -103,7 +108,64 @@
     this.lastMoveWasRotate = false;
     this.lastKick = 0;
 
-    this.stats = { pieces: 0, tetris: 0, tspins: 0, maxCombo: 0 };
+    this.stats = { pieces: 0, tetris: 0, tspins: 0, maxCombo: 0, hardDrops: 0, holds: 0, fevers: 0, items: 0 };
+
+    this.fever = { gauge: 0, active: false, t: 0 };
+    this.slowUntil = 0;
+  };
+
+  // ----- 피버 -----
+  P.addFever = function (amount) {
+    if (this.fever.active) return;
+    this.fever.gauge = Math.min(100, this.fever.gauge + amount);
+    if (this.fever.gauge >= 100) this.startFever();
+  };
+
+  P.startFever = function () {
+    this.fever.active = true;
+    this.fever.t = FEVER_MS;
+    this.fever.gauge = 100;
+    this.stats.fevers++;
+    this.emit('feverStart');
+  };
+
+  P.isSlow = function () {
+    return this.elapsed < this.slowUntil;
+  };
+
+  // ----- 아이템 -----
+  // 폭탄: 바닥 2줄 제거 (점수 없음). 제거할 블록이 없으면 false
+  P.bomb = function () {
+    if (!this.running || this.over) return false;
+    var rows = [];
+    for (var y = TOTAL - 2; y < TOTAL; y++) {
+      for (var x = 0; x < COLS; x++) {
+        if (this.board[y][x]) { rows.push(y); break; }
+      }
+    }
+    if (!rows.length) return false;
+    this.emit('bomb', { rows: rows });
+    this.removeRows(rows);
+    this.stats.items++;
+    return true;
+  };
+
+  // 슬로우: ms 동안 중력 느리게
+  P.slow = function (ms) {
+    if (!this.running || this.over) return false;
+    this.slowUntil = this.elapsed + ms;
+    this.stats.items++;
+    return true;
+  };
+
+  // 다음 조각을 지정 (큐 맨 앞에 삽입)
+  P.injectNext = function (type) {
+    if (!this.running || this.over) return false;
+    this.queue.unshift(type);
+    this.queue.pop();
+    this.stats.items++;
+    this.emit('queue');
+    return true;
   };
 
   P.start = function () {
@@ -268,6 +330,7 @@
     var n = 0;
     while (this.stepDown()) n++;
     this.score += n * 2;
+    this.stats.hardDrops++;
     this.lockPiece();
     return n;
   };
@@ -280,6 +343,7 @@
     this.canHold = false;
     this.piece = null;
     this.stats.pieces--; // spawn에서 다시 증가하므로 보정
+    this.stats.holds++;
     this.spawn(prev || undefined);
     this.emit('hold', { held: cur, released: prev });
     return true;
@@ -401,8 +465,16 @@
     var perfect = n > 0 && this.isBoardEmpty();
     if (perfect) pts += SCORE_PERFECT[n] * this.level;
 
+    var feverBonus = this.fever.active && pts > 0;
+    if (feverBonus) pts *= 2;
+
     pts = Math.floor(pts);
     this.score += pts;
+
+    // 피버 게이지
+    if (n > 0 || tspin) {
+      this.addFever(FEVER_GAIN[n] + (tspin ? 20 : 0) + (perfect ? 100 : 0));
+    }
     this.lines += n;
     if (n === 4) this.stats.tetris++;
     if (tspin) this.stats.tspins++;
@@ -418,7 +490,8 @@
         b2b: b2bApplied,
         combo: this.combo,
         perfect: perfect,
-        points: pts
+        points: pts,
+        fever: feverBonus
       });
     }
     if (levelUp) this.emit('levelup', this.level);
@@ -469,7 +542,9 @@
   // 레벨별 중력 (가이드라인 공식), 최소 16ms
   P.gravityMs = function () {
     var l = Math.min(this.level, 20);
-    return Math.max(16, Math.pow(0.8 - (l - 1) * 0.007, l - 1) * 1000);
+    var g = Math.max(16, Math.pow(0.8 - (l - 1) * 0.007, l - 1) * 1000);
+    if (this.isSlow()) g *= SLOW_FACTOR;
+    return g;
   };
 
   // ----- 프레임 업데이트 -----
@@ -481,6 +556,16 @@
       this.elapsed = ULTRA_MS;
       this.finish('time');
       return;
+    }
+
+    if (this.fever.active) {
+      this.fever.t -= dt;
+      this.fever.gauge = Math.max(0, (100 * this.fever.t) / FEVER_MS);
+      if (this.fever.t <= 0) {
+        this.fever.active = false;
+        this.fever.gauge = 0;
+        this.emit('feverEnd');
+      }
     }
 
     if (this.clearing) {

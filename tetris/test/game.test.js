@@ -343,4 +343,207 @@ test('스택 높이 계산', function () {
   assert.strictEqual(g.stackHeight(), 14);
 });
 
+console.log('fever / items');
+
+test('피버: 게이지가 100이 되면 시작, 점수 ×2, 시간 지나면 종료', function () {
+  var g = newGame(3);
+  var started = 0, ended = 0;
+  g.on('feverStart', function () { started++; });
+  g.on('feverEnd', function () { ended++; });
+  g.addFever(60);
+  assert.strictEqual(g.fever.gauge, 60);
+  assert.ok(!g.fever.active);
+  g.addFever(50);
+  assert.ok(g.fever.active);
+  assert.strictEqual(started, 1);
+  assert.strictEqual(g.fever.gauge, 100);
+  // 피버 중 싱글 → 100 × 2
+  fillRow(g, TOTAL - 1, [4, 5]);
+  fillRow(g, TOTAL - 2, [4, 5]);
+  g.board[TOTAL - 3][0] = 'J';
+  forcePiece(g, 'O', 4, HIDDEN);
+  var s0 = g.score;
+  var n = g.hardDrop();
+  var events = [];
+  g.on('clear', function (e) { events.push(e); });
+  g.update(Game.CLEAR_MS);
+  assert.strictEqual(events[0].fever, true);
+  assert.strictEqual(g.score - s0 - n * 2, 600, '더블 300 × 2');
+  // 시간 경과 후 종료
+  for (var i = 0; i < 130; i++) {
+    for (var y = 0; y < TOTAL; y++) for (var x = 0; x < COLS; x++) g.board[y][x] = null;
+    g.update(100);
+  }
+  assert.ok(!g.fever.active);
+  assert.strictEqual(ended, 1);
+  assert.strictEqual(g.fever.gauge, 0);
+});
+
+test('라인 클리어가 피버 게이지를 채움', function () {
+  var g = newGame(3);
+  fillRow(g, TOTAL - 1, [4, 5]);
+  fillRow(g, TOTAL - 2, [4, 5]);
+  g.board[TOTAL - 3][0] = 'J';
+  forcePiece(g, 'O', 4, HIDDEN);
+  g.hardDrop();
+  g.update(Game.CLEAR_MS);
+  assert.strictEqual(g.fever.gauge, 30, '더블 = 30');
+});
+
+test('폭탄: 바닥 2줄 제거, 비어 있으면 false', function () {
+  var g = newGame(3);
+  assert.strictEqual(g.bomb(), false);
+  fillRow(g, TOTAL - 1, [0]);
+  fillRow(g, TOTAL - 2, [1, 2]);
+  g.board[TOTAL - 3][5] = 'T';
+  var ev = null;
+  g.on('bomb', function (e) { ev = e; });
+  assert.ok(g.bomb());
+  assert.deepStrictEqual(ev.rows, [TOTAL - 2, TOTAL - 1]);
+  assert.strictEqual(g.board[TOTAL - 1][5], 'T', '위 블록이 내려옴');
+  assert.strictEqual(g.stackHeight(), 1);
+  assert.strictEqual(g.stats.items, 1);
+});
+
+test('슬로우: 중력 간격 증가 후 시간 지나면 복귀', function () {
+  var g = newGame(3);
+  var base = g.gravityMs();
+  g.slow(5000);
+  assert.ok(g.isSlow());
+  assert.ok(g.gravityMs() > base * 2);
+  g.elapsed = 6000;
+  assert.ok(!g.isSlow());
+  assert.strictEqual(g.gravityMs(), base);
+});
+
+test('다음 조각 주입', function () {
+  var g = newGame(3);
+  var len = g.queue.length;
+  g.injectNext('I');
+  assert.strictEqual(g.queue[0], 'I');
+  assert.strictEqual(g.queue.length, len);
+  g.hardDrop();
+  assert.strictEqual(g.piece.type, 'I');
+});
+
+test('통계: 하드 드롭·홀드 횟수', function () {
+  var g = newGame(3);
+  g.hardDrop();
+  g.hardDrop();
+  g.hold();
+  assert.strictEqual(g.stats.hardDrops, 2);
+  assert.strictEqual(g.stats.holds, 1);
+});
+
+console.log('missions');
+
+var Missions = require('../js/missions.js');
+
+function gameWithMissions(seed, rng) {
+  var g = new Game({ random: seeded(seed || 3) });
+  var m = new Missions(g, { random: rng || seeded(7) });
+  g.start();
+  return { g: g, m: m };
+}
+
+test('첫 미션은 지연 후 등장하고, 목표 달성 시 보상 이벤트', function () {
+  var s = gameWithMissions(3, function () { return 0; }); // 항상 첫 후보(lines)
+  var g = s.g, m = s.m;
+  var news = [], done = [];
+  m.on('new', function (x) { news.push(x); });
+  m.on('complete', function (x) { done.push(x); });
+  m.update(5999);
+  assert.strictEqual(news.length, 0);
+  m.update(2);
+  assert.strictEqual(news.length, 1);
+  assert.strictEqual(m.active.key, 'lines');
+  assert.strictEqual(m.active.goal, 3);
+  // 3줄 지우기 시뮬레이션: clear 이벤트 발생시키기
+  g.emit('clear', { lines: 2, combo: 0 });
+  m.update(16);
+  assert.strictEqual(m.active.progress, 2);
+  g.emit('clear', { lines: 1, combo: 1 });
+  m.update(16);
+  assert.strictEqual(done.length, 1);
+  assert.strictEqual(m.active, null);
+  assert.ok(done[0].reward >= 360);
+  assert.strictEqual(m.completed, 1);
+});
+
+test('제한 시간 초과 시 실패, 홀드 금지 미션은 홀드 시 즉시 실패', function () {
+  var s = gameWithMissions(3, function () { return 0; });
+  var g = s.g, m = s.m;
+  var fails = [];
+  m.on('fail', function (x) { fails.push(x); });
+  m.update(6001);
+  var limit = m.active.limit;
+  m.update(limit + 1);
+  assert.strictEqual(fails.length, 1);
+  assert.strictEqual(fails[0].reason, 'time');
+  assert.strictEqual(m.active, null);
+
+  // 홀드 금지 미션 직접 세팅
+  m.active = { key: 'pieces', goal: 5, progress: 0, elapsed: 0, limit: 60000, failOnHold: true, title: 't', reward: 100 };
+  g.hold();
+  assert.strictEqual(fails.length, 2);
+  assert.strictEqual(fails[1].reason, 'hold');
+});
+
+test('진행도 집계: 콤보 최대값, 더블 이상 횟수, 하드 드롭, 조각 수', function () {
+  var s = gameWithMissions(3);
+  var g = s.g, m = s.m;
+  m.active = { key: 'combo', goal: 3, progress: 0, elapsed: 0, limit: 60000, title: 't', reward: 1 };
+  g.emit('clear', { lines: 1, combo: 2 });
+  g.emit('clear', { lines: 1, combo: 1 });
+  assert.strictEqual(m.active.progress, 2);
+
+  m.active = { key: 'multi', goal: 2, progress: 0, elapsed: 0, limit: 60000, title: 't', reward: 1 };
+  g.emit('clear', { lines: 1, combo: 0 });
+  g.emit('clear', { lines: 2, combo: 0 });
+  g.emit('clear', { lines: 4, combo: 0 });
+  assert.strictEqual(m.active.progress, 2);
+
+  m.active = { key: 'hardDrops', goal: 3, progress: 0, elapsed: 0, limit: 60000, title: 't', reward: 1, baseHardDrops: g.stats.hardDrops };
+  g.hardDrop();
+  g.hardDrop();
+  assert.strictEqual(m.active.progress, 2);
+
+  m.active = { key: 'pieces', goal: 3, progress: 0, elapsed: 0, limit: 60000, title: 't', reward: 1 };
+  g.hardDrop();
+  assert.strictEqual(m.active.progress, 1);
+});
+
+test('일시정지·게임 오버 중에는 미션 타이머가 멈춤', function () {
+  var s = gameWithMissions(3);
+  var g = s.g, m = s.m;
+  m.update(6001);
+  assert.ok(m.active);
+  g.paused = true;
+  m.update(100000);
+  assert.ok(m.active, '실패하지 않음');
+  assert.strictEqual(m.active.elapsed, 0);
+});
+
+test('미션 후보에서 직전 미션은 제외되고, T-스핀은 레벨 2부터', function () {
+  var s = gameWithMissions(3, function () { return 0.999; });
+  var m = s.m;
+  var ids = {};
+  for (var i = 0; i < 20; i++) {
+    var t = m.pick();
+    ids[t.id] = true;
+    assert.notStrictEqual(t.id, 'tspin');
+    m.lastId = t.id;
+  }
+  s.g.level = 5;
+  var seen = false;
+  for (var j = 0; j < 40; j++) {
+    m.rng = seeded(j);
+    var t2 = m.pick();
+    if (t2.id === 'tspin') seen = true;
+    assert.notStrictEqual(t2.id, m.lastId);
+    m.lastId = t2.id;
+  }
+  assert.ok(seen, '레벨 5에서는 T-스핀 미션도 등장');
+});
+
 console.log('\n' + passed + ' tests passed');

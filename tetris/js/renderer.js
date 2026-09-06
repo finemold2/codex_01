@@ -168,6 +168,17 @@
     ctx.fillStyle = '#0d0f17';
     ctx.fillRect(0, 0, W, H);
 
+    // 피버: 흐르는 무지개 빛
+    if (opts.fever) {
+      var hue = (this.time / 12) % 360;
+      var grad = ctx.createLinearGradient(0, 0, W, H);
+      grad.addColorStop(0, 'hsla(' + hue + ',90%,60%,0.22)');
+      grad.addColorStop(0.5, 'hsla(' + ((hue + 120) % 360) + ',90%,60%,0.22)');
+      grad.addColorStop(1, 'hsla(' + ((hue + 240) % 360) + ',90%,60%,0.22)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+    }
+
     // 격자
     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
     ctx.lineWidth = 1;

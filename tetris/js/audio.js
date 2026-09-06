@@ -58,6 +58,31 @@
     gameover: function () {
       var notes = [392, 349, 311, 262];
       for (var i = 0; i < notes.length; i++) tone(notes[i], 0.28, 'sawtooth', 0.07, i * 0.22);
+    },
+    mission: function () {
+      tone(660, 0.08, 'sine', 0.07);
+      tone(880, 0.12, 'sine', 0.07, 0.09);
+    },
+    missionOk: function () {
+      var notes = [659, 784, 988, 1319];
+      for (var i = 0; i < notes.length; i++) tone(notes[i], 0.14, 'triangle', 0.09, i * 0.08);
+    },
+    fail: function () {
+      tone(330, 0.16, 'triangle', 0.06);
+      tone(262, 0.24, 'triangle', 0.06, 0.16);
+    },
+    item: function () {
+      tone(523, 0.06, 'sine', 0.08);
+      tone(784, 0.06, 'sine', 0.08, 0.06);
+      tone(1047, 0.12, 'sine', 0.08, 0.12);
+    },
+    bomb: function () {
+      tone(90, 0.35, 'sawtooth', 0.12, 0, 30);
+      tone(60, 0.4, 'square', 0.06, 0.05, 25);
+    },
+    fever: function () {
+      var notes = [523, 659, 784, 1047, 1319, 1568];
+      for (var i = 0; i < notes.length; i++) tone(notes[i], 0.18, 'triangle', 0.09, i * 0.06);
     }
   };
 

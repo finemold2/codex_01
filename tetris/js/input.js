@@ -46,7 +46,8 @@
     ShiftLeft: 'hold',
     ShiftRight: 'hold',
     KeyP: 'pause',
-    Escape: 'pause'
+    Escape: 'pause',
+    KeyE: 'item'
   };
 
   function Input(cfg) {

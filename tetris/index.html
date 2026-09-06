@@ -19,7 +19,7 @@
     <!-- ===== 상단 HUD ===== -->
     <header class="hud">
       <div class="hud-item">
-        <span class="hud-label">점수</span>
+        <span class="hud-label" id="hudScoreLabel">점수</span>
         <span class="hud-value" id="hudScore">0</span>
       </div>
       <div class="hud-item">
@@ -47,11 +47,27 @@
       <div class="board-wrap" id="boardWrap">
         <canvas id="board" width="200" height="400" aria-label="테트리스 보드"></canvas>
         <div class="toast" id="toast"></div>
+        <div class="fever-bar" id="feverBar" title="피버 게이지">
+          <div class="fever-fill" id="feverFill"></div>
+          <span class="fever-label">FEVER</span>
+        </div>
+        <div class="mission" id="mission">
+          <div class="mission-row">
+            <span class="mission-tag">미션</span>
+            <span class="mission-title" id="missionTitle">잠시 후 시작</span>
+            <span class="mission-prog" id="missionProg"></span>
+          </div>
+          <div class="mission-time"><div class="mission-time-fill" id="missionTime"></div></div>
+        </div>
       </div>
 
       <aside class="side">
         <div class="side-label">NEXT</div>
         <canvas id="nextCanvas" width="52" height="117"></canvas>
+        <button id="itemBtn" class="item-btn" aria-label="아이템 사용" hidden>
+          <span class="item-icon" id="itemIcon">💣</span>
+          <span class="item-count" id="itemCount">1</span>
+        </button>
       </aside>
     </main>
 
@@ -93,12 +109,13 @@
       <button id="btnStart" class="btn btn--primary">게임 시작</button>
 
       <ul class="guide">
-        <li><b>좌우 드래그</b><span>이동</span></li>
-        <li><b>탭</b><span>회전</span></li>
-        <li><b>아래로 드래그</b><span>소프트 드롭</span></li>
-        <li><b>빠르게 아래로 스와이프</b><span>하드 드롭</span></li>
+        <li><b>좌우 드래그 · 탭</b><span>이동 · 회전</span></li>
+        <li><b>아래로 드래그 / 스와이프</b><span>소프트 / 하드 드롭</span></li>
+        <li><b>미션 완수</b><span>보너스 점수 + 아이템</span></li>
+        <li><b>게이지 가득</b><span>FEVER 점수 ×2</span></li>
       </ul>
       <div class="settings">
+        <button class="toggle toggle--wide" id="trackBtn" aria-label="배경음악 곡 선택">♫ 자동</button>
         <button class="toggle" data-setting="music" aria-pressed="true">🎵 음악</button>
         <button class="toggle" data-setting="sound" aria-pressed="true">🔊 효과음</button>
         <button class="toggle" data-setting="vibrate" aria-pressed="true">📳 진동</button>
@@ -111,7 +128,9 @@
   <div id="ovPause" class="overlay" hidden>
     <div class="card">
       <h2 class="card-title">일시정지</h2>
+      <p class="now-playing" id="nowPlaying"></p>
       <button id="btnResume" class="btn btn--primary">계속하기</button>
+      <button id="btnNextTrack" class="btn btn--ghost">♫ 다음 곡</button>
       <button id="btnRestartPause" class="btn btn--ghost">다시 시작</button>
       <button id="btnMenuPause" class="btn btn--ghost">모드 선택으로</button>
       <div class="settings">
@@ -127,12 +146,18 @@
   <div id="ovOver" class="overlay" hidden>
     <div class="card">
       <h2 class="card-title" id="overTitle">게임 오버</h2>
+      <div class="rank">
+        <div class="rank-grade" id="overRank">B</div>
+        <div class="rank-msg" id="overRankMsg"></div>
+      </div>
       <div class="new-record" id="overNew" hidden>🏆 신기록!</div>
       <div class="result-grid">
         <div><div class="r-val" id="overScore">0</div><div class="r-lab">점수</div></div>
         <div><div class="r-val" id="overLines">0</div><div class="r-lab">줄</div></div>
         <div><div class="r-val" id="overLevel">1</div><div class="r-lab">레벨</div></div>
         <div><div class="r-val" id="overTime">0:00</div><div class="r-lab">시간</div></div>
+        <div><div class="r-val" id="overMissions">0</div><div class="r-lab">미션 성공</div></div>
+        <div><div class="r-val" id="overFevers">0</div><div class="r-lab">피버</div></div>
       </div>
       <div class="best-line"><span id="overBestLabel">최고 점수</span> <b id="overBest">0</b></div>
       <button id="btnRestart" class="btn btn--primary">다시 시작</button>
@@ -146,6 +171,7 @@
   <script src="js/input.js"></script>
   <script src="js/audio.js"></script>
   <script src="js/music.js"></script>
+  <script src="js/missions.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
