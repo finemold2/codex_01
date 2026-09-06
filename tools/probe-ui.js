@@ -345,6 +345,20 @@ export default async function run() {
   if (dom.hudRoot.querySelector('[data-r="wmag"]').textContent !== '\u221e') {
     bad('hud: melee weapon does not show an infinity ammo glyph');
   }
+
+  // Every label must come from the weapon table, not from a copy that can drift out of sync.
+  for (const k of Object.keys(WEAPONS)) {
+    game.weapons.current = k;
+    game.weapons.ammo[k] = game.weapons.ammo[k] || { mag: WEAPONS[k].magazine, reserve: WEAPONS[k].reserve };
+    hud.update(step);
+    const shown = dom.hudRoot.querySelector('[data-r="wname"]').textContent;
+    if (shown !== WEAPONS[k].nameKo) {
+      bad(`hud: weapon "${k}" is labelled "${shown}" but WEAPONS says "${WEAPONS[k].nameKo}"`);
+    }
+    if (!dom.hudRoot.querySelector('[data-r="wicon"]').innerHTML) {
+      bad(`hud: weapon "${k}" has no icon`);
+    }
+  }
   game.weapons.current = 'rifle';
   hud.update(step);
 
@@ -480,6 +494,26 @@ export default async function run() {
   if (dom.hudRoot.querySelectorAll('.toast').length !== 2) bad('hud: toasts were not appended');
   for (let i = 0; i < 90; i++) hud.update(step);
   if (dom.hudRoot.querySelectorAll('.toast').length !== 0) bad('hud: expired toasts were not removed from the DOM');
+
+  /* ---------------------------------------------------------------- radio banner */
+  // music.getTrackInfo() puts the station *id* in `station` and its Korean name in `stationName`.
+  {
+    hud.showTrack({ id: 'bwv1068', title: 'Air on the G String', titleKo: 'G선상의 아리아',
+      composer: 'J.S. Bach', station: 'baroque', stationName: '바로크 FM' });
+    const st = dom.hudRoot.querySelector('[data-r="radiostation"]').textContent;
+    const ti = dom.hudRoot.querySelector('[data-r="radiotitle"]').textContent;
+    const co = dom.hudRoot.querySelector('[data-r="radiocomposer"]').textContent;
+    if (st !== '바로크 FM') bad(`hud: radio banner shows the raw station id "${st}" instead of its name`);
+    if (ti !== 'G선상의 아리아') bad(`hud: radio banner title is "${ti}"`);
+    if (co !== 'J.S. Bach') bad(`hud: radio banner composer is "${co}"`);
+    if (!dom.hudRoot.querySelector('[data-r="radio"]').classList.contains('on')) {
+      bad('hud: radio banner did not slide in');
+    }
+    for (let i = 0; i < 400; i++) hud.update(step);
+    if (dom.hudRoot.querySelector('[data-r="radio"]').classList.contains('on')) {
+      bad('hud: radio banner never auto-hides');
+    }
+  }
 
   /* ---------------------------------------------------------------- mission banner */
   const big = dom.hudRoot.querySelector('[data-r="big"]');
@@ -715,6 +749,10 @@ export default async function run() {
       .find((s) => s.__ctrl && s.__ctrl.key === 'fov');
     if (!slider) bad('menu: FOV slider missing');
     else {
+      if (typeof slider.__ctrl.step !== 'function') bad('menu: slider ctrl.step is not the nudge action');
+      if (typeof slider.__ctrl.stepSize !== 'number') {
+        bad('menu: slider ctrl lost its numeric step size (duplicate object key)');
+      }
       const before = menu.settings.fov;
       slider.__ctrl.step(1);
       if (menu.settings.fov !== before + 1) bad(`menu: FOV step moved ${before} -> ${menu.settings.fov}`);

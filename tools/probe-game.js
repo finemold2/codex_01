@@ -66,11 +66,14 @@ export default async function run({ canvas }) {
   try { game.startNewGame({ skipPointerLock: true }); }
   catch (e) { bad(`startNewGame threw: ${e.message}\n${e.stack || ''}`); return out; }
 
+  const light = String(window.__shotArg || '').includes('light');
+
   // --- run frames --------------------------------------------------------------------------
   let frames = 0;
   const t1 = performance.now();
   try {
-    for (let i = 0; i < 40; i++) { game.update(1 / 60); game.render(1 / 60); frames++; }
+    const N = light ? 6 : 40;
+    for (let i = 0; i < N; i++) { game.update(1 / 60); game.render(1 / 60); frames++; }
   } catch (e) { bad(`frame ${frames} threw: ${e.message}\n${e.stack || ''}`); }
   out.notes.push(`${frames} frames in ${(performance.now() - t1).toFixed(0)} ms (software rasteriser)`);
   out.notes.push(`stats: ${JSON.stringify(game.debugStats())}`);
@@ -99,24 +102,28 @@ export default async function run({ canvas }) {
   if (!game.camera.position.every(Number.isFinite)) bad('camera position went NaN');
 
   // --- selfTest / flows ----------------------------------------------------------------------
+  if (light) { window.__shotReady = true; }
   try {
+    if (light) throw { __skip: true };
     const st = game.selfTest();
     out.notes.push(`selfTest stats: ${JSON.stringify(st.stats)}`);
     for (const f of st.failures) bad(`selfTest: ${f}`);
-  } catch (e) { bad(`selfTest threw: ${e.message}\n${e.stack || ''}`); }
+  } catch (e) { if (!e.__skip) bad(`selfTest threw: ${e.message}\n${e.stack || ''}`); }
 
   try {
+    if (light) throw { __skip: true };
     const fl = game.exerciseFlows();
     out.notes.push(`flows stats: ${JSON.stringify(fl.stats)}`);
     for (const f of fl.errors) bad(`flow: ${f}`);
-  } catch (e) { bad(`exerciseFlows threw: ${e.message}\n${e.stack || ''}`); }
+  } catch (e) { if (!e.__skip) bad(`exerciseFlows threw: ${e.message}\n${e.stack || ''}`); }
 
   // --- frame content ---------------------------------------------------------------------------
   try {
+    if (light) throw { __skip: true };
     const px = game.readPixelStats();
     out.notes.push(`pixels: ${JSON.stringify(px)}`);
     if (px && px.unique < 24) bad(`rendered frame looks blank (${px.unique} unique colours)`);
-  } catch (e) { bad(`readPixelStats threw: ${e.message}`); }
+  } catch (e) { if (!e.__skip) bad(`readPixelStats threw: ${e.message}`); }
 
   // --- HUD presence ------------------------------------------------------------------------------
   const hudChildren = dom.hudRoot.children.length;

@@ -115,7 +115,9 @@ if (SHOT) {
       await writeFile(SHOT, Buffer.from(dataUrl.slice(22), 'base64'));
       console.log('screenshot ->', SHOT);
     } else {
-      await page.screenshot({ path: SHOT });
+      // A full-scene frame takes several seconds under SwiftShader; the default 30 s cap is
+      // not enough once traffic and pedestrians are live.
+      await page.screenshot({ path: SHOT, timeout: 240000 });
       console.log('page screenshot ->', SHOT);
     }
   } catch (e) { console.error('screenshot failed:', e.message); }

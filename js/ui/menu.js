@@ -590,7 +590,9 @@ export class Menu {
     }
 
     const ctrl = {
-      kind: 'slider', key, el: track, min, max, step,
+      // `stepSize` is the numeric increment; `step(dir)` below is the nudge action. Naming both
+      // `step` silently dropped the number from the object literal (duplicate key).
+      kind: 'slider', key, el: track, min, max, stepSize: step,
       apply: () => {
         const v = clamp(num(this.settings[key], min), min, max);
         const f = (v - min) / (max - min || 1);

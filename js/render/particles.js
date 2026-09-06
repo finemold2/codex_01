@@ -7,8 +7,8 @@
  * A fixed-capacity struct-of-arrays pool: one `Float32Array` per field, plus a dense live
  * range `[0, count)`. The tail `[count, capacity)` IS the free list — allocation pops from
  * it, death swaps the dead entry with the last live one and pushes it back. `spawn()` never
- * allocates and never grows; when the pool is saturated it recycles the oldest live particle
- * of the same kind (falling back to the globally oldest).
+ * allocates and never grows; when the pool is saturated it recycles an old live particle of the
+ * same kind, chosen by a rotating bounded sweep so the cost per spawn stays constant.
  *
  * Every frame `update()` runs the CPU simulation, classifies particles into the alpha and
  * additive sets, counting-sorts the alpha set back-to-front (sorting *indices*, never the
@@ -101,6 +101,15 @@ const SORT_RANGE = 320;
 /** Largest `dt` a single simulation step will integrate, in seconds. @type {number} */
 const MAX_STEP = 0.1;
 
+/**
+ * Slots examined per recycle when the pool is saturated. A full scan is O(live) per spawn,
+ * which turns one saturated explosion into a multi-frame stall (4000 recycled spawns measured
+ * at ~84 ms on SwiftShader); a bounded window whose cursor carries across calls walks the whole
+ * pool over consecutive spawns instead, at a fixed cost each.
+ * @type {number}
+ */
+const RECYCLE_WINDOW = 64;
+
 /* -------------------------------------------------------------------------- */
 /* Shaders                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -126,7 +135,7 @@ out vec2 vLocal;
 out vec4 vColor;
 out float vEmissive;
 out float vSoft;
-out float vDist;
+out vec3 vView;    // world-space camera -> particle centre (constant across the quad)
 
 void main() {
   // 0 -> (0,0), 1 -> (1,0), 2 -> (0,1), 3 -> (1,1): a triangle strip quad.
@@ -168,7 +177,7 @@ void main() {
   vColor = aColor;
   vEmissive = aParams.z;
   vSoft = aParams.w;
-  vDist = distance(uCameraPos, center);
+  vView = center - uCameraPos;
   gl_Position = uViewProj * vec4(world, 1.0);
 }
 `;
@@ -185,20 +194,47 @@ in vec2 vLocal;
 in vec4 vColor;
 in float vEmissive;
 in float vSoft;
-in float vDist;
+in vec3 vView;
 
 uniform sampler2D uAtlas;
+uniform vec3 uCameraPos;
 uniform vec3 uCameraRight;
 uniform vec3 uCameraUp;
 uniform vec3 uCameraForward;
 uniform vec3 uSunDirection;
-uniform vec3 uSunColor;
+uniform vec3 uSunColor;      // sun radiance (colour * intensity), same scale as the PBR pass
 uniform vec3 uAmbientSky;
 uniform vec3 uAmbientGround;
 uniform vec3 uFogColor;
-uniform float uFogDensity;
+uniform vec4 uFogParams;     // x = density, y = height falloff, z = sun scatter, w = unused
 uniform float uAdditive;
 uniform vec2 uNearFade;
+
+/**
+ * Analytic height fog, byte-for-byte the integral `render/shaders.js` uses for the scene
+ * (GLSL_FOG). Matching it matters: a plume high above the street would otherwise be fogged
+ * with a flat distance term while the buildings behind it use the height-attenuated one.
+ */
+float fogAmount(vec3 camPos, vec3 worldPos, vec2 params) {
+  vec3 d = worldPos - camPos;
+  float dist = length(d);
+  if (dist < 1e-4 || params.x <= 0.0) return 0.0;
+  float hf = params.y;
+  float t;
+  if (hf < 1e-4) {
+    t = params.x * dist;
+  } else {
+    float dy = d.y;
+    float ec = exp(-hf * camPos.y);
+    if (abs(dy) < 1e-3) {
+      t = params.x * dist * ec;
+    } else {
+      float ew = exp(-hf * worldPos.y);
+      t = params.x * dist * (ec - ew) / (hf * dy);
+    }
+  }
+  return 1.0 - exp(-max(t, 0.0));
+}
 
 #if SOFT_PARTICLES
 uniform sampler2D uDepthTex;
@@ -221,9 +257,10 @@ out vec4 fragColor;
 void main() {
   vec4 texel = texture(uAtlas, vUv);
   float alpha = texel.a * vColor.a;
+  float dist = length(vView);
 
   // Fade out anything hugging the near plane instead of smearing it over the whole screen.
-  alpha *= clamp((vDist - uNearFade.x) / max(uNearFade.y, 1e-4), 0.0, 1.0);
+  alpha *= clamp((dist - uNearFade.x) / max(uNearFade.y, 1e-4), 0.0, 1.0);
 
 #if SOFT_PARTICLES
   if (vSoft > 0.001) {
@@ -244,13 +281,21 @@ void main() {
   vec3 n = normalize(uCameraRight * vLocal.x + uCameraUp * vLocal.y - uCameraForward * sqrt(1.0 - r2));
   float wrap = dot(n, uSunDirection) * 0.5 + 0.5;
   vec3 ambient = mix(uAmbientGround, uAmbientSky, n.y * 0.5 + 0.5);
-  vec3 lit = albedo * (ambient + uSunColor * wrap * wrap);
+  vec3 lit = albedo * (ambient + uSunColor * 0.35 * wrap * wrap);
 
   float e = clamp(vEmissive, 0.0, 1.0);
   vec3 color = mix(lit, albedo * (1.0 + vEmissive * 2.0), e);
 
-  float fog = clamp(1.0 - exp(-vDist * uFogDensity), 0.0, 1.0);
-  color = uAdditive > 0.5 ? color * (1.0 - fog) : mix(color, uFogColor, fog);
+  float fog = fogAmount(uCameraPos, uCameraPos + vView, uFogParams.xy);
+  if (fog > 0.0) {
+    // Same aerial-perspective sun tint as the opaque pass, so a puff and the wall behind it
+    // fade into the identical colour.
+    vec3 viewDir = vView / max(dist, 1e-4);
+    float sunAmount = clamp(dot(viewDir, uSunDirection), 0.0, 1.0);
+    vec3 fogCol = mix(uFogColor, uFogColor + uSunColor * 0.35, pow(sunAmount, 8.0) * uFogParams.z);
+    // Additive light is only attenuated by fog; it never picks the fog colour up.
+    color = uAdditive > 0.5 ? color * (1.0 - fog) : mix(color, fogCol, fog);
+  }
 
   fragColor = vec4(color * alpha, alpha);
 }
@@ -649,11 +694,13 @@ function buildAtlasTexture(gl, library) {
           const cy = ((entry.cell / ATLAS_COLS) | 0) * ATLAS_CELL;
           const turns = entry.turns & 3;
           const swap = (turns & 1) === 1;
+          // `sw`/`sh` are the ROTATED footprint (what has to fit the cell); the drawn rect is
+          // still in the source's own orientation, so it must keep the source's aspect ratio.
           const sw = swap ? src.height : src.width;
           const sh = swap ? src.width : src.height;
           const scale = Math.min(inner / sw, inner / sh);
-          const dw = sw * scale;
-          const dh = sh * scale;
+          const dw = src.width * scale;
+          const dh = src.height * scale;
           ctx.clearRect(cx, cy, ATLAS_CELL, ATLAS_CELL);
           ctx.save();
           ctx.translate(cx + ATLAS_CELL * 0.5, cy + ATLAS_CELL * 0.5);
@@ -923,6 +970,8 @@ export class ParticleSystem {
 
     /** @type {number} Monotonic spawn counter used to find the oldest particle. */
     this._seq = 0;
+    /** @type {number} Rotating start of the saturated-pool recycle sweep. */
+    this._recycleCursor = 0;
     /** @type {number} Instances packed by the last update, ready to draw. */
     this._drawAlpha = 0;
     /** @type {number} */
@@ -1083,6 +1132,7 @@ export class ParticleSystem {
 
     this.capacity = n;
     this.count = keep;
+    this._recycleCursor = 0;
 
     /** @type {Float32Array} Interleaved instance data in draw order. */
     this._instances = new Float32Array(n * STRIDE);
@@ -1300,8 +1350,9 @@ export class ParticleSystem {
   }
 
   /**
-   * Finds a free pool slot, recycling the oldest live particle of the same kind when the pool
-   * is saturated (falling back to the globally oldest particle).
+   * Finds a free pool slot. When the pool is saturated it recycles the oldest live particle of
+   * the same kind found in a rotating window of {@link RECYCLE_WINDOW} slots (falling back to
+   * the oldest of any kind in that window), which keeps the cost per spawn constant.
    * @param {number} kindId Kind being spawned.
    * @returns {number} Slot index.
    * @private
@@ -1311,11 +1362,18 @@ export class ParticleSystem {
     const kinds = this.kind;
     const seq = this.seq;
     const n = this.count;
+    // CLOCK-style sweep: look at RECYCLE_WINDOW slots starting where the last recycle stopped,
+    // so a long burst still spreads its victims over the whole pool without paying O(live)
+    // per spawn. Within the window the oldest particle of the same kind wins, falling back to
+    // the oldest of any kind.
+    const window = n < RECYCLE_WINDOW ? n : RECYCLE_WINDOW;
+    let i = this._recycleCursor;
+    if (i >= n || i < 0) i = 0;
     let best = -1;
     let bestSeq = Infinity;
-    let any = 0;
+    let any = i;
     let anySeq = Infinity;
-    for (let i = 0; i < n; i++) {
+    for (let k = 0; k < window; k++) {
       const s = seq[i];
       if (s < anySeq) {
         anySeq = s;
@@ -1325,7 +1383,10 @@ export class ParticleSystem {
         bestSeq = s;
         best = i;
       }
+      i++;
+      if (i >= n) i = 0;
     }
+    this._recycleCursor = i;
     const slot = best >= 0 ? best : any;
     if ((this.flags[slot] & FLAG_RAIN) !== 0 && this._rainAlive > 0) this._rainAlive--;
     this.stats.recycled++;
@@ -2559,25 +2620,32 @@ export class ParticleSystem {
     shader.setVec2('uNearFade', this.nearFadeStart, this.nearFadeRange);
     shader.setTexture('uAtlas', this.atlas, 0);
 
+    // uSunColor carries the full sun radiance (colour * intensity), exactly like the PBR pass,
+    // so the fog tint below matches; the 0.35 wrap-lighting factor lives in the shader.
     if (renderer && renderer.sun) {
       const sun = renderer.sun;
       const s = sun.intensity === undefined ? 1 : sun.intensity;
       shader.setVec3v('uSunDirection', sun.direction);
-      shader.setVec3('uSunColor', sun.color[0] * s * 0.35, sun.color[1] * s * 0.35, sun.color[2] * s * 0.35);
+      shader.setVec3('uSunColor', sun.color[0] * s, sun.color[1] * s, sun.color[2] * s);
       shader.setVec3v('uAmbientSky', sun.ambientSky);
       shader.setVec3v('uAmbientGround', sun.ambientGround);
     } else {
       shader.setVec3('uSunDirection', 0.42, 0.79, 0.45);
-      shader.setVec3('uSunColor', 1.1, 1.05, 0.95);
+      shader.setVec3('uSunColor', 3.4, 3.26, 3.03);
       shader.setVec3('uAmbientSky', 0.22, 0.30, 0.44);
       shader.setVec3('uAmbientGround', 0.10, 0.09, 0.08);
     }
+    // Height fog has to be fed with the renderer's own parameters, or a plume above the
+    // rooftops fogs differently from the geometry behind it.
     if (renderer && renderer.fog) {
-      shader.setVec3v('uFogColor', renderer.fog.color);
-      shader.setFloat('uFogDensity', renderer.fog.density);
+      const fog = renderer.fog;
+      shader.setVec3v('uFogColor', fog.color);
+      shader.setVec4('uFogParams', fog.density,
+        fog.heightFalloff === undefined ? 0 : fog.heightFalloff,
+        fog.skyBlend === undefined ? 0 : fog.skyBlend, 0);
     } else {
       shader.setVec3('uFogColor', 0.52, 0.60, 0.70);
-      shader.setFloat('uFogDensity', 0.0016);
+      shader.setVec4('uFogParams', 0.0016, 0.018, 0.7, 0);
     }
 
     if (soft) {
@@ -2625,8 +2693,11 @@ export class ParticleSystem {
       gl.activeTexture(gl.TEXTURE0);
     }
 
-    // Leave the pipeline in the renderer's baseline state.
+    // Leave the pipeline in the renderer's baseline state. The blend equation is untouched,
+    // but the function is not: leaving it at (ONE, ONE) hands additive blending to whatever
+    // enables GL_BLEND next (HUD overlay, screenshot composite, a later transparent pass).
     gl.disable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(true);
     gl.enable(gl.CULL_FACE);
   }
@@ -2757,6 +2828,7 @@ export class ParticleSystem {
   clear() {
     this.count = 0;
     this._rainAlive = 0;
+    this._recycleCursor = 0;
     this._drawAlpha = 0;
     this._drawAdditive = 0;
     this.stats.alive = 0;

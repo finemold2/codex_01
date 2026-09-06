@@ -1470,7 +1470,7 @@ export const MISSIONS = [
           v.driver = { missionAI: true, character: null };
           const ai = newDriver();
           ai.fireTimer = st.rng.range(1, 3);
-          st.attackers.push({ vehicle: v, ai, fireTimer: ai.fireTimer });
+          st.attackers.push({ vehicle: v, ai });
           if (typeof game.notify === 'function') game.notify('습격자 접근!', 'warn', 3);
           if (game.sfx && game.sfx.notify) game.sfx.notify('warn');
         }
@@ -1491,7 +1491,6 @@ export const MISSIONS = [
         // The gunman leans out and fires at the player, not at the client.
         driveByFire(game, at.vehicle, at.ai, dt,
           { weapon: 'smg', range: 45, rate: 0.55, spread: 3.2, damageMul: 0.35 });
-        at.fireTimer = at.ai.fireTimer;
       }
       return 'running';
     },
@@ -1686,7 +1685,7 @@ export const MISSIONS = [
           }
           const ai = newDriver();
           ai.fireTimer = st.rng.range(1.5, 3.5);
-          st.cars.push({ vehicle: v, ai, fireTimer: ai.fireTimer });
+          st.cars.push({ vehicle: v, ai });
         }
         if (game.weapons && typeof game.weapons.addAmmo === 'function') game.weapons.addAmmo('rifle', 120);
         if (typeof game.notify === 'function') game.notify(`${st.wave}차 공세!`, 'warn', 3);
@@ -1707,7 +1706,6 @@ export const MISSIONS = [
         driveTowards(c.vehicle, px, pz, 21, c.ai, dt);
         driveByFire(game, c.vehicle, c.ai, dt,
           { weapon: 'pistol', range: 40, rate: 0.85, spread: 2.8, damageMul: 0.4 });
-        c.fireTimer = c.ai.fireTimer;
       }
       return 'running';
     },

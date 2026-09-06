@@ -101,6 +101,76 @@ export default async function run({ canvas }) {
   for (let f = 0; f < 30; f++) { ps.update(1 / 60, cam); rt.bind(true); ps.render(cam); }
   out.checks.msPerFrame6000 = +((performance.now() - t0) / 30).toFixed(3);
 
+  // ---- height fog must be consumed and must match the scene integral ----------------------
+  // Reference: the same analytic integral render/shaders.js (GLSL_FOG) uses for geometry.
+  const fogAmount = (camY, worldY, dist, density, hf) => {
+    if (dist < 1e-4 || density <= 0) return 0;
+    let t;
+    if (hf < 1e-4) t = density * dist;
+    else {
+      const dy = worldY - camY;
+      const ec = Math.exp(-hf * camY);
+      if (Math.abs(dy) < 1e-3) t = density * dist * ec;
+      else t = density * dist * (ec - Math.exp(-hf * worldY)) / (hf * dy);
+    }
+    return 1 - Math.exp(-Math.max(t, 0));
+  };
+
+  // Fake renderer surface so the particle system reads density / heightFalloff / skyBlend.
+  const fakeFog = { color: new Float32Array([0, 0, 0]), density: 0.02, heightFalloff: 0, skyBlend: 0 };
+  const fakeSun = { direction: new Float32Array([0, 1, 0]), color: new Float32Array([1, 1, 1]),
+    intensity: 1, ambientSky: new Float32Array([0, 0, 0]), ambientGround: new Float32Array([0, 0, 0]) };
+  ps.renderer = { sun: fakeSun, fog: fakeFog, textures: null };
+
+  // Look up at a bright additive puff high above the camera: additive fog is a pure
+  // attenuation (color * (1 - fog)), so the read-back luma is a direct probe of `fog`.
+  const hiCam = new Camera(62, 0.12, 2000);
+  hiCam.position[0] = 0; hiCam.position[1] = 2; hiCam.position[2] = 0;
+  hiCam.yaw = 0; hiCam.pitch = Math.PI / 2 - 0.001;   // straight up
+  hiCam.update(1);
+  const puffY = 152;
+  const dist = puffY - 2;
+
+  const shootPuff = () => {
+    ps.clear();
+    ps.spawn({ kind: 'flash', x: 0, y: puffY, z: 0, life: 10, size: 60, sizeEnd: 60, sprite: 15,
+      alpha: 1, alphaEnd: 1, color: [1, 1, 1], colorEnd: [1, 1, 1], gravity: 0, drag: 0,
+      fadeIn: 0, soft: 0, emissive: 1, additive: 1, rotation: 0 });
+    ps.update(1 / 240, hiCam);
+    rt.bind(true);
+    ps.render(hiCam);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, rt.framebuffer);
+    gl.readPixels(W / 2, H / 2, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    return buf[0];
+  };
+
+  fakeFog.heightFalloff = 0;
+  const flatPix = shootPuff();
+  fakeFog.heightFalloff = 0.018;
+  const heightPix = shootPuff();
+  fakeFog.density = 0;
+  const noFogPix = shootPuff();
+
+  const flatFog = fogAmount(2, puffY, dist, 0.02, 0);
+  const heightFog = fogAmount(2, puffY, dist, 0.02, 0.018);
+  out.checks.fog = {
+    noFogPix, flatPix, heightPix,
+    expectFlatPix: Math.round(noFogPix * (1 - flatFog)),
+    expectHeightPix: Math.round(noFogPix * (1 - heightFog)),
+    flatFog: +flatFog.toFixed(4), heightFog: +heightFog.toFixed(4)
+  };
+  if (noFogPix < 40) bad('fog probe: reference puff too dim to measure (' + noFogPix + ')');
+  if (Math.abs(flatPix - noFogPix * (1 - flatFog)) > 6) {
+    bad('flat fog (heightFalloff=0) disagrees with the scene integral: got ' + flatPix +
+      ', expected ' + Math.round(noFogPix * (1 - flatFog)));
+  }
+  if (Math.abs(heightPix - noFogPix * (1 - heightFog)) > 6) {
+    bad('height fog disagrees with the scene integral: got ' + heightPix +
+      ', expected ' + Math.round(noFogPix * (1 - heightFog)));
+  }
+  if (heightPix <= flatPix) bad('heightFalloff is ignored: height fog must be thinner aloft');
+  ps.renderer = null;
+
   let e = gl.getError();
   if (e) bad('trailing gl error 0x' + e.toString(16));
   return out;
