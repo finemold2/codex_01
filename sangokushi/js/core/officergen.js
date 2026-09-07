@@ -11,6 +11,7 @@ import {
 
 let OFFICER_SEQ = 1;
 export function resetOfficerSeq() { OFFICER_SEQ = 1; }
+export function setOfficerSeq(n) { OFFICER_SEQ = Math.max(OFFICER_SEQ, n | 0); }
 
 // ---- 아키타입: 능력 분포의 뼈대 ---------------------------------------
 export const ARCHETYPES = [

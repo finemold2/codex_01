@@ -10,7 +10,7 @@ import { generateOfficer } from './officergen.js';
 
 /** 도시의 월간 금 수입 */
 export function cityIncome(g, c) {
-  let gold = Math.round(c.comm * 0.55 * (c.order / 100) * (0.7 + c.loyalty / 300));
+  let gold = Math.round(c.comm * 0.9 * (c.order / 100) * (0.7 + c.loyalty / 300));
   if (c.resource?.id === 'salt') gold = Math.round(gold * 1.2);
   if (c.resource?.id === 'silk') gold = Math.round(gold * 1.15);
   return gold;
@@ -18,7 +18,9 @@ export function cityIncome(g, c) {
 
 /** 가을 수확량 */
 export function cityHarvest(g, c) {
-  let food = Math.round(c.agri * 12 * (0.55 + c.loyalty / 250) * (0.6 + c.flood / Math.max(1, c.maxFlood) * 0.6));
+  //  개간한 만큼 거두어 한 해를 난다. 병사 하나가 한 달에 0.4를 먹으므로
+  //  농업 수치의 약 130배가 그 해의 소출이 된다.
+  let food = Math.round(c.agri * 130 * (0.55 + c.loyalty / 250) * (0.6 + c.flood / Math.max(1, c.maxFlood) * 0.6));
   if (c.resource?.id === 'rice') food = Math.round(food * 1.25);
   return food;
 }
@@ -27,8 +29,8 @@ export function cityHarvest(g, c) {
 export function cityUpkeep(g, c) {
   const offs = g.officersIn(c.id).filter(o => o.realm === c.realm);
   return {
-    food: Math.round(c.troops * 1.1 + offs.length * 40),
-    gold: Math.round(offs.length * 18 + c.troops * 0.02),
+    food: Math.round(c.troops * 0.4 + offs.length * 30),
+    gold: Math.round(offs.length * 20 + c.troops * 0.006),
   };
 }
 
@@ -116,6 +118,10 @@ export function advanceMonth(g, hooks = {}) {
       c.morale = Math.max(0, c.morale - 12);
       if (owned) report.logs.push(g.pushLog(`${c.name}의 병량이 바닥나 병사 ${lost.toLocaleString()}이(가) 흩어졌다.`, 'bad', { city: c.id }));
     }
+    // 창고 용량을 넘긴 병량은 쥐와 습기에 상한다
+    const store = Math.round(c.maxAgri * 300 + 20000);
+    if (c.food > store) c.food = store + Math.round((c.food - store) * 0.5);
+    c.food = Math.round(c.food * 0.995);
     // 사기·훈련 표류
     c.morale = Math.max(0, Math.min(100, c.morale - (rng.percent(40) ? 1 : 0)));
     c.train = Math.max(0, Math.min(100, c.train - (rng.percent(30) ? 1 : 0)));

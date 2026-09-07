@@ -26,12 +26,21 @@ export const AI_STYLES = [
 export const MONTH_NAMES = ['정월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
 export const SEASONS = ['봄','봄','여름','여름','여름','가을','가을','가을','겨울','겨울','겨울','봄'];
 
+/** 시드로부터 세계를 그대로 재현한다 (세이브 로드용) — build()와 난수 소비 순서가 같아야 한다 */
+export function rebuildWorld(seed, worldOpt) {
+  const rng = new RNG(seed);
+  rng.int(40);                        // 생성자의 rolledYear 자리
+  rng.range(30, 46);                  // build()의 rolledCityCount 자리
+  return generateWorld(rng, worldOpt);
+}
+
 export class Game {
   constructor(opt = {}) {
     this.seed = (opt.seed ?? (Date.now() ^ (Math.random() * 0xffffffff))) >>> 0;
     this.rng = new RNG(this.seed);
     this.opt = opt;
-    this.year = opt.year ?? (180 + this.rng.int(40));
+    const rolledYear = 180 + this.rng.int(40);   // 항상 굴려 난수 순서를 고정한다
+    this.year = opt.year ?? rolledYear;
     this.month = 0;
     this.turnNo = 0;
     this.log = [];
@@ -55,12 +64,17 @@ export class Game {
   build() {
     const rng = this.rng;
     resetOfficerSeq();
-    this.world = generateWorld(rng, {
-      cityCount: this.opt.cityCount ?? rng.range(30, 46),
+    // 세계 생성에 쓴 설정을 그대로 보관한다 — 세이브에서 같은 대륙을 재현하기 위해.
+    // 난수 소비 순서를 고정해야 하므로 기본값도 항상 한 번 굴린다.
+    const rolledCityCount = rng.range(30, 46);
+    this.worldOpt = {
+      cityCount: this.opt.cityCount ?? rolledCityCount,
       cols: 220, rows: 150,
-    });
+    };
+    this.world = generateWorld(rng, this.worldOpt);
     this.cities = this.world.cities;
     this.cityById = Object.fromEntries(this.cities.map(c => [c.id, c]));
+    this.provinces = this.world.provinces;
 
     // ── 무장 생성 ──
     const n = this.opt.officerCount ?? Math.round(this.cities.length * rng.range(5, 8));

@@ -200,6 +200,7 @@ export const LEGENDS = [
 
 // ------------------------------------------------------------------
 let ITEM_SEQ = 1;
+export function setItemSeq(n) { ITEM_SEQ = Math.max(ITEM_SEQ, n | 0); }
 
 function statLabel(k) {
   const e = Object.entries(STAT_KEYS).find(([, v]) => v === k);
