@@ -626,3 +626,181 @@ input.txt{background:#15110c;border:1px solid var(--line);border-radius:3px;padd
   .dt-stats{grid-template-columns:repeat(3,1fr)}
   .dt-grid{grid-template-columns:repeat(2,1fr)}
 }
+
+/* ============================================================
+   질감과 장식 — 종이결 · 금장 · 깊이
+   외부 이미지 없이 그라디언트만으로 만든다
+   ============================================================ */
+:root{
+  /* 미세한 종이결 (겹친 그라디언트로 노이즈를 흉내낸다) */
+  --paper-grain:
+    repeating-linear-gradient(0deg, rgba(255,255,255,.014) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(90deg, rgba(0,0,0,.020) 0 1px, transparent 1px 4px),
+    radial-gradient(circle at 22% 18%, rgba(255,240,210,.045), transparent 55%),
+    radial-gradient(circle at 78% 82%, rgba(255,225,180,.030), transparent 50%);
+  --silk:
+    repeating-linear-gradient(135deg, rgba(255,255,255,.012) 0 2px, transparent 2px 5px);
+}
+
+/* ---------- 패널 깊이 ---------- */
+.sidebar{
+  background-image: var(--paper-grain), var(--panel);
+  box-shadow: inset 1px 0 0 rgba(201,163,73,.18), inset 0 1px 0 rgba(255,240,210,.05);
+}
+.hud{
+  background-image:
+    var(--silk),
+    linear-gradient(180deg,#2a2118 0%,#1d1610 55%,#14100b 100%);
+  box-shadow: 0 2px 10px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,235,190,.10);
+}
+.bottombar{
+  background-image:
+    var(--silk),
+    linear-gradient(0deg,#2a2118 0%,#1d1610 55%,#14100b 100%);
+  box-shadow: 0 -2px 10px rgba(0,0,0,.5), inset 0 -1px 0 rgba(255,235,190,.08);
+}
+/* HUD 상·하단 금선 */
+.hud::after,.bottombar::before{
+  content:"";position:absolute;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(201,163,73,.55) 12%,rgba(201,163,73,.55) 88%,transparent);
+}
+.hud{position:relative}
+.hud::after{bottom:0}
+.bottombar{position:relative}
+.bottombar::before{top:0}
+
+/* ---------- 모달: 금장 모서리 ---------- */
+.modal{
+  background-image: var(--paper-grain), var(--panel);
+  box-shadow:
+    0 24px 60px rgba(0,0,0,.62),
+    0 0 0 1px rgba(201,163,73,.20),
+    inset 0 1px 0 rgba(255,238,200,.07);
+}
+.modal-title{
+  background:linear-gradient(180deg,rgba(201,163,73,.13),rgba(201,163,73,.02));
+  position:relative;
+}
+.modal-title::after{
+  content:"";position:absolute;left:14px;right:14px;bottom:-1px;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(201,163,73,.6),transparent);
+}
+/* 네 모서리 장식 */
+.modal::after{
+  content:"";position:absolute;inset:7px;pointer-events:none;border-radius:3px;
+  background:
+    linear-gradient(135deg,rgba(201,163,73,.5) 0 10px,transparent 10px) top left/16px 16px no-repeat,
+    linear-gradient(225deg,rgba(201,163,73,.5) 0 10px,transparent 10px) top right/16px 16px no-repeat,
+    linear-gradient(45deg,rgba(201,163,73,.5) 0 10px,transparent 10px) bottom left/16px 16px no-repeat,
+    linear-gradient(315deg,rgba(201,163,73,.5) 0 10px,transparent 10px) bottom right/16px 16px no-repeat;
+  -webkit-mask:
+    linear-gradient(135deg,#000 0 2px,transparent 2px) top left/16px 16px no-repeat,
+    linear-gradient(225deg,#000 0 2px,transparent 2px) top right/16px 16px no-repeat,
+    linear-gradient(45deg,#000 0 2px,transparent 2px) bottom left/16px 16px no-repeat,
+    linear-gradient(315deg,#000 0 2px,transparent 2px) bottom right/16px 16px no-repeat;
+  mask:
+    linear-gradient(135deg,#000 0 2px,transparent 2px) top left/16px 16px no-repeat,
+    linear-gradient(225deg,#000 0 2px,transparent 2px) top right/16px 16px no-repeat,
+    linear-gradient(45deg,#000 0 2px,transparent 2px) bottom left/16px 16px no-repeat,
+    linear-gradient(315deg,#000 0 2px,transparent 2px) bottom right/16px 16px no-repeat;
+}
+
+/* ---------- 버튼: 눌리는 느낌 ---------- */
+.btn{
+  box-shadow: 0 2px 0 rgba(0,0,0,.45), inset 0 1px 0 rgba(255,238,200,.10);
+  background-image: var(--silk), linear-gradient(180deg,#332619,#1e1710);
+}
+.btn:hover{
+  box-shadow: 0 2px 0 rgba(0,0,0,.45), inset 0 1px 0 rgba(255,238,200,.18), 0 0 14px rgba(201,163,73,.18);
+}
+.btn:active{ box-shadow: 0 0 0 rgba(0,0,0,.45), inset 0 2px 5px rgba(0,0,0,.5); }
+.btn.primary{
+  background-image: var(--silk), linear-gradient(180deg,#8c3529,#57211a);
+  box-shadow: 0 2px 0 rgba(0,0,0,.5), inset 0 1px 0 rgba(255,200,170,.18);
+}
+.btn.primary:hover{ box-shadow: 0 2px 0 rgba(0,0,0,.5), inset 0 1px 0 rgba(255,200,170,.26), 0 0 18px rgba(200,84,58,.30); }
+.btn.big{ letter-spacing:.08em }
+
+/* ---------- 도시 패널 머리 ---------- */
+.cp-head{
+  background:linear-gradient(90deg,rgba(255,255,255,.05),transparent 70%);
+  padding:6px 0 8px 11px;border-radius:0 4px 4px 0;
+}
+.cp-name{ text-shadow:0 2px 10px rgba(0,0,0,.6) }
+
+/* ---------- 무장 카드 ---------- */
+.off-card{
+  background-image: linear-gradient(160deg,rgba(255,255,255,.045),rgba(255,255,255,.012));
+  box-shadow: inset 0 1px 0 rgba(255,240,210,.05);
+}
+.off-card:hover{ box-shadow: inset 0 1px 0 rgba(255,240,210,.12), 0 4px 14px rgba(0,0,0,.35) }
+.oc-por .cvwrap{ box-shadow: 0 2px 8px rgba(0,0,0,.5) }
+
+/* ---------- 능력치 상자 ---------- */
+.dt-stat,.army-box,.info-row{
+  background-image: linear-gradient(180deg,rgba(255,255,255,.045),rgba(0,0,0,.22));
+  box-shadow: inset 0 1px 0 rgba(255,240,210,.06);
+}
+.dts-v .cur{ text-shadow:0 2px 12px rgba(0,0,0,.7) }
+.bar{ box-shadow: inset 0 1px 3px rgba(0,0,0,.55) }
+.bar-fill{ box-shadow: inset 0 1px 0 rgba(255,255,255,.28) }
+
+/* ---------- 타이틀 ---------- */
+.title-menu .btn.big{
+  border-color:rgba(201,163,73,.45);
+  backdrop-filter: blur(2px);
+}
+.title-inner::before{
+  content:"";position:absolute;inset:26px;pointer-events:none;
+  border:1px solid rgba(201,163,73,.12);
+  border-radius:2px;
+}
+
+/* ---------- 전투 화면 ---------- */
+.battle-header{
+  background-image: var(--silk), linear-gradient(180deg,#2a2118,#14100b);
+  box-shadow: 0 3px 14px rgba(0,0,0,.6);
+}
+.battle-side{
+  background-image: var(--paper-grain), var(--panel);
+  box-shadow: inset 1px 0 0 rgba(201,163,73,.18);
+}
+.act-btn{
+  background-image: var(--silk), linear-gradient(180deg,#332619,#1c1610);
+  box-shadow: 0 2px 0 rgba(0,0,0,.45), inset 0 1px 0 rgba(255,238,200,.10);
+}
+.act-btn:active{ box-shadow: inset 0 2px 5px rgba(0,0,0,.5) }
+.battle-canvas-wrap{
+  box-shadow: inset 0 0 90px rgba(0,0,0,.55);
+}
+
+/* ---------- 보고 · 연대기 ---------- */
+.rep-row{ background-image: linear-gradient(90deg,rgba(255,255,255,.035),transparent 60%) }
+.report-list .rep-row{ box-shadow: inset 0 1px 0 rgba(255,240,210,.04) }
+
+/* ---------- 군주 선택 카드 ---------- */
+.ruler-card{
+  background-image: var(--paper-grain), linear-gradient(160deg,rgba(255,255,255,.05),rgba(0,0,0,.28));
+  box-shadow: inset 0 1px 0 rgba(255,240,210,.06), 0 3px 12px rgba(0,0,0,.34);
+}
+.ruler-card:hover{ box-shadow: inset 0 1px 0 rgba(255,240,210,.14), 0 10px 26px rgba(0,0,0,.5) }
+.rc-flag{ text-shadow:0 1px 3px rgba(0,0,0,.5); box-shadow:0 2px 8px rgba(0,0,0,.4) }
+
+/* ---------- 일기토 ---------- */
+.duel-arena{
+  background:radial-gradient(ellipse at 50% 60%, rgba(201,163,73,.10), transparent 70%);
+  padding:8px 0;
+}
+.duel-bar{ box-shadow: inset 0 2px 5px rgba(0,0,0,.6) }
+.duel-clash{ text-shadow:0 0 28px rgba(255,214,120,.5) }
+
+/* ---------- 스크롤 영역 상·하단 페이드 ---------- */
+.cp-offs,.off-list,.report-list,.chronicle,.battle-log{
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 8px,#000 calc(100% - 8px),transparent 100%);
+  mask-image:linear-gradient(180deg,transparent 0,#000 8px,#000 calc(100% - 8px),transparent 100%);
+}
+
+/* ---------- 접근성: 모션 최소화 ---------- */
+@media (prefers-reduced-motion: reduce){
+  *{animation-duration:.01ms !important;transition-duration:.01ms !important}
+}
