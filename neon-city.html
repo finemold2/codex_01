@@ -8220,6 +8220,8 @@ class Input {
     if (!win || !doc) return;
     this.attached = true;
 
+    this._onWinFocus = () => { this._grabFocus(); };
+    win.addEventListener('focus', this._onWinFocus, false);
     win.addEventListener('keydown', this._onKeyDown, false);
     win.addEventListener('keyup', this._onKeyUp, false);
     win.addEventListener('mouseup', this._onMouseUp, false);
@@ -8262,6 +8264,7 @@ class Input {
     if (win) {
       win.removeEventListener('keydown', this._onKeyDown, false);
       win.removeEventListener('keyup', this._onKeyUp, false);
+      if (this._onWinFocus) win.removeEventListener('focus', this._onWinFocus, false);
       win.removeEventListener('mouseup', this._onMouseUp, false);
       win.removeEventListener('mousemove', this._onMouseMove, false);
       win.removeEventListener('blur', this._onBlur, false);
@@ -9178,6 +9181,12 @@ class Input {
   _handleMouseDown(e) {
     this._updateCanvasRect();
     this._updateMousePos(e);
+    // preventDefault() at the end of this handler cancels the browser's default action, which
+    // includes moving keyboard focus to what was clicked. Inside an embedded iframe that means a
+    // click on the game can never win the keyboard back once focus has moved to the host page:
+    // the mouse keeps working (pointer events are delivered by position) while every key press
+    // goes to the parent document. Take focus explicitly instead.
+    this._grabFocus();
     if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock(true);
     if (this._useDragLook()) {
       // Hold to look. The button is only reported as pressed on release, and only when the
@@ -9190,6 +9199,26 @@ class Input {
       this._setMouseButton(e.button, true);
     }
     if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * Pulls keyboard focus back into this document and onto the canvas.
+   *
+   * Safe to call on every press: focusing an already-focused element is a no-op, and both calls
+   * are wrapped because a cross-origin embedding may refuse `window.focus()`.
+   * @returns {void}
+   * @private
+   */
+  _grabFocus() {
+    try {
+      if (typeof document !== 'undefined' && !document.hasFocus() && typeof window !== 'undefined') {
+        window.focus();
+      }
+    } catch (err) { /* cross-origin embedding refused it; the canvas focus below still helps */ }
+    const canvas = this.canvas;
+    if (!canvas || typeof canvas.focus !== 'function') return;
+    if (typeof document !== 'undefined' && document.activeElement === canvas) return;
+    try { canvas.focus({ preventScroll: true }); } catch (err) { canvas.focus(); }
   }
 
   /**
@@ -9363,6 +9392,7 @@ class Input {
    */
   _handleTouchStart(e) {
     this._updateCanvasRect();
+    this._grabFocus();
     const list = e.changedTouches;
     for (let i = 0; i < list.length; i++) {
       const t = list[i];
@@ -63367,6 +63397,7 @@ class Game {
 
     // --- presentation ------------------------------------------------------------------------
     this._noticeLookScheme();
+    this._noticeFocusLoss();
     this._updateAdaptiveQuality(dt);
     this._updateCamera(sdt, false);
     this._updateAudio(sdt);
@@ -63375,6 +63406,23 @@ class Game {
     if (this.mapScreen.isOpen) this.mapScreen.update();
 
     this.input.endFrame();
+  }
+
+  /**
+   * Warns when the page loses keyboard focus.
+   *
+   * Embedded in an iframe, clicking anything outside the game (the surrounding page, another tab
+   * pane) sends every key press to the host document. The mouse keeps working, because pointer
+   * events are delivered by position, so the game looks alive while the keyboard is simply gone -
+   * which is baffling unless we say so. A click anywhere on the canvas takes focus back.
+   */
+  _noticeFocusLoss() {
+    if (typeof document === 'undefined' || typeof document.hasFocus !== 'function') return;
+    const has = document.hasFocus();
+    if (this._hadFocus === undefined) { this._hadFocus = has; return; }
+    if (has === this._hadFocus) return;
+    this._hadFocus = has;
+    if (!has) this.hud.notify('창이 포커스를 잃었습니다. 화면을 클릭하면 키보드 조작이 돌아옵니다.', 'warn', 6);
   }
 
   /**

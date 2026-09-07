@@ -442,6 +442,8 @@ export class Input {
     if (!win || !doc) return;
     this.attached = true;
 
+    this._onWinFocus = () => { this._grabFocus(); };
+    win.addEventListener('focus', this._onWinFocus, false);
     win.addEventListener('keydown', this._onKeyDown, false);
     win.addEventListener('keyup', this._onKeyUp, false);
     win.addEventListener('mouseup', this._onMouseUp, false);
@@ -484,6 +486,7 @@ export class Input {
     if (win) {
       win.removeEventListener('keydown', this._onKeyDown, false);
       win.removeEventListener('keyup', this._onKeyUp, false);
+      if (this._onWinFocus) win.removeEventListener('focus', this._onWinFocus, false);
       win.removeEventListener('mouseup', this._onMouseUp, false);
       win.removeEventListener('mousemove', this._onMouseMove, false);
       win.removeEventListener('blur', this._onBlur, false);
@@ -1400,6 +1403,12 @@ export class Input {
   _handleMouseDown(e) {
     this._updateCanvasRect();
     this._updateMousePos(e);
+    // preventDefault() at the end of this handler cancels the browser's default action, which
+    // includes moving keyboard focus to what was clicked. Inside an embedded iframe that means a
+    // click on the game can never win the keyboard back once focus has moved to the host page:
+    // the mouse keeps working (pointer events are delivered by position) while every key press
+    // goes to the parent document. Take focus explicitly instead.
+    this._grabFocus();
     if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock(true);
     if (this._useDragLook()) {
       // Hold to look. The button is only reported as pressed on release, and only when the
@@ -1412,6 +1421,26 @@ export class Input {
       this._setMouseButton(e.button, true);
     }
     if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * Pulls keyboard focus back into this document and onto the canvas.
+   *
+   * Safe to call on every press: focusing an already-focused element is a no-op, and both calls
+   * are wrapped because a cross-origin embedding may refuse `window.focus()`.
+   * @returns {void}
+   * @private
+   */
+  _grabFocus() {
+    try {
+      if (typeof document !== 'undefined' && !document.hasFocus() && typeof window !== 'undefined') {
+        window.focus();
+      }
+    } catch (err) { /* cross-origin embedding refused it; the canvas focus below still helps */ }
+    const canvas = this.canvas;
+    if (!canvas || typeof canvas.focus !== 'function') return;
+    if (typeof document !== 'undefined' && document.activeElement === canvas) return;
+    try { canvas.focus({ preventScroll: true }); } catch (err) { canvas.focus(); }
   }
 
   /**
@@ -1585,6 +1614,7 @@ export class Input {
    */
   _handleTouchStart(e) {
     this._updateCanvasRect();
+    this._grabFocus();
     const list = e.changedTouches;
     for (let i = 0; i < list.length; i++) {
       const t = list[i];

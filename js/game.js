@@ -572,6 +572,7 @@ export class Game {
 
     // --- presentation ------------------------------------------------------------------------
     this._noticeLookScheme();
+    this._noticeFocusLoss();
     this._updateAdaptiveQuality(dt);
     this._updateCamera(sdt, false);
     this._updateAudio(sdt);
@@ -580,6 +581,23 @@ export class Game {
     if (this.mapScreen.isOpen) this.mapScreen.update();
 
     this.input.endFrame();
+  }
+
+  /**
+   * Warns when the page loses keyboard focus.
+   *
+   * Embedded in an iframe, clicking anything outside the game (the surrounding page, another tab
+   * pane) sends every key press to the host document. The mouse keeps working, because pointer
+   * events are delivered by position, so the game looks alive while the keyboard is simply gone -
+   * which is baffling unless we say so. A click anywhere on the canvas takes focus back.
+   */
+  _noticeFocusLoss() {
+    if (typeof document === 'undefined' || typeof document.hasFocus !== 'function') return;
+    const has = document.hasFocus();
+    if (this._hadFocus === undefined) { this._hadFocus = has; return; }
+    if (has === this._hadFocus) return;
+    this._hadFocus = has;
+    if (!has) this.hud.notify('창이 포커스를 잃었습니다. 화면을 클릭하면 키보드 조작이 돌아옵니다.', 'warn', 6);
   }
 
   /**
