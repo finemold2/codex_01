@@ -8137,6 +8137,8 @@ class Input {
     this._dragMoved = 0;
     this._dragStartT = 0;
     this._firePulse = 0;
+    /** True when the in-flight pointer lock request came from a real user gesture. */
+    this._lockWasGesture = false;
 
     /** Digital button state, index-aligned with `PAD_BUTTON_CODES`. @type {Uint8Array} */
     this._padDown = new Uint8Array(PAD_BUTTON_CODES.length);
@@ -8293,8 +8295,9 @@ class Input {
    * failures are swallowed and retried on the next canvas click.
    * @returns {void}
    */
-  requestPointerLock() {
+  requestPointerLock(fromUserGesture = false) {
     const canvas = this.canvas;
+    this._lockWasGesture = !!fromUserGesture;
     if (!canvas || this.pointerLocked) return;
     if (typeof canvas.requestPointerLock !== 'function') return;
     const now = Input._now();
@@ -9175,7 +9178,7 @@ class Input {
   _handleMouseDown(e) {
     this._updateCanvasRect();
     this._updateMousePos(e);
-    if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock();
+    if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock(true);
     if (this._useDragLook()) {
       // Hold to look. The button is only reported as pressed on release, and only when the
       // gesture was a tap - otherwise turning the camera would fire the whole time.
@@ -9293,7 +9296,11 @@ class Input {
   _handlePointerLockError() {
     this.pointerLocked = false;
     this._lockCooldown = Input._now() + 1200;
-    // A refused lock is permanent for this embedding, so stop asking and switch look schemes.
+    // Only a request made from a real user gesture proves the embedding refuses pointer lock.
+    // Browsers routinely reject a PROGRAMMATIC re-lock - notably the one issued when the game
+    // resumes right after the player pressed Escape, since Escape is what released the lock.
+    // Treating that as permanent would silently drop mouse-look for the rest of the session.
+    if (!this._lockWasGesture) return;
     this.pointerLockAvailable = false;
     this.dragLook = true;
   }
@@ -63249,7 +63256,8 @@ class Game {
     this.setCameraMode('thirdPerson');
     this.weapons.giveWeapon('pistol', 60);
     this.weapons.switchTo('pistol');
-    if (!opts.skipPointerLock) this.input.requestPointerLock();
+    this.focusCanvas();
+    if (!opts.skipPointerLock) this.input.requestPointerLock(true);
     this._startAudio();
     this.hud.notify('네온 시티에 온 것을 환영합니다.', 'info', 4);
     this.hud.subtitle('노란 마커를 찾아 미션을 시작하세요.', 5);
@@ -63279,6 +63287,7 @@ class Game {
     this.paused = false;
     this.input.blocked = false;
     this.menu.hide();
+    this.focusCanvas();
     this.input.requestPointerLock();
     if (this.audio && this.audio.duck) this.audio.duck(1, 0.3);
   }
@@ -63290,6 +63299,25 @@ class Game {
     this.input.blocked = true;
     this.hud.hide();
     this.menu.showMain();
+  }
+
+  /**
+   * Returns keyboard focus to the canvas.
+   *
+   * Menu buttons take focus when clicked. Once the menu hides, focus would otherwise sit on a
+   * detached or hidden control - and inside an embedded iframe it can leave the game document
+   * altogether, which looks exactly like "the keyboard stopped working".
+   * @returns {void}
+   */
+  focusCanvas() {
+    const el = document.activeElement;
+    if (el && el !== document.body && typeof el.blur === 'function'
+      && this.dom && this.dom.menuRoot && this.dom.menuRoot.contains(el)) {
+      el.blur();
+    }
+    if (this.canvas && typeof this.canvas.focus === 'function') {
+      try { this.canvas.focus({ preventScroll: true }); } catch { this.canvas.focus(); }
+    }
   }
 
   resize() {

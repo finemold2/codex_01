@@ -162,6 +162,26 @@ export default async function run({ canvas }) {
     fb.detach();
   }
 
+  // --- a refused pointer lock must only be treated as permanent for a real user gesture -------
+  {
+    const pl = new Input(canvas, {});
+    pl.attach();
+    // Programmatic request (what game.resume() issues after Escape): browsers often reject it,
+    // but that says nothing about whether the embedding supports pointer lock.
+    pl.requestPointerLock(false);
+    pl._handlePointerLockError();
+    out.notes.push(`after programmatic lock failure: available=${pl.pointerLockAvailable} dragLook=${pl.dragLook}`);
+    if (pl.pointerLockAvailable === false) bad('a rejected programmatic re-lock permanently disabled mouse-look');
+    if (pl.dragLook) bad('a rejected programmatic re-lock switched to drag-look');
+    // Gesture-initiated request failing does prove the embedding refuses it.
+    pl.requestPointerLock(true);
+    pl._handlePointerLockError();
+    out.notes.push(`after gesture lock failure: available=${pl.pointerLockAvailable} dragLook=${pl.dragLook}`);
+    if (pl.pointerLockAvailable !== false) bad('a refused gesture lock did not fall back to drag-look');
+    if (!pl.dragLook) bad('drag-look never engaged after a refused gesture lock');
+    pl.detach();
+  }
+
   input.detach();
   return out;
 }

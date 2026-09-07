@@ -461,7 +461,8 @@ export class Game {
     this.setCameraMode('thirdPerson');
     this.weapons.giveWeapon('pistol', 60);
     this.weapons.switchTo('pistol');
-    if (!opts.skipPointerLock) this.input.requestPointerLock();
+    this.focusCanvas();
+    if (!opts.skipPointerLock) this.input.requestPointerLock(true);
     this._startAudio();
     this.hud.notify('네온 시티에 온 것을 환영합니다.', 'info', 4);
     this.hud.subtitle('노란 마커를 찾아 미션을 시작하세요.', 5);
@@ -491,6 +492,7 @@ export class Game {
     this.paused = false;
     this.input.blocked = false;
     this.menu.hide();
+    this.focusCanvas();
     this.input.requestPointerLock();
     if (this.audio && this.audio.duck) this.audio.duck(1, 0.3);
   }
@@ -502,6 +504,25 @@ export class Game {
     this.input.blocked = true;
     this.hud.hide();
     this.menu.showMain();
+  }
+
+  /**
+   * Returns keyboard focus to the canvas.
+   *
+   * Menu buttons take focus when clicked. Once the menu hides, focus would otherwise sit on a
+   * detached or hidden control - and inside an embedded iframe it can leave the game document
+   * altogether, which looks exactly like "the keyboard stopped working".
+   * @returns {void}
+   */
+  focusCanvas() {
+    const el = document.activeElement;
+    if (el && el !== document.body && typeof el.blur === 'function'
+      && this.dom && this.dom.menuRoot && this.dom.menuRoot.contains(el)) {
+      el.blur();
+    }
+    if (this.canvas && typeof this.canvas.focus === 'function') {
+      try { this.canvas.focus({ preventScroll: true }); } catch { this.canvas.focus(); }
+    }
   }
 
   resize() {

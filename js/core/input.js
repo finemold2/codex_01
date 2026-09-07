@@ -359,6 +359,8 @@ export class Input {
     this._dragMoved = 0;
     this._dragStartT = 0;
     this._firePulse = 0;
+    /** True when the in-flight pointer lock request came from a real user gesture. */
+    this._lockWasGesture = false;
 
     /** Digital button state, index-aligned with `PAD_BUTTON_CODES`. @type {Uint8Array} */
     this._padDown = new Uint8Array(PAD_BUTTON_CODES.length);
@@ -515,8 +517,9 @@ export class Input {
    * failures are swallowed and retried on the next canvas click.
    * @returns {void}
    */
-  requestPointerLock() {
+  requestPointerLock(fromUserGesture = false) {
     const canvas = this.canvas;
+    this._lockWasGesture = !!fromUserGesture;
     if (!canvas || this.pointerLocked) return;
     if (typeof canvas.requestPointerLock !== 'function') return;
     const now = Input._now();
@@ -1397,7 +1400,7 @@ export class Input {
   _handleMouseDown(e) {
     this._updateCanvasRect();
     this._updateMousePos(e);
-    if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock();
+    if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock(true);
     if (this._useDragLook()) {
       // Hold to look. The button is only reported as pressed on release, and only when the
       // gesture was a tap - otherwise turning the camera would fire the whole time.
@@ -1515,7 +1518,11 @@ export class Input {
   _handlePointerLockError() {
     this.pointerLocked = false;
     this._lockCooldown = Input._now() + 1200;
-    // A refused lock is permanent for this embedding, so stop asking and switch look schemes.
+    // Only a request made from a real user gesture proves the embedding refuses pointer lock.
+    // Browsers routinely reject a PROGRAMMATIC re-lock - notably the one issued when the game
+    // resumes right after the player pressed Escape, since Escape is what released the lock.
+    // Treating that as permanent would silently drop mouse-look for the rest of the session.
+    if (!this._lockWasGesture) return;
     this.pointerLockAvailable = false;
     this.dragLook = true;
   }
