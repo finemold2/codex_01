@@ -1,22 +1,23 @@
 {
-  "name": "RunClub · 러닝 트래커",
-  "short_name": "RunClub",
-  "description": "GPS로 거리, 페이스, 시간, 칼로리를 실시간 기록하는 러닝 트래커",
+  "name": "NEON CITY — 오픈월드 액션",
+  "short_name": "NEON CITY",
+  "description": "브라우저에서 바로 실행되는 3D 오픈월드 액션 게임. 순수 WebGL2 + Web Audio, 무설치·무의존성.",
   "start_url": "./index.html",
-  "display": "standalone",
-  "orientation": "portrait",
-  "background_color": "#0b0c10",
-  "theme_color": "#0b0c10",
-  "lang": "ko",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#05070d",
+  "theme_color": "#05070d",
+  "categories": ["games", "entertainment"],
   "icons": [
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%230b0c10'/%3E%3Ctext x='96' y='140' font-size='120' text-anchor='middle'%3E%F0%9F%8F%83%3C/text%3E%3C/svg%3E",
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='40' fill='%2305070d'/%3E%3Cpath d='M42 138V54h21l36 54V54h21v84h-21L63 84v54z' fill='%2300e5ff'/%3E%3C/svg%3E",
       "sizes": "192x192",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='110' fill='%230b0c10'/%3E%3Ctext x='256' y='370' font-size='320' text-anchor='middle'%3E%F0%9F%8F%83%3C/text%3E%3C/svg%3E",
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='110' fill='%2305070d'/%3E%3Cpath d='M112 368V144h56l96 144V144h56v224h-56l-96-144v144z' fill='%2300e5ff'/%3E%3C/svg%3E",
       "sizes": "512x512",
       "type": "image/svg+xml",
       "purpose": "any maskable"
