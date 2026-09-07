@@ -30,6 +30,16 @@ import { Menu } from './ui/menu.js';
 import { MapScreen } from './ui/map.js';
 
 const BUILD = 'v1.0.0';
+/** Quality presets from cheapest to most expensive, for the adaptive step-down. */
+const QUALITY_ORDER = ['low', 'medium', 'high', 'ultra'];
+/** Korean labels for the same presets. */
+const QUALITY_LABEL = { low: '낮음', medium: '보통', high: '높음', ultra: '울트라' };
+/** Sustained frame rate below which the renderer drops a quality step. */
+const ADAPTIVE_FPS_FLOOR = 40;
+/** Seconds the frame rate must stay below the floor before stepping down. */
+const ADAPTIVE_FPS_SECONDS = 4;
+/** Grace period after starting, so load hitches never trigger a downgrade. */
+const ADAPTIVE_WARMUP = 3;
 const SAVE_KEY = 'neoncity.save';
 
 const _v = vec3.create();
@@ -541,6 +551,7 @@ export class Game {
 
     // --- presentation ------------------------------------------------------------------------
     this._noticeLookScheme();
+    this._updateAdaptiveQuality(dt);
     this._updateCamera(sdt, false);
     this._updateAudio(sdt);
     this.renderer.particles.update(sdt, this.camera);
@@ -548,6 +559,30 @@ export class Game {
     if (this.mapScreen.isOpen) this.mapScreen.update();
 
     this.input.endFrame();
+  }
+
+  /**
+   * Drops one graphics preset when the frame rate stays low.
+   *
+   * The default is 'high', which assumes a discrete GPU; on integrated graphics the shadow
+   * cascades, SSAO and bloom are enough to halve the frame rate. Step down (never up, so it cannot
+   * oscillate) and say so, leaving the settings screen in charge afterwards.
+   * @param {number} dt Real seconds since the last frame.
+   */
+  _updateAdaptiveQuality(dt) {
+    if (this.paused || !this.renderer || !this.renderer.quality) return;
+    this._playTime = (this._playTime || 0) + dt;
+    if (this._playTime < ADAPTIVE_WARMUP || this._fps <= 0) return;
+    const idx = QUALITY_ORDER.indexOf(this.renderer.quality.name);
+    if (idx <= 0) return;
+    this._lowFpsTimer = this._fps < ADAPTIVE_FPS_FLOOR ? (this._lowFpsTimer || 0) + dt : 0;
+    if (this._lowFpsTimer < ADAPTIVE_FPS_SECONDS) return;
+    this._lowFpsTimer = 0;
+    const next = QUALITY_ORDER[idx - 1];
+    this.renderer.setQuality(next);
+    this._applyArtDirection();
+    if (this.menu && this.menu.settings) this.menu.settings.quality = next;
+    this.hud.notify(`성능을 위해 그래픽 품질을 '${QUALITY_LABEL[next]}'(으)로 낮췄습니다. 설정에서 되돌릴 수 있습니다.`, 'warn', 6);
   }
 
   /**

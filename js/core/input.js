@@ -343,6 +343,18 @@ export class Input {
         || document.body.mozRequestPointerLock || document.body.webkitRequestPointerLock));
     /** True while the drag-to-look fallback is the active look scheme. @type {boolean} */
     this.dragLook = false;
+    /**
+     * Extra look gain for drag-to-look. A locked pointer can travel forever, but a drag stops at
+     * the window edge, so the same gain per pixel makes turning feel far too slow.
+     * @type {number}
+     */
+    this.dragSensitivity = 3.2;
+    /**
+     * Drag-to-look moves the world under the finger/cursor: dragging right turns the view left,
+     * the way dragging a map does. A locked pointer keeps the usual mouse-look direction.
+     * @type {boolean}
+     */
+    this.dragInvertX = true;
     this._dragBtn = -1;
     this._dragMoved = 0;
     this._dragStartT = 0;
@@ -1442,7 +1454,8 @@ export class Input {
       const ddx = this.mouseX - px;
       const ddy = this.mouseY - py;
       this._dragMoved += Math.abs(ddx) + Math.abs(ddy);
-      this.injectMouseDelta(ddx, ddy);
+      const gain = this.dragSensitivity;
+      this.injectMouseDelta((this.dragInvertX ? -ddx : ddx) * gain, ddy * gain);
       return;
     }
     let dx = e.movementX || 0;

@@ -137,8 +137,13 @@ export default async function run({ canvas }) {
     for (let i = 1; i <= 8; i++) at('mousemove', 100 + i * 10, 100, 0, 1);
     fb.update(1 / 60);
     const d = fb.consumeMouseDelta({ x: 0, y: 0 });
-    out.notes.push(`drag-look: 80px drag -> ${d.x.toFixed(3)} rad`);
+    out.notes.push(`drag-look: 80px drag right -> ${d.x.toFixed(3)} rad (gain ${fb.dragSensitivity}, invertX ${fb.dragInvertX})`);
     if (Math.abs(d.x) < 0.05) bad(`drag-to-look produced no camera movement (${d.x})`);
+    // game.js applies `camera.yaw -= delta.x`, so dragging RIGHT must yield a NEGATIVE delta for
+    // the view to swing LEFT (drag-the-world), which is what the inverted axis is for.
+    if (fb.dragInvertX && d.x >= 0) bad(`dragging right should give a negative look delta, got ${d.x.toFixed(3)}`);
+    // A drag of 80 px should turn a useful amount, not a sliver.
+    if (Math.abs(d.x) < 0.35) bad(`drag-to-look is too slow: 80 px only turned ${Math.abs(d.x).toFixed(3)} rad`);
     if (fb.isDown('fire')) bad('dragging to look also held the fire button');
     at('mouseup', 180, 100);
     fb.update(1 / 60);
