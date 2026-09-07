@@ -540,6 +540,7 @@ export class Game {
     if (this.world && this.world.update) this.world.update(sdt, this.time.hours, this.camera);
 
     // --- presentation ------------------------------------------------------------------------
+    this._noticeLookScheme();
     this._updateCamera(sdt, false);
     this._updateAudio(sdt);
     this.renderer.particles.update(sdt, this.camera);
@@ -547,6 +548,18 @@ export class Game {
     if (this.mapScreen.isOpen) this.mapScreen.update();
 
     this.input.endFrame();
+  }
+
+  /**
+   * Some embeddings (an iframe without `allow="pointer-lock"`, for instance) refuse pointer lock.
+   * core/input.js falls back to drag-to-look there; tell the player once, since the controls
+   * screen describes the locked-pointer scheme.
+   */
+  _noticeLookScheme() {
+    if (this._lookSchemeNoticed || !this.input) return;
+    if (this.input.pointerLockAvailable) return;
+    this._lookSchemeNoticed = true;
+    this.hud.notify('마우스 잠금을 쓸 수 없는 환경입니다. 드래그로 시점을 돌리고, 짧게 클릭해 사격하세요.', 'warn', 8);
   }
 
   _handleGlobalKeys() {

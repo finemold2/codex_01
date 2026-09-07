@@ -11,6 +11,13 @@ python3 -m http.server 8000
 # 브라우저에서 http://localhost:8000 접속 → 캔버스를 클릭하면 마우스 조작이 잠깁니다
 ```
 
+**단일 파일 버전** — `neon-city.html` 하나만 있으면 서버 없이 더블클릭으로 바로 실행됩니다
+(31개 모듈을 하나로 묶은 2.3MB 파일, 외부 요청 0건). 다시 만들려면:
+
+```bash
+node tools/bundle.mjs            # -> neon-city.html
+```
+
 ---
 
 ## 📸 스크린샷

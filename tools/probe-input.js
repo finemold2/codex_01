@@ -118,6 +118,45 @@ export default async function run({ canvas }) {
   for (let i = 0; i < 20000; i++) { input.update(1 / 60); input.axis('moveX'); input.isDown('fire'); input.endFrame(); }
   out.notes.push(`20000 update+endFrame cycles in ${(performance.now() - t0).toFixed(1)} ms`);
 
+  // --- drag-to-look fallback (pointer lock refused, e.g. an iframe without allow="pointer-lock")
+  {
+    const fb = new Input(canvas, {});
+    fb.attach();
+    fb.pointerLockAvailable = false;
+    fb.dragLook = true;
+    const rect = canvas.getBoundingClientRect();
+    const at = (type, x, y, button = 0, buttons = 1) => {
+      const ev = new MouseEvent(type, {
+        clientX: rect.left + x, clientY: rect.top + y, button, buttons, bubbles: true, cancelable: true,
+      });
+      (type === 'mousedown' ? canvas : window).dispatchEvent(ev);
+    };
+
+    // A drag must turn the camera and must NOT fire.
+    at('mousedown', 100, 100);
+    for (let i = 1; i <= 8; i++) at('mousemove', 100 + i * 10, 100, 0, 1);
+    fb.update(1 / 60);
+    const d = fb.consumeMouseDelta({ x: 0, y: 0 });
+    out.notes.push(`drag-look: 80px drag -> ${d.x.toFixed(3)} rad`);
+    if (Math.abs(d.x) < 0.05) bad(`drag-to-look produced no camera movement (${d.x})`);
+    if (fb.isDown('fire')) bad('dragging to look also held the fire button');
+    at('mouseup', 180, 100);
+    fb.update(1 / 60);
+    if (fb.isDown('fire')) bad('releasing a look-drag fired the weapon');
+    fb.endFrame();
+
+    // A tap must fire.
+    at('mousedown', 300, 300);
+    at('mouseup', 301, 300);
+    fb.update(1 / 60);
+    const fired = fb.isDown('fire') || fb.justPressed('fire');
+    out.notes.push(`drag-look: tap -> fire=${fired}`);
+    if (!fired) bad('a quick click did not fire in drag-look mode');
+    fb.endFrame(); fb.update(1 / 60); fb.endFrame(); fb.update(1 / 60);
+    if (fb.isDown('fire')) bad('the synthetic fire press was never released');
+    fb.detach();
+  }
+
   input.detach();
   return out;
 }

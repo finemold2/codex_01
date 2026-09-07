@@ -19,6 +19,10 @@ const MOUSE_RADIANS_PER_PIXEL = 0.0022;
 
 /** Single-event movement clamp, kills the Chrome pointer-lock spike bug. @type {number} */
 const MAX_MOUSE_DELTA = 200;
+/** Movement below this many pixels still counts as a click rather than a look-drag. */
+const DRAG_TAP_PIXELS = 7;
+/** ...and only when the button was held for less than this long. */
+const DRAG_TAP_MS = 300;
 
 /** Radius in CSS pixels for a fully deflected virtual touch stick. @type {number} */
 const TOUCH_STICK_RADIUS = 68;
@@ -328,6 +332,21 @@ export class Input {
     // ---------------------------------------------------------------- mouse internals
     /** Digital mouse button state, index-aligned with `MOUSE_CODES`. @type {Uint8Array} */
     this._mouseDown = new Uint8Array(MOUSE_CODES.length);
+    /**
+     * False once the browser refuses pointer lock (some embeddings, such as an iframe without
+     * `allow="pointer-lock"`, never grant it). The game then falls back to drag-to-look so mouse
+     * aiming still works: hold a button and move to turn, and a quick click fires.
+     * @type {boolean}
+     */
+    this.pointerLockAvailable = typeof document !== 'undefined'
+      && !!(document.body && (document.body.requestPointerLock
+        || document.body.mozRequestPointerLock || document.body.webkitRequestPointerLock));
+    /** True while the drag-to-look fallback is the active look scheme. @type {boolean} */
+    this.dragLook = false;
+    this._dragBtn = -1;
+    this._dragMoved = 0;
+    this._dragStartT = 0;
+    this._firePulse = 0;
 
     /** Digital button state, index-aligned with `PAD_BUTTON_CODES`. @type {Uint8Array} */
     this._padDown = new Uint8Array(PAD_BUTTON_CODES.length);
@@ -548,6 +567,8 @@ export class Input {
    * @returns {void}
    */
   endFrame() {
+    // A drag-look tap presses the fire button synthetically; release it once the game has seen it.
+    if (this._firePulse > 0 && --this._firePulse === 0) this._setMouseButton(0, false);
     if (this._pressed.size) this._pressed.clear();
     if (this._released.size) this._released.clear();
     if (this._touchPressed.size) this._touchPressed.clear();
@@ -1364,9 +1385,26 @@ export class Input {
   _handleMouseDown(e) {
     this._updateCanvasRect();
     this._updateMousePos(e);
-    if (this.pointerLockOnClick && !this.blocked) this.requestPointerLock();
-    this._setMouseButton(e.button, true);
+    if (this.pointerLockOnClick && !this.blocked && this.pointerLockAvailable) this.requestPointerLock();
+    if (this._useDragLook()) {
+      // Hold to look. The button is only reported as pressed on release, and only when the
+      // gesture was a tap - otherwise turning the camera would fire the whole time.
+      this._dragBtn = e.button;
+      this._dragMoved = 0;
+      this._dragStartT = Input._now();
+      if (e.button !== 0) this._setMouseButton(e.button, true);
+    } else {
+      this._setMouseButton(e.button, true);
+    }
     if (e.cancelable) e.preventDefault();
+  }
+
+  /**
+   * @returns {boolean} True when look should come from dragging rather than a locked pointer.
+   * @private
+   */
+  _useDragLook() {
+    return !this.pointerLocked && (this.dragLook || !this.pointerLockAvailable);
   }
 
   /**
@@ -1376,6 +1414,15 @@ export class Input {
    */
   _handleMouseUp(e) {
     this._updateMousePos(e);
+    if (this._dragBtn === e.button) {
+      const tap = this._dragMoved < DRAG_TAP_PIXELS && (Input._now() - this._dragStartT) < DRAG_TAP_MS;
+      this._dragBtn = -1;
+      this._dragMoved = 0;
+      if (e.button === 0) {
+        if (tap) { this._setMouseButton(0, true); this._firePulse = 2; }
+        return;
+      }
+    }
     this._setMouseButton(e.button, false);
   }
 
@@ -1385,8 +1432,19 @@ export class Input {
    * @private
    */
   _handleMouseMove(e) {
+    const px = this.mouseX;
+    const py = this.mouseY;
     this._updateMousePos(e);
-    if (!this.pointerLocked) return;
+    if (!this.pointerLocked) {
+      if (this._dragBtn < 0 || !this._useDragLook()) return;
+      // Drag-look is position based: derive the delta from client coordinates rather than
+      // movementX/Y, which is 0 on synthetic events and unreliable outside a pointer lock.
+      const ddx = this.mouseX - px;
+      const ddy = this.mouseY - py;
+      this._dragMoved += Math.abs(ddx) + Math.abs(ddy);
+      this.injectMouseDelta(ddx, ddy);
+      return;
+    }
     let dx = e.movementX || 0;
     let dy = e.movementY || 0;
     // Chrome occasionally emits a single enormous delta right after the lock is granted.
@@ -1444,6 +1502,9 @@ export class Input {
   _handlePointerLockError() {
     this.pointerLocked = false;
     this._lockCooldown = Input._now() + 1200;
+    // A refused lock is permanent for this embedding, so stop asking and switch look schemes.
+    this.pointerLockAvailable = false;
+    this.dragLook = true;
   }
 
   /**
